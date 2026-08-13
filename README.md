@@ -1,9 +1,9 @@
 # TU Expense Tracker
 
-An Android app that turns Indian bank SMS alerts into a categorized expense ledger. It
-parses incoming spend and credit alerts, stores them in a local SQLite database, and
-learns a merchant → category mapping so that categorizing a merchant once applies to
-every past *and* future transaction from that merchant.
+An Android app that turns bank SMS alerts into a categorized expense ledger. It parses
+incoming spend and credit alerts, stores them in a local SQLite database, and learns a
+merchant → category mapping so that categorizing a merchant once applies to every past
+*and* future transaction from that merchant.
 
 Everything stays on the device. There is no backend and no network call.
 
@@ -26,24 +26,36 @@ incoming SMS ─► SmsParser ─► merchant_mappings lookup ─► transaction
 top to bottom, first match wins. Each one is a single end-to-end anchored regex with
 named groups (`amount`, `instrument`, `merchant`, `date`, optional `ref`).
 
-**Verified** — built from real message bodies:
+Nothing in the parser recognises a bank. The account or card text is *captured* into
+`payment_type` and never matched on, so one template serves every issuer that sends that
+wording. `BANK`, `MERCHANT`, `PAYEE` and `PAYER` below stand in for whatever the message
+actually carries.
 
-| Template | Shape | Direction |
+**Confirmed** — matched against real message bodies:
+
+| Wording it keys on | Shape | Direction |
 |---|---|---|
-| `yes_card` | `INR 204.00 spent on YES BANK Card X2858 @MERCHANT 13-08-2026 09:21:35 am` | debit |
-| `hdfc_card` | `Spent Rs.122.02 On HDFC Bank Card 6824 At MERCHANT On 2026-08-13:07:19:26` | debit |
-| `hdfc_upi_sent` | `Sent Rs.18.00` / `From HDFC Bank A/C *0444` / `To PAYEE` / `On 10/08/26` / `Ref 213313774670` | debit |
-| `icici_card` | `INR 160.00 spent using ICICI Bank Card XX8008 on 11-Aug-26 on MERCHANT.` | debit |
+| merchant after an `@` | `INR 204.00 spent on BANK Card X2858 @MERCHANT 13-08-2026 09:21:35 am` | debit |
+| opens with "Spent", merchant after " At " | `Spent Rs.122.02 On BANK Card 6824 At MERCHANT On 2026-08-13:07:19:26` | debit |
+| "Sent … From … To …", one field per line | `Sent Rs.18.00` / `From BANK A/C *0444` / `To PAYEE` / `On 10/08/26` / `Ref 213313774670` | debit |
+| "spent using", merchant after the date | `INR 160.00 spent using BANK Card XX8008 on 11-Aug-26 on MERCHANT.` | debit |
 
-**Unverified** — written from each issuer's documented wording, *not* from a real
+**Unconfirmed** — written from wording that is common across issuers, *not* from a real
 message. Replace them with the genuine body when one turns up:
-`sbi_upi_debit`, `axis_debit`, `kotak_card_debit`, `generic_credit_to`,
-`generic_received_in`, `sbi_credit`.
+
+| Wording it keys on | Shape | Direction |
+|---|---|---|
+| "debited by … trf to" | `A/C X1234 debited by 150.0 on date 11Aug26 trf to PAYEE Refno 123456789` | debit |
+| "debited from … at" | `INR 500.00 debited from A/c no. XX1234 on 11-08-26 12:30:45 at MERCHANT.` | debit |
+| "spent on … at", date mid-sentence | `Rs.500.00 spent on BANK Card X1234 on 11-Aug-26 at MERCHANT.` | debit |
+| "credited to … from" | `Rs.500.00 credited to BANK A/c XX0444 from PAYER on 11/08/26 Ref 123456789` | credit |
+| "Received … in … from" | `Received Rs.500.00 in BANK A/c XX0444 from PAYER on 11/08/26 Ref 123456789` | credit |
+| "is credited with … by" | `Your A/c XX1234 is credited with Rs.500 on 11-08-26 by PAYER` | credit |
 
 Notes on the design:
 
 - **Direction comes from the matched template, never from a keyword scan.** This is
-  load-bearing: `Spent Rs.39791.72 From HDFC Bank Card x2227 At PZCREDIT9772829` is a
+  load-bearing: `Spent Rs.39791.72 From BANK Card x2227 At PZCREDIT9772829` is a
   *debit* whose merchant name happens to contain `CREDIT`. Searching the body for
   "credit" would book Rs.39,791.72 as income. There is a test for exactly this.
 - Anchoring every pattern end to end removes the old "which rupee figure is the
@@ -53,9 +65,9 @@ Notes on the design:
 - A template that matches but yields nonsense (unparseable amount, empty merchant,
   out-of-range date) falls through to the next template instead of rejecting the
   whole message, which is what the old all-or-nothing `parse()` did.
-- `hdfc_upi_sent` is multi-line. Dart's `.` does not cross a newline but `\s` does, so
-  the captures are `[^\n]*?` joined by `\s+` — the same pattern also matches the
-  flattened single-line form you get from pasting.
+- The account-to-payee transfer alert is multi-line. Dart's `.` does not cross a newline
+  but `\s` does, so the captures are `[^\n]*?` joined by `\s+` — the same pattern also
+  matches the flattened single-line form you get from pasting.
 - One `_parseDate` covers every shape seen: `dd-MM-yyyy hh:mm:ss am/pm`,
   `yyyy-MM-dd:HH:mm:ss`, `dd/MM/yy`, `dd-MM-yy HH:mm:ss`, `dd-MMM-yy` and `ddMMMyy`.
   Two-digit years pivot to `2000 + yy`. Ranges are checked explicitly because
@@ -175,14 +187,15 @@ looked plausible: `PZCREDIT9772829` staying a debit, and the trailing `Bal` /
 To exercise the live path end to end on an emulator:
 
 ```bash
-adb emu sms send YESBNK "INR 204.00 spent on YES BANK Card X2858 @UPI_GEORGE EGG CENTRE 13-08-2026 09:21:35 am. Avl Lmt INR 281,496.08"
-adb emu sms send HDFCBK "Spent Rs.122.02 On HDFC Bank Card 6824 At INNOVATIVE RETAIL CONC On 2026-08-13:07:19:26."
-adb emu sms send ICICIB "INR 160.00 spent using ICICI Bank Card XX8008 on 11-Aug-26 on AMAZON PAY IN G. Avl Limit: INR 3,99,614.00."
+# one per confirmed template; the issuer text is captured verbatim, never matched on
+adb emu sms send BANKSMS "INR 204.00 spent on BANK Card X2858 @UPI_GEORGE EGG CENTRE 13-08-2026 09:21:35 am. Avl Lmt INR 281,496.08"
+adb emu sms send BANKSMS "Spent Rs.122.02 On BANK Card 6824 At INNOVATIVE RETAIL CONC On 2026-08-13:07:19:26."
+adb emu sms send BANKSMS "INR 160.00 spent using BANK Card XX8008 on 11-Aug-26 on AMAZON PAY IN G. Avl Limit: INR 3,99,614.00."
 ```
 
 The transaction should appear on the dashboard within a second or two. Newlines don't
-survive `adb emu sms send`, so for HDFC's one-field-per-line UPI alerts use the **Add
-SMS** FAB and paste the body instead. To inspect what was actually stored:
+survive `adb emu sms send`, so for the one-field-per-line transfer alerts use the
+**Add SMS** FAB and paste the body instead. To inspect what was actually stored:
 
 ```bash
 adb shell run-as com.tu.expense.manager cat databases/expense_manager.db > /tmp/e.db
@@ -201,11 +214,11 @@ side; uninstall the old one to drop its ledger.
   that arrive while the app is closed are missed until the next inbox scan. Background
   delivery needs a top-level `@pragma('vm:entry-point')` handler with its own database
   connection.
-- **Six of the ten templates are unverified.** `sbi_upi_debit`, `axis_debit`,
-  `kotak_card_debit` and the three credit templates were written from each issuer's
-  documented wording rather than a real message, so their exact phrasing may be wrong.
-  A template that doesn't match simply means the message is ignored rather than
-  mis-parsed, so the failure mode is a missing transaction, not a wrong one.
+- **Six of the ten templates are unconfirmed.** Everything under the "Unconfirmed"
+  table was written from wording common across issuers rather than from a real message,
+  so the exact phrasing may be wrong. A template that doesn't match simply means the
+  message is ignored rather than mis-parsed, so the failure mode is a missing
+  transaction, not a wrong one.
 - **No credit alert has been seen yet.** All three credit templates are guesses. Paste
   a real one through the FAB to check it lands under "Received".
 - **Unmatched messages are silent.** There is no diagnostics view listing bodies that
