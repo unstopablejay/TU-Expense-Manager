@@ -18,7 +18,7 @@ val keystoreProperties = Properties().apply {
 }
 
 android {
-    namespace = "com.TU.expense.manager"
+    namespace = "com.tu.expense.manager"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -28,7 +28,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.TU.expense.manager"
+        applicationId = "com.tu.expense.manager"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
