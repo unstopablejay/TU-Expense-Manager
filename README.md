@@ -139,14 +139,14 @@ The transaction should appear on the dashboard within a second or two. To inspec
 was actually stored:
 
 ```bash
-adb shell run-as com.TU.expense.manager cat databases/expense_manager.db > /tmp/e.db
+adb shell run-as com.tu.expense.manager cat databases/expense_manager.db > /tmp/e.db
 sqlite3 /tmp/e.db "SELECT t.amount, t.merchant, c.name FROM transactions t JOIN categories c ON c.id = t.category_id;"
 ```
 
 The database filename is still `expense_manager.db` — it predates the rename and is left
 alone deliberately, since `getDatabasesPath()` resolves it under whatever the current
 `applicationId` is. The `applicationId` itself moved from `com.example.expense_manager` to
-`com.TU.expense.manager`, so a device carrying the old build will show both apps side by
+`com.tu.expense.manager`, so a device carrying the old build will show both apps side by
 side; uninstall the old one to drop its ledger.
 
 ## Limitations
