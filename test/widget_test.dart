@@ -1,4 +1,4 @@
-import 'package:expense_manager/main.dart';
+import 'package:tu_expense_tracker/main.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

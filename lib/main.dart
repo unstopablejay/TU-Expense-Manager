@@ -12,7 +12,7 @@ import 'package:another_telephony/telephony.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const ExpenseManagerApp());
+  runApp(const TuExpenseTrackerApp());
 }
 
 /// A real YES Bank credit card alert, used to prefill the manual-entry dialog
@@ -430,13 +430,13 @@ class SmsSource {
 // 4. UI
 // ---------------------------------------------------------------------------
 
-class ExpenseManagerApp extends StatelessWidget {
-  const ExpenseManagerApp({super.key});
+class TuExpenseTrackerApp extends StatelessWidget {
+  const TuExpenseTrackerApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Expense Manager',
+      title: 'TU Expense Tracker',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,

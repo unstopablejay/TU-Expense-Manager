@@ -1,5 +1,5 @@
-name: expense_manager
-description: "A new Flutter project."
+name: tu_expense_tracker
+description: "TU Expense Tracker — turns bank SMS alerts into a categorized expense ledger."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
