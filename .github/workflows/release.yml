@@ -1,9 +1,11 @@
 name: Release APK
 
 # Tag a version to publish it:  git tag v1.0.0 && git push origin v1.0.0
+# Tag globs are case-sensitive, so both cases are listed — a `V1.0.0` tag would
+# silently match nothing against a `v*` pattern alone.
 on:
   push:
-    tags: ['v*']
+    tags: ['v*', 'V*']
   workflow_dispatch:
 
 permissions:
@@ -54,11 +56,26 @@ jobs:
 
       - run: flutter build apk --release
 
+      # Manual runs have no tag to release against, so keep the APK reachable.
+      - name: Upload APK as a build artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+
+      # Idempotent: attaches to an existing release for this tag rather than
+      # failing, so a re-run can repair a release that is missing its APK.
       - name: Publish release with APK
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            build/app/outputs/flutter-apk/app-release.apk \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$APK" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$APK" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
