@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon, used from API 26 up. The launcher masks these two layers to
+     whatever shape the device uses, so the badge in the foreground is drawn at
+     the 72dp safe zone of the 108dp canvas and can never be clipped. Devices on
+     API 24-25 fall back to the flattened PNG in mipmap-*/ic_launcher.png. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>
