@@ -260,6 +260,172 @@ void main() {
     });
   });
 
+  group('AppVersion', () {
+    test('parses the three shapes the app has to reconcile', () {
+      // The git tag, package_info_plus, and pubspec.yaml respectively.
+      expect(AppVersion.parse('v1.2.3'), const AppVersion(1, 2, 3));
+      expect(AppVersion.parse('1.2.3'), const AppVersion(1, 2, 3));
+      expect(AppVersion.parse('1.2.3+7'), const AppVersion(1, 2, 3));
+      expect(AppVersion.parse('V1.2.3'), const AppVersion(1, 2, 3));
+    });
+
+    test('missing parts read as zero', () {
+      expect(AppVersion.parse('2'), const AppVersion(2, 0, 0));
+      expect(AppVersion.parse('v2.1'), const AppVersion(2, 1, 0));
+    });
+
+    test('returns null when there is no number to compare', () {
+      expect(AppVersion.parse(''), isNull);
+      expect(AppVersion.parse('nightly'), isNull);
+    });
+
+    // The whole reason versions are not compared as strings.
+    test('1.10.0 is newer than 1.9.0', () {
+      expect(
+        const AppVersion(1, 10, 0).compareTo(const AppVersion(1, 9, 0)),
+        greaterThan(0),
+      );
+    });
+
+    test('orders by major, then minor, then patch', () {
+      expect(const AppVersion(2, 0, 0).compareTo(const AppVersion(1, 9, 9)),
+          greaterThan(0));
+      expect(const AppVersion(1, 2, 0).compareTo(const AppVersion(1, 2, 1)),
+          lessThan(0));
+      expect(const AppVersion(1, 2, 3).compareTo(const AppVersion(1, 2, 3)), 0);
+    });
+  });
+
+  group('isUpdateAvailable', () {
+    test('only a strictly newer release counts', () {
+      expect(
+        isUpdateAvailable(
+          current: const AppVersion(1, 1, 0),
+          latest: const AppVersion(1, 2, 0),
+        ),
+        isTrue,
+      );
+      expect(
+        isUpdateAvailable(
+          current: const AppVersion(1, 1, 0),
+          latest: const AppVersion(1, 1, 0),
+        ),
+        isFalse,
+      );
+    });
+
+    // A local build running ahead of the last release must not be told to
+    // "update" itself backwards.
+    test('an older release is not an update', () {
+      expect(
+        isUpdateAvailable(
+          current: const AppVersion(1, 2, 0),
+          latest: const AppVersion(1, 1, 0),
+        ),
+        isFalse,
+      );
+    });
+
+    test('an unreadable version on either side stays quiet', () {
+      expect(
+        isUpdateAvailable(current: null, latest: const AppVersion(9, 0, 0)),
+        isFalse,
+      );
+      expect(
+        isUpdateAvailable(current: const AppVersion(1, 0, 0), latest: null),
+        isFalse,
+      );
+    });
+  });
+
+  group('isCheckDue', () {
+    final now = DateTime(2026, 8, 14, 12);
+
+    test('a first run has never checked, so it checks', () {
+      expect(isCheckDue(lastChecked: null, now: now), isTrue);
+    });
+
+    test('waits out the interval', () {
+      expect(
+        isCheckDue(lastChecked: now.subtract(const Duration(days: 6)), now: now),
+        isFalse,
+      );
+      expect(
+        isCheckDue(lastChecked: now.subtract(const Duration(days: 7)), now: now),
+        isTrue,
+      );
+    });
+
+    test('a stamp in the future means the clock moved, not a check to skip', () {
+      expect(
+        isCheckDue(lastChecked: now.add(const Duration(days: 30)), now: now),
+        isTrue,
+      );
+    });
+  });
+
+  group('AppRelease.fromJson', () {
+    Map<String, dynamic> payload({
+      String tag = 'v1.2.0',
+      List<Object?>? assets,
+    }) =>
+        <String, dynamic>{
+          'tag_name': tag,
+          'body': 'Fixed the thing.',
+          'assets': assets ??
+              <Object?>[
+                <String, dynamic>{
+                  'name': 'app-release.apk',
+                  'browser_download_url': 'https://example.test/app.apk',
+                },
+              ],
+        };
+
+    test('reads the tag, notes and APK asset', () {
+      final release = AppRelease.fromJson(payload());
+
+      expect(release, isNotNull);
+      expect(release!.version, const AppVersion(1, 2, 0));
+      expect(release.tag, 'v1.2.0');
+      expect(release.notes, 'Fixed the thing.');
+      expect(release.apkUrl, 'https://example.test/app.apk');
+    });
+
+    test('picks the APK out of a release with several assets', () {
+      final release = AppRelease.fromJson(payload(assets: <Object?>[
+        <String, dynamic>{
+          'name': 'mapping.txt',
+          'browser_download_url': 'https://example.test/mapping.txt',
+        },
+        <String, dynamic>{
+          'name': 'TU-Expense-Tracker-1.2.0.APK',
+          'browser_download_url': 'https://example.test/app.apk',
+        },
+      ]));
+
+      expect(release!.apkUrl, 'https://example.test/app.apk');
+    });
+
+    // A tag whose build failed still leaves a Release behind. Offering it would
+    // announce an update that cannot be downloaded.
+    test('a release with no APK is not offered', () {
+      expect(AppRelease.fromJson(payload(assets: <Object?>[])), isNull);
+      expect(
+        AppRelease.fromJson(payload(assets: <Object?>[
+          <String, dynamic>{
+            'name': 'notes.txt',
+            'browser_download_url': 'https://example.test/notes.txt',
+          },
+        ])),
+        isNull,
+      );
+    });
+
+    test('a tag with no version in it is not offered', () {
+      expect(AppRelease.fromJson(payload(tag: 'nightly')), isNull);
+    });
+  });
+
   group('applyFilters', () {
     ExpenseTxn txn({
       required int id,
