@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The backdrop the badge sits on, sampled from the artwork itself so the
+         adaptive icon's background layer meets the foreground with no seam. -->
+    <color name="ic_launcher_background">#EEEBE8</color>
+</resources>
