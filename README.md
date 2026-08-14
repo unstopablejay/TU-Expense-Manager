@@ -85,14 +85,20 @@ Notes on the design:
 
 ### Database
 
-Schema version 2. Three tables, created on first launch (`AppDatabase`):
+Schema version 4. Five tables, created on first launch (`AppDatabase`):
 
 ```sql
-categories        (id INTEGER PK, name TEXT UNIQUE COLLATE NOCASE)
-merchant_mappings (merchant_name TEXT PK COLLATE NOCASE, category_id INTEGER FK)
-transactions      (id INTEGER PK, amount REAL, payment_type TEXT,
-                   merchant TEXT COLLATE NOCASE, date INTEGER, category_id INTEGER FK,
-                   direction TEXT DEFAULT 'debit', reference TEXT DEFAULT '')
+categories           (id INTEGER PK, name TEXT UNIQUE COLLATE NOCASE)
+merchant_mappings    (merchant_name TEXT PK COLLATE NOCASE, category_id INTEGER FK)
+transactions         (id INTEGER PK, amount REAL, payment_type TEXT,
+                      merchant TEXT COLLATE NOCASE, date INTEGER, category_id INTEGER FK,
+                      direction TEXT DEFAULT 'debit', reference TEXT DEFAULT '')
+deleted_transactions (amount REAL, merchant TEXT COLLATE NOCASE, date INTEGER,
+                      direction TEXT, reference TEXT DEFAULT '',
+                      payment_type TEXT, category_id INTEGER,
+                      original_id INTEGER, deleted_at INTEGER,
+                      PRIMARY KEY (amount, merchant, date, direction, reference))
+app_meta             (key TEXT PK, value TEXT)
 ```
 
 - `date` is stored as epoch milliseconds.
@@ -106,6 +112,18 @@ transactions      (id INTEGER PK, amount REAL, payment_type TEXT,
   a timestamp; `reference` is in it because UPI alerts have no clock time, so two
   genuine same-day payments of the same amount to the same payee are otherwise
   indistinguishable.
+- `deleted_transactions` holds the natural key of every transaction deleted on purpose,
+  and its first five columns mirror that index exactly, `COLLATE NOCASE` included, so
+  the two keys compare identically. The index above only stops the *same* SMS being
+  imported twice — the message itself is still in the inbox, so without a tombstone any
+  later rescan would faithfully bring a deleted row back. `insertParsed` checks it
+  before writing. Those five columns alone are the primary key; `payment_type`,
+  `category_id`, `original_id` and `deleted_at` are payload, carried so the Deleted
+  section can display a deleted transaction and restore it exactly — same card, same
+  category, same row id — without the original still being in memory.
+- `app_meta` is key/value scratch space, currently just `last_scanned_sms_date` — the
+  `date` of the newest inbox message already processed. Its absence is what makes the
+  next scan a full one.
 - Seed categories: Uncategorized, Grocery, Food, Fuel, Shopping, Bills & Utilities,
   Travel, Entertainment, Health. New ones can be added from the picker.
 
@@ -115,6 +133,24 @@ transactions      (id INTEGER PK, amount REAL, payment_type TEXT,
 index over the wider tuple. Every v1 row predates any notion of spend-vs-receive, so it
 is a debit with no reference — exactly what the two column defaults supply, which is
 why no backfill statement is needed.
+
+#### Migration v2 → v3
+
+Creates `deleted_transactions` and `app_meta`. Both start empty and no backfill is
+needed: nothing has been deleted yet, and an absent watermark is exactly the state that
+triggers a full first scan — so an upgraded install reads its whole inbox once, then
+goes incremental like a fresh one.
+
+#### Migration v3 → v4
+
+Adds `payment_type`, `category_id`, `original_id` and `deleted_at` to
+`deleted_transactions`. All four are nullable because SQLite cannot
+`ADD COLUMN ... NOT NULL` without a default, and a v3 tombstone genuinely has no value
+for them — v3 recorded only enough to keep a row deleted, not enough to bring it back.
+Such a tombstone still lists in the Deleted section and still restores; it just comes
+back as `Unknown` / Uncategorized under a fresh id. The branch is keyed on
+`oldVersion == 3` rather than `< 4`, since a database arriving from v2 or earlier gets
+the full v4 table from `CREATE TABLE` and must not then be altered.
 
 ### Categorization
 
@@ -159,16 +195,93 @@ AGP 8+. The fork is API-identical; only the import differs.
 
 ## Usage
 
-- **Grant SMS permission** on first launch to receive alerts live.
-- **Scan SMS inbox** (toolbar) imports matching alerts already on the device.
-- **Add SMS** (FAB) pastes a message straight into the parser — prefilled with a
-  sample, so the whole pipeline can be exercised without SMS permission.
+Two tabs over one ledger, on a bottom navigation bar.
+
+### Dashboard — read-only
+
+Everything that happened, spend and received together, with two filters pinned under
+the app bar:
+
+- **Category** — only categories at least one transaction actually uses, so the
+  dropdown can never offer a choice that filters to nothing. The category *picker* still
+  offers the full list; it has to, since assigning is how a category first gets used.
+- **Card / account** — one entry per distinct `payment_type`, e.g. `YES BANK Card
+  X2858`, `HDFC Bank A/C *0444`.
+
+Both lists are derived from the loaded transactions rather than queried, so they stay in
+step for free — and both are derived from the *whole* ledger, not the filtered view, so
+narrowing to one card cannot empty the category dropdown underneath a selection already
+made in it. The filters are ANDed and the summary totals reflect them. When they exclude
+everything, a **Clear filters** button appears (distinct from the empty state shown when
+there are no transactions at all).
+
+Tapping a row here switches to the Expenses tab and opens an actions sheet for that
+transaction — amount, card, date, category, over **Change category** and **Delete** — so
+spotting something wrong on the Dashboard doesn't mean hunting for it by hand.
+
+### Expenses — the working tab
+
+The same ledger, editable:
+
 - **Tap any transaction** to set its category. Uncategorized rows are flagged in the
   error color; any row can be tapped to correct a wrong category.
+- **Swipe a row left to delete it**, with an **Undo** action on the snackbar. Delete is
+  permanent by design: a tombstone is recorded so the transaction is not re-imported by
+  a later scan, and Undo lifts that tombstone and restores the row under its original
+  id. Credits are listed here too, so a mis-parsed one can be removed.
+- **Long-press to mark**, then tap to mark more. The app bar becomes a selection bar
+  with a count, select-all, and delete; the whole marked set goes in one SQL
+  transaction, so a bulk delete is all or nothing, and Undo brings back exactly those
+  rows. While marking, tap-to-categorize and swipe-to-delete are both suspended so a
+  stray gesture can't act outside the flow, and Back leaves selection before it leaves
+  the app.
+
+  Bulk delete confirms first. That dialog is not ceremony: the selection bar's delete
+  icon occupies exactly the screen position the overflow menu does otherwise, so a reach
+  for the menu can land on it, and unlike a swipe nothing about tapping an app bar icon
+  reads as destructive. A single swipe-delete still goes straight through, since the
+  gesture is deliberate and the Undo snackbar catches it.
+- **Add payment** (FAB) is a placeholder — entering a payment by hand is separate work.
+- **Paste an SMS** (toolbar) feeds a message straight into the parser, prefilled with a
+  sample, so the pipeline can be exercised without SMS permission.
+
+### Deleted transactions
+
+**Deleted transactions** in the overflow menu opens every tombstone, newest first, each
+with a **Restore** action. Restoring lifts the tombstone *and* re-inserts the row, which
+is why it needs no separate "make importable again" action — those are the same thing.
+Rows written before schema v4 restore as `Unknown` / Uncategorized under a fresh id,
+because that is genuinely all v3 recorded.
+
+**Long-press to mark** works here too, for bulk restore: the app bar becomes the same
+selection bar with a count, select-all and restore, and the whole marked set goes back
+in one SQL transaction. The per-row Restore button is hidden while marking, so there is
+only ever one way to act. Marks are keyed by natural key rather than row id, since a
+tombstone has no id of its own, and a reload drops marks for anything restored
+elsewhere in the meantime.
 
 The header shows **Total spent** always, and adds **Received** plus **Net** once any
 credit has been recorded. The category breakdown counts debits only — a refund is not
 spending. Credit rows carry a `+` and a green amount in the list.
+
+### Scanning
+
+- **First launch** reads the entire inbox automatically once the SMS permission is
+  granted — no button press needed.
+- **Every launch after that** looks only at messages newer than the last one processed,
+  using a real `WHERE` on the SMS content provider rather than re-reading everything.
+- The watermark advances to the newest message *actually seen*, not to the clock, so a
+  skewed device time cannot strand real messages behind it. It only moves forwards, and
+  only after a scan that completed — a scan that failed or was denied leaves it alone so
+  the next attempt covers the same ground.
+- **Check for new SMS** (toolbar) runs that same incremental pass on demand.
+- **Rescan all messages** (overflow menu) ignores the watermark and re-reads the whole
+  inbox. Safe to run at any time — duplicates are caught by the natural-key index and
+  deleted rows by their tombstones. Worth doing after the parser learns a new template.
+
+Alerts arriving while the app is open are still picked up live by the foreground
+listener. It does not touch the watermark; a message it already inserted may be re-read
+by the next scan, where the natural key drops it.
 
 ## Testing
 
@@ -184,6 +297,13 @@ statement alerts and promos. Two cases specifically guard against regressions th
 looked plausible: `PZCREDIT9772829` staying a debit, and the trailing `Bal` /
 `Avl Limit:` figures never being mistaken for the amount.
 
+It also covers `applyFilters` and `categoriesInUse` — the dashboard's filter predicate
+and its category list — both pure top-level functions precisely so they can be tested
+without a database behind them. The database and widget layers have no automated
+coverage: `AppDatabase` needs the real sqflite plugin, and `sqflite_common_ffi` is
+deliberately not a dependency. Delete, restore, the migrations and the scan watermark
+are verified by hand, below.
+
 To exercise the live path end to end on an emulator:
 
 ```bash
@@ -194,13 +314,37 @@ adb emu sms send BANKSMS "INR 160.00 spent using BANK Card XX8008 on 11-Aug-26 o
 ```
 
 The transaction should appear on the dashboard within a second or two. Newlines don't
-survive `adb emu sms send`, so for the one-field-per-line transfer alerts use the
-**Add SMS** FAB and paste the body instead. To inspect what was actually stored:
+survive `adb emu sms send`, so for the one-field-per-line transfer alerts use
+**Paste an SMS** in the Expenses toolbar instead. To inspect what was actually stored:
 
 ```bash
 adb shell run-as com.tu.expense.manager cat databases/expense_manager.db > /tmp/e.db
 sqlite3 /tmp/e.db "SELECT t.amount, t.merchant, t.direction, t.reference, c.name FROM transactions t JOIN categories c ON c.id = t.category_id;"
+sqlite3 /tmp/e.db "PRAGMA user_version; SELECT * FROM app_meta; SELECT * FROM deleted_transactions;"
 ```
+
+Worth walking by hand, since none of it is covered by `flutter test`:
+
+- **Upgrade, not reinstall.** Install the previous build, scan a few alerts, then
+  install this one over the top: the rows must survive and `user_version` must read 4.
+- **Delete sticks.** Delete a transaction whose SMS is still in the inbox, then run
+  **Rescan all messages** — the strongest test, since it ignores the watermark. It must
+  not come back, and must be counted as skipped.
+- **Undo.** Swipe, tap Undo, confirm the row returns with its category intact and that a
+  later rescan doesn't duplicate it — the tombstone has to be gone.
+- **Bulk delete.** Long-press, mark three, delete, confirm: three tombstones sharing one
+  `deleted_at`, all three rows gone, and Undo restoring exactly those three. Cancelling
+  the dialog must change nothing *and* leave the marks in place.
+- **Restore round trip.** Delete a row, open **Deleted transactions**, restore it, and
+  confirm it comes back with its `payment_type`, `category_id` and `original_id` intact
+  — that payload is the entire point of the v4 columns. Then rescan-all and confirm the
+  restored row is not duplicated.
+- **Bulk restore.** Long-press in the Deleted section, mark several, restore: all come
+  back under their original ids, the unmarked ones stay deleted, and the selection
+  clears.
+- **Incremental scanning.** Relaunch with no new SMS: nothing imported, watermark
+  unchanged. Then `adb emu sms send` one alert and relaunch: only that one is processed
+  and `last_scanned_sms_date` advances.
 
 The database filename is still `expense_manager.db` — it predates the rename and is left
 alone deliberately, since `getDatabasesPath()` resolves it under whatever the current
@@ -211,16 +355,17 @@ side; uninstall the old one to drop its ledger.
 ## Limitations
 
 - **Foreground only.** The listener runs with `listenInBackground: false`, so alerts
-  that arrive while the app is closed are missed until the next inbox scan. Background
-  delivery needs a top-level `@pragma('vm:entry-point')` handler with its own database
-  connection.
+  that arrive while the app is closed are not seen until the next launch — which now
+  catches up automatically, so the gap is invisible unless you never open the app.
+  Background delivery needs a top-level `@pragma('vm:entry-point')` handler with its own
+  database connection.
 - **Six of the ten templates are unconfirmed.** Everything under the "Unconfirmed"
   table was written from wording common across issuers rather than from a real message,
   so the exact phrasing may be wrong. A template that doesn't match simply means the
   message is ignored rather than mis-parsed, so the failure mode is a missing
   transaction, not a wrong one.
 - **No credit alert has been seen yet.** All three credit templates are guesses. Paste
-  a real one through the FAB to check it lands under "Received".
+  a real one through **Paste an SMS** to check it lands under "Received".
 - **Unmatched messages are silent.** There is no diagnostics view listing bodies that
   look like money but matched no template, so a wrong guess above is invisible until
   you notice a transaction missing.
