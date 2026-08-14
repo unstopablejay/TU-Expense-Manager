@@ -483,6 +483,61 @@ class ExpenseTxn {
   bool get isCredit => direction == TxnDirection.credit;
 }
 
+/// A row of `deleted_transactions`, joined to its category name. Everything the
+/// Deleted screen needs to show a transaction and to put it back.
+class DeletedTxn {
+  const DeletedTxn({
+    required this.amount,
+    required this.merchant,
+    required this.date,
+    required this.direction,
+    required this.reference,
+    required this.paymentType,
+    required this.categoryId,
+    required this.originalId,
+    required this.deletedAt,
+    required this.categoryName,
+  });
+
+  /// Every column after the natural key is nullable: tombstones written before
+  /// schema v4 recorded only enough to stay deleted.
+  factory DeletedTxn.fromMap(Map<String, Object?> map) => DeletedTxn(
+        amount: (map['amount'] as num).toDouble(),
+        merchant: map['merchant'] as String,
+        date: DateTime.fromMillisecondsSinceEpoch(map['date'] as int),
+        direction: (map['direction'] as String?) == 'credit'
+            ? TxnDirection.credit
+            : TxnDirection.debit,
+        reference: (map['reference'] as String?) ?? '',
+        paymentType: (map['payment_type'] as String?) ?? 'Unknown',
+        categoryId: map['category_id'] as int?,
+        originalId: map['original_id'] as int?,
+        deletedAt: map['deleted_at'] == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(map['deleted_at'] as int),
+        categoryName:
+            (map['category_name'] as String?) ?? AppDatabase.uncategorized,
+      );
+
+  final double amount;
+  final String merchant;
+  final DateTime date;
+  final TxnDirection direction;
+  final String reference;
+  final String paymentType;
+  final int? categoryId;
+  final int? originalId;
+  final DateTime? deletedAt;
+  final String categoryName;
+
+  bool get isCredit => direction == TxnDirection.credit;
+
+  /// Identity for list keys — the natural key, which is what the table is keyed
+  /// on and therefore unique across tombstones.
+  String get key => '$amount|$merchant|${date.millisecondsSinceEpoch}'
+      '|${direction.name}|$reference';
+}
+
 class AppDatabase {
   AppDatabase._();
 
@@ -512,7 +567,7 @@ class AppDatabase {
     final path = p.join(await getDatabasesPath(), 'expense_manager.db');
     return openDatabase(
       path,
-      version: 2,
+      version: 4,
       onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
@@ -552,6 +607,8 @@ class AppDatabase {
     ''');
 
     await db.execute(_createNaturalKeyIndex);
+    await db.execute(_createDeletedTransactions);
+    await db.execute(_createAppMeta);
 
     final batch = db.batch();
     for (final name in _defaultCategories) {
@@ -574,8 +631,46 @@ class AppDatabase {
         ON transactions (amount, merchant, date, direction, reference)
     ''';
 
+  /// A record that this exact transaction was deleted on purpose. The natural
+  /// key index above only stops the *same* SMS being imported twice — the
+  /// message itself is still sitting in the inbox, so without a tombstone any
+  /// later rescan would faithfully bring a deleted row back.
+  ///
+  /// The first five columns mirror the natural key exactly, `COLLATE NOCASE` on
+  /// `merchant` included, so the two keys compare identically. They alone are
+  /// the primary key; the rest is payload carried so the Deleted screen can
+  /// rebuild — and restore — a transaction from this row without help.
+  static const String _createDeletedTransactions = '''
+      CREATE TABLE deleted_transactions (
+        amount       REAL NOT NULL,
+        merchant     TEXT NOT NULL COLLATE NOCASE,
+        date         INTEGER NOT NULL,
+        direction    TEXT NOT NULL,
+        reference    TEXT NOT NULL DEFAULT '',
+        payment_type TEXT,
+        category_id  INTEGER,
+        original_id  INTEGER,
+        deleted_at   INTEGER,
+        PRIMARY KEY (amount, merchant, date, direction, reference)
+      )
+    ''';
+
+  /// Key/value scratch space. Currently holds only the inbox scan watermark.
+  static const String _createAppMeta = '''
+      CREATE TABLE app_meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    ''';
+
   /// v1 predates any notion of spend-vs-receive, so every existing row is a
   /// debit with no reference — which is exactly what the column defaults say.
+  /// v2 predates delete and incremental scanning; both new tables start empty,
+  /// and an absent watermark is precisely what makes the next scan a full one.
+  /// v3 recorded only enough about a deleted row to keep it deleted; the four
+  /// v4 columns are what let it be listed and restored later. They must stay
+  /// nullable — SQLite cannot `ADD COLUMN ... NOT NULL` without a default — so
+  /// a tombstone written by v3 restores into Uncategorized under a fresh id.
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await db.execute(
@@ -588,6 +683,22 @@ class AppDatabase {
       );
       await db.execute('DROP INDEX IF EXISTS idx_transactions_natural_key');
       await db.execute(_createNaturalKeyIndex);
+    }
+    if (oldVersion < 3) {
+      await db.execute(_createDeletedTransactions);
+      await db.execute(_createAppMeta);
+    }
+    if (oldVersion == 3) {
+      // Only a database that was actually created at v3 needs these; one coming
+      // from v2 or earlier just got the full v4 table above.
+      for (final column in <String>[
+        'payment_type TEXT',
+        'category_id INTEGER',
+        'original_id INTEGER',
+        'deleted_at INTEGER',
+      ]) {
+        await db.execute('ALTER TABLE deleted_transactions ADD COLUMN $column');
+      }
     }
   }
 
@@ -652,12 +763,28 @@ class AppDatabase {
 
   /// Looks the merchant up in `merchant_mappings`; falls back to
   /// 'Uncategorized' when this merchant has never been classified.
-  /// Returns the new row id, or 0 when the SMS was a duplicate.
+  /// Returns the new row id, or 0 when the SMS was a duplicate or names a
+  /// transaction the user has deleted.
   ///
   /// Credits go through the same mapping lookup on purpose — a refund from
   /// AMAZON landing back in Shopping is the useful behaviour.
   Future<int> insertParsed(ParsedSms sms) async {
     final db = await database;
+
+    final tombstone = await db.query(
+      'deleted_transactions',
+      columns: <String>['merchant'],
+      where: _naturalKeyWhere,
+      whereArgs: <Object?>[
+        sms.amount,
+        sms.merchant,
+        sms.date.millisecondsSinceEpoch,
+        sms.direction.name,
+        sms.reference,
+      ],
+      limit: 1,
+    );
+    if (tombstone.isNotEmpty) return 0;
 
     final mapping = await db.query(
       'merchant_mappings',
@@ -717,6 +844,155 @@ class AppDatabase {
       );
     });
   }
+
+  // -------------------------------------------------------------------------
+  // 6. DELETE (permanently — see [_createDeletedTransactions])
+  // -------------------------------------------------------------------------
+
+  static const String _naturalKeyWhere =
+      'amount = ? AND merchant = ? AND date = ? AND direction = ? '
+      'AND reference = ?';
+
+  /// The five columns of [_naturalKeyWhere], in that order — `whereArgs` for
+  /// the clause above is `_naturalKeyOf(txn).values.toList()`, which holds
+  /// because Dart maps iterate in insertion order.
+  static Map<String, Object?> _naturalKeyOf(ExpenseTxn txn) => <String, Object?>{
+        'amount': txn.amount,
+        'merchant': txn.merchant,
+        'date': txn.date.millisecondsSinceEpoch,
+        'direction': txn.direction.name,
+        'reference': txn.reference,
+      };
+
+  /// The full tombstone row: the natural key plus everything needed to put the
+  /// transaction back exactly as it was.
+  static Map<String, Object?> _tombstoneOf(ExpenseTxn txn, DateTime at) =>
+      <String, Object?>{
+        ..._naturalKeyOf(txn),
+        'payment_type': txn.paymentType,
+        'category_id': txn.categoryId,
+        'original_id': txn.id,
+        'deleted_at': at.millisecondsSinceEpoch,
+      };
+
+  /// Removes the rows and records that they were removed, all in one SQL
+  /// transaction so a row can never be deleted without leaving the tombstone
+  /// that keeps it deleted — and so a bulk delete is all or nothing.
+  Future<void> deleteTransactions(List<ExpenseTxn> transactions) async {
+    if (transactions.isEmpty) return;
+    final db = await database;
+    final at = DateTime.now();
+    await db.transaction((txn) async {
+      for (final transaction in transactions) {
+        await txn.insert(
+          'deleted_transactions',
+          _tombstoneOf(transaction, at),
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+        await txn.delete(
+          'transactions',
+          where: 'id = ?',
+          whereArgs: <Object?>[transaction.id],
+        );
+      }
+    });
+  }
+
+  Future<void> deleteTransaction(ExpenseTxn transaction) =>
+      deleteTransactions(<ExpenseTxn>[transaction]);
+
+  /// Every deleted transaction, newest first. The join is a LEFT one because a
+  /// tombstone written before v4 carries no `category_id` at all.
+  Future<List<DeletedTxn>> deletedTransactions() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT d.amount, d.merchant, d.date, d.direction, d.reference,
+             d.payment_type, d.category_id, d.original_id, d.deleted_at,
+             c.name AS category_name
+      FROM deleted_transactions d
+      LEFT JOIN categories c ON c.id = d.category_id
+      ORDER BY d.deleted_at DESC, d.date DESC
+    ''');
+    return rows.map(DeletedTxn.fromMap).toList();
+  }
+
+  /// Lifts the tombstones and puts the rows back — under their original ids
+  /// where the tombstone recorded one, so a restored transaction is the same
+  /// one and not a copy. `AUTOINCREMENT` never reuses ids, so reinstating one
+  /// cannot collide with a row created since.
+  Future<void> restoreTransactions(List<DeletedTxn> deleted) async {
+    if (deleted.isEmpty) return;
+    final db = await database;
+    // A pre-v4 tombstone has no category; it comes back as Uncategorized.
+    final fallbackCategory = await uncategorizedId();
+    await db.transaction((txn) async {
+      for (final row in deleted) {
+        await txn.delete(
+          'deleted_transactions',
+          where: _naturalKeyWhere,
+          whereArgs: <Object?>[
+            row.amount,
+            row.merchant,
+            row.date.millisecondsSinceEpoch,
+            row.direction.name,
+            row.reference,
+          ],
+        );
+        await txn.insert(
+          'transactions',
+          <String, Object?>{
+            if (row.originalId != null) 'id': row.originalId,
+            'amount': row.amount,
+            'merchant': row.merchant,
+            'date': row.date.millisecondsSinceEpoch,
+            'direction': row.direction.name,
+            'reference': row.reference,
+            'payment_type': row.paymentType,
+            'category_id': row.categoryId ?? fallbackCategory,
+          },
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+      }
+    });
+  }
+
+  Future<void> restoreTransaction(DeletedTxn deleted) =>
+      restoreTransactions(<DeletedTxn>[deleted]);
+
+  // -------------------------------------------------------------------------
+  // 7. INBOX SCAN WATERMARK
+  // -------------------------------------------------------------------------
+
+  static const String _lastScannedKey = 'last_scanned_sms_date';
+
+  /// The `date` of the newest inbox message already processed, or null when the
+  /// inbox has never been scanned — which is what makes the first scan a full
+  /// one.
+  Future<DateTime?> lastScannedSmsDate() async {
+    final db = await database;
+    final rows = await db.query(
+      'app_meta',
+      columns: <String>['value'],
+      where: 'key = ?',
+      whereArgs: <Object?>[_lastScannedKey],
+      limit: 1,
+    );
+    if (rows.isEmpty) return null;
+    final millis = int.tryParse(rows.first['value'] as String);
+    return millis == null ? null : DateTime.fromMillisecondsSinceEpoch(millis);
+  }
+
+  Future<void> setLastScannedSmsDate(DateTime value) async {
+    final db = await database;
+    await db.insert(
+      'app_meta',
+      <String, Object?>{
+        'key': _lastScannedKey,
+        'value': value.millisecondsSinceEpoch.toString(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -760,12 +1036,19 @@ class SmsSource {
     }
   }
 
-  /// One-off import of everything already sitting in the inbox.
-  Future<List<InboxSms>> readInbox() async {
+  /// Reads the inbox. With [since] the query is narrowed to messages newer than
+  /// that instant, which is what turns every scan after the first into a cheap
+  /// look at only what has arrived. The filter is a real `WHERE` on the SMS
+  /// content provider, not a fetch-everything-then-discard.
+  Future<List<InboxSms>> readInbox({DateTime? since}) async {
     if (!isSupported) return const <InboxSms>[];
     try {
       final messages = await _telephony.getInboxSms(
         columns: <SmsColumn>[SmsColumn.ADDRESS, SmsColumn.BODY, SmsColumn.DATE],
+        filter: since == null
+            ? null
+            : SmsFilter.where(SmsColumn.DATE)
+                .greaterThan(since.millisecondsSinceEpoch.toString()),
       );
       return messages
           .map((SmsMessage m) {
@@ -810,19 +1093,62 @@ class TuExpenseTrackerApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
       ),
-      home: const DashboardScreen(),
+      home: const HomeShell(),
     );
   }
 }
 
-class DashboardScreen extends StatefulWidget {
-  const DashboardScreen({super.key});
-
-  @override
-  State<DashboardScreen> createState() => _DashboardScreenState();
+/// Narrows the ledger to one category and/or one card/account. A null filter
+/// means "everything". Pure and top-level so it can be tested without a
+/// database behind it.
+List<ExpenseTxn> applyFilters(
+  List<ExpenseTxn> all, {
+  int? categoryId,
+  String? paymentType,
+}) {
+  if (categoryId == null && paymentType == null) return all;
+  return all
+      .where((ExpenseTxn t) =>
+          (categoryId == null || t.categoryId == categoryId) &&
+          (paymentType == null || t.paymentType == paymentType))
+      .toList();
 }
 
-class _DashboardScreenState extends State<DashboardScreen> {
+/// The subset of [all] that at least one transaction actually uses, in the same
+/// order — the filter dropdown offers these rather than every seeded category,
+/// so it can never present a choice that filters to nothing.
+///
+/// Deliberately takes the *whole* ledger, not the currently filtered view:
+/// narrowing to one card must not empty the category dropdown underneath the
+/// selection already made in it.
+List<ExpenseCategory> categoriesInUse(
+  List<ExpenseTxn> transactions,
+  List<ExpenseCategory> all,
+) {
+  final used = transactions.map((ExpenseTxn t) => t.categoryId).toSet();
+  return all.where((ExpenseCategory c) => used.contains(c.id)).toList();
+}
+
+/// What one pass over the inbox did. [skipped] counts alerts that parsed but
+/// were already recorded or had been deleted.
+class _ScanResult {
+  const _ScanResult({required this.added, required this.skipped});
+
+  final int added;
+  final int skipped;
+}
+
+/// Two tabs over one ledger: a read-only Dashboard with quick filters, and an
+/// Expenses tab where rows can be categorised, deleted, or (eventually) added
+/// by hand. This shell owns the data; the tabs only render it.
+class HomeShell extends StatefulWidget {
+  const HomeShell({super.key});
+
+  @override
+  State<HomeShell> createState() => _HomeShellState();
+}
+
+class _HomeShellState extends State<HomeShell> {
   final AppDatabase _db = AppDatabase.instance;
   final SmsSource _sms = SmsSource();
 
@@ -833,12 +1159,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
   List<ExpenseTxn> _transactions = <ExpenseTxn>[];
   List<ExpenseCategory> _categories = <ExpenseCategory>[];
   bool _loading = true;
+  bool _scanning = false;
+  int _tab = 0;
+
+  /// Ids marked on the Expenses tab. Lives here rather than in the tab because
+  /// the app bar it takes over is built here.
+  final Set<int> _selected = <int>{};
 
   @override
   void initState() {
     super.initState();
     _load();
-    _startListening();
+    _startSms();
   }
 
   Future<void> _load() async {
@@ -854,17 +1186,101 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
-  Future<void> _startListening() async {
+  // -------------------------------------------------------------------------
+  // SMS INTAKE
+  // -------------------------------------------------------------------------
+
+  /// Asks for the permission, registers the foreground listener, then catches
+  /// up on the inbox — the whole of it on the very first run, and only what has
+  /// arrived since on every run after that.
+  Future<void> _startSms() async {
     if (!_sms.isSupported) return;
     final granted = await _sms.requestPermission();
     if (!granted) return;
+
     _sms.listen((InboxSms sms) async {
       final parsed = SmsParser.parse(sms.body, receivedAt: sms.receivedAt);
       if (parsed == null) return; // not a transaction alert
       await _db.insertParsed(parsed);
       await _load();
     });
+
+    final since = await _db.lastScannedSmsDate();
+    final result = await _scan(since: since);
+    // Only the first import is worth announcing; later catch-ups are routine.
+    if (result != null && since == null && result.added > 0) {
+      _toast('Imported ${result.added} transaction(s) from your inbox.');
+    }
   }
+
+  /// One pass over the inbox. The caller owns the permission check. Returns
+  /// null when a scan is already in flight.
+  Future<_ScanResult?> _scan({DateTime? since}) async {
+    if (_scanning) return null;
+    setState(() => _scanning = true);
+    try {
+      final messages = await _sms.readInbox(since: since);
+
+      DateTime? newest;
+      var added = 0;
+      var skipped = 0;
+      for (final sms in messages) {
+        final at = sms.receivedAt;
+        if (at != null && (newest == null || at.isAfter(newest))) newest = at;
+
+        final parsed = SmsParser.parse(sms.body, receivedAt: at);
+        if (parsed == null) continue; // OTP, promo, statement alert
+        final id = await _db.insertParsed(parsed);
+        id == 0 ? skipped++ : added++;
+      }
+
+      // Advance from the newest message actually seen rather than from the
+      // clock: a skewed device time would otherwise strand real messages behind
+      // the watermark. Forwards only, and only now that the pass has finished —
+      // a scan that threw leaves the watermark alone, so the next one covers
+      // the same ground again.
+      if (newest != null) {
+        final current = await _db.lastScannedSmsDate();
+        if (current == null || newest.isAfter(current)) {
+          await _db.setLastScannedSmsDate(newest);
+        }
+      }
+
+      await _load();
+      return _ScanResult(added: added, skipped: skipped);
+    } finally {
+      if (mounted) setState(() => _scanning = false);
+    }
+  }
+
+  /// The toolbar action. [full] ignores the watermark and re-reads everything —
+  /// safe to run at any time, since duplicates are caught by the natural key
+  /// index and deliberately deleted rows by their tombstones. Worth doing after
+  /// the parser learns a new template.
+  Future<void> _scanFromToolbar({bool full = false}) async {
+    if (!_sms.isSupported) {
+      _toast('Inbox scanning is only available on Android.');
+      return;
+    }
+    final granted = await _sms.requestPermission();
+    if (!granted) {
+      _toast('SMS permission denied.');
+      return;
+    }
+
+    final since = full ? null : await _db.lastScannedSmsDate();
+    final result = await _scan(since: since);
+    if (result == null) return; // a scan was already running
+
+    _toast(result.added == 0 && result.skipped == 0
+        ? 'No new bank messages found.'
+        : 'Imported ${result.added} new transaction(s), skipped '
+            '${result.skipped} already recorded or deleted.');
+  }
+
+  // -------------------------------------------------------------------------
+  // EDITING
+  // -------------------------------------------------------------------------
 
   /// Feeds an arbitrary SMS body through parse -> auto-categorize -> insert.
   Future<void> _ingest(String body) async {
@@ -877,32 +1293,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     await _load();
     final verb = parsed.isCredit ? 'Received' : 'Added';
     _toast(id == 0
-        ? 'Already recorded: ${parsed.merchant}'
+        ? 'Already recorded or deleted: ${parsed.merchant}'
         : '$verb ${_money.format(parsed.amount)} · ${parsed.merchant}');
-  }
-
-  Future<void> _scanInbox() async {
-    if (!_sms.isSupported) {
-      _toast('Inbox scanning is only available on Android.');
-      return;
-    }
-    final granted = await _sms.requestPermission();
-    if (!granted) {
-      _toast('SMS permission denied.');
-      return;
-    }
-
-    final messages = await _sms.readInbox();
-    var added = 0;
-    var skipped = 0;
-    for (final sms in messages) {
-      final parsed = SmsParser.parse(sms.body, receivedAt: sms.receivedAt);
-      if (parsed == null) continue;
-      final id = await _db.insertParsed(parsed);
-      id == 0 ? skipped++ : added++;
-    }
-    await _load();
-    _toast('Imported $added new transaction(s), skipped $skipped duplicate(s).');
   }
 
   /// Step 5: persist the merchant -> category mapping and backfill history.
@@ -926,6 +1318,133 @@ class _DashboardScreenState extends State<DashboardScreen> {
     await _load();
     _toast('${txn.merchant} → ${chosen.name} '
         '($updated transaction${updated == 1 ? '' : 's'} updated)');
+  }
+
+  /// Deletes for good — the tombstones written by
+  /// [AppDatabase.deleteTransactions] keep these rows from being re-imported by
+  /// a later scan, and put them in the Deleted section for as long as it takes
+  /// to change your mind.
+  Future<void> _delete(List<ExpenseTxn> gone) async {
+    if (gone.isEmpty) return;
+    final ids = gone.map((ExpenseTxn t) => t.id).toSet();
+
+    // Drop them from the list in this same frame: `Dismissible` has already
+    // animated its row out and asserts if it is still in the tree on the next
+    // build, which an awaited round trip to the database would allow.
+    setState(() {
+      _transactions =
+          _transactions.where((ExpenseTxn t) => !ids.contains(t.id)).toList();
+      _selected.removeAll(ids);
+    });
+    await _db.deleteTransactions(gone);
+    if (!mounted) return;
+
+    // Read them back so Undo restores from the tombstones themselves, which is
+    // the same path the Deleted section uses.
+    final tombstones = (await _db.deletedTransactions())
+        .where((DeletedTxn d) => ids.contains(d.originalId))
+        .toList();
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(gone.length == 1
+            ? 'Deleted ${gone.single.merchant}'
+            : 'Deleted ${gone.length} transactions'),
+        action: SnackBarAction(
+          label: 'Undo',
+          onPressed: () async {
+            await _db.restoreTransactions(tombstones);
+            await _load();
+          },
+        ),
+      ));
+  }
+
+  // ---- Selection ----------------------------------------------------------
+
+  /// Long-press starts marking; once anything is marked, plain taps toggle.
+  void _toggleSelected(ExpenseTxn txn) {
+    setState(() {
+      if (!_selected.remove(txn.id)) _selected.add(txn.id);
+    });
+  }
+
+  void _clearSelection() => setState(_selected.clear);
+
+  /// Bulk delete asks first. The selection bar's delete sits exactly where the
+  /// overflow menu is otherwise, so a reach for the menu can land on it — and
+  /// unlike a swipe, nothing about tapping an app bar icon says "destructive".
+  Future<void> _confirmBulkDelete() async {
+    final gone = _transactions
+        .where((ExpenseTxn t) => _selected.contains(t.id))
+        .toList();
+    if (gone.isEmpty) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        final scheme = Theme.of(dialogContext).colorScheme;
+        return AlertDialog(
+          title: Text(gone.length == 1
+              ? 'Delete this transaction?'
+              : 'Delete ${gone.length} transactions?'),
+          content: const Text(
+            'They stay out of future inbox scans, and can be brought back from '
+            'Deleted transactions.',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: scheme.error,
+                foregroundColor: scheme.onError,
+              ),
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+    if (!mounted || !(confirmed ?? false)) return;
+    await _delete(gone);
+  }
+
+  /// Opens the transaction from the read-only dashboard on the tab where it can
+  /// actually be changed, with its actions already in reach.
+  Future<void> _openTransaction(ExpenseTxn txn) async {
+    setState(() => _tab = 1);
+    final action = await showModalBottomSheet<_TxnAction>(
+      context: context,
+      showDragHandle: true,
+      builder: (_) => TransactionActionsSheet(
+        txn: txn,
+        money: _money,
+        dateFormat: _dateFormat,
+      ),
+    );
+    if (!mounted || action == null) return;
+    switch (action) {
+      case _TxnAction.categorize:
+        await _pickCategory(txn);
+      case _TxnAction.delete:
+        await _delete(<ExpenseTxn>[txn]);
+    }
+  }
+
+  Future<void> _openDeleted() async {
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => DeletedScreen(
+        money: _money,
+        dateFormat: _dateFormat,
+        onChanged: _load,
+      ),
+    ));
   }
 
   Future<void> _addSmsManually() async {
@@ -968,54 +1487,814 @@ class _DashboardScreenState extends State<DashboardScreen> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final uncategorizedCount =
-        _transactions.where((ExpenseTxn t) => t.isUncategorized).length;
+  AppBar _selectionAppBar() {
+    return AppBar(
+      leading: IconButton(
+        tooltip: 'Cancel',
+        onPressed: _clearSelection,
+        icon: const Icon(Icons.close),
+      ),
+      title: Text('${_selected.length} selected'),
+      actions: <Widget>[
+        IconButton(
+          tooltip: 'Select all',
+          onPressed: () => setState(() => _selected
+            ..clear()
+            ..addAll(_transactions.map((ExpenseTxn t) => t.id))),
+          icon: const Icon(Icons.select_all),
+        ),
+        IconButton(
+          tooltip: 'Delete',
+          onPressed: _confirmBulkDelete,
+          icon: const Icon(Icons.delete_outline),
+        ),
+      ],
+    );
+  }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Expenses'),
-        actions: <Widget>[
+  AppBar _normalAppBar({required bool onExpenses}) {
+    return AppBar(
+      title: Text(onExpenses ? 'Expenses' : 'Dashboard'),
+      actions: <Widget>[
+        if (_scanning)
+          const Center(
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16),
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          )
+        else
           IconButton(
-            tooltip: 'Scan SMS inbox',
-            onPressed: _scanInbox,
+            tooltip: 'Check for new SMS',
+            onPressed: () => _scanFromToolbar(),
             icon: const Icon(Icons.sms_outlined),
           ),
-        ],
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _addSmsManually,
-        icon: const Icon(Icons.add),
-        label: const Text('Add SMS'),
-      ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : RefreshIndicator(
-              onRefresh: _load,
-              child: _transactions.isEmpty
-                  ? _EmptyState(onAdd: _addSmsManually)
-                  : ListView.builder(
-                      padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
-                      itemCount: _transactions.length + 1,
-                      itemBuilder: (context, index) {
-                        if (index == 0) {
-                          return _SummaryHeader(
-                            transactions: _transactions,
-                            uncategorizedCount: uncategorizedCount,
-                            money: _money,
-                          );
-                        }
-                        final txn = _transactions[index - 1];
-                        return _TransactionTile(
-                          txn: txn,
-                          money: _money,
-                          dateFormat: _dateFormat,
-                          onTap: () => _pickCategory(txn),
-                        );
-                      },
-                    ),
+        if (onExpenses)
+          IconButton(
+            tooltip: 'Paste an SMS',
+            onPressed: _addSmsManually,
+            icon: const Icon(Icons.content_paste_outlined),
+          ),
+        PopupMenuButton<String>(
+          onSelected: (String value) {
+            switch (value) {
+              case 'rescan':
+                _scanFromToolbar(full: true);
+              case 'deleted':
+                _openDeleted();
+            }
+          },
+          itemBuilder: (_) => const <PopupMenuEntry<String>>[
+            PopupMenuItem<String>(
+              value: 'deleted',
+              child: Text('Deleted transactions'),
             ),
+            PopupMenuItem<String>(
+              value: 'rescan',
+              child: Text('Rescan all messages'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bool onExpenses = _tab == 1;
+    final bool selecting = onExpenses && _selected.isNotEmpty;
+
+    return PopScope(
+      // Back should leave selection mode before it leaves the app.
+      canPop: !selecting,
+      onPopInvokedWithResult: (bool didPop, Object? result) {
+        if (!didPop) _clearSelection();
+      },
+      child: Scaffold(
+        appBar:
+            selecting ? _selectionAppBar() : _normalAppBar(onExpenses: onExpenses),
+        // IndexedStack rather than a swap, so switching tabs keeps each one's
+        // scroll position and the dashboard's filter selections.
+        body: IndexedStack(
+          index: _tab,
+          children: <Widget>[
+            DashboardTab(
+              transactions: _transactions,
+              categories: _categories,
+              money: _money,
+              dateFormat: _dateFormat,
+              loading: _loading,
+              onRefresh: _load,
+              onTap: _openTransaction,
+            ),
+            ExpensesTab(
+              transactions: _transactions,
+              money: _money,
+              dateFormat: _dateFormat,
+              loading: _loading,
+              selected: _selected,
+              onRefresh: _load,
+              onTap: _pickCategory,
+              onToggleSelected: _toggleSelected,
+              onDelete: (ExpenseTxn txn) => _delete(<ExpenseTxn>[txn]),
+              onAddSms: _addSmsManually,
+            ),
+          ],
+        ),
+        floatingActionButton: onExpenses && !selecting
+            ? FloatingActionButton.extended(
+                // Placeholder. Entering a payment by hand is its own piece of
+                // work — this reserves the spot it will live in.
+                onPressed: () => _toast('Manual payment entry is coming soon.'),
+                icon: const Icon(Icons.add),
+                label: const Text('Add payment'),
+              )
+            : null,
+        bottomNavigationBar: NavigationBar(
+          selectedIndex: _tab,
+          onDestinationSelected: (int index) => setState(() {
+            _tab = index;
+            // Marks belong to the Expenses tab; leaving it drops them.
+            _selected.clear();
+          }),
+          destinations: const <NavigationDestination>[
+            NavigationDestination(
+              icon: Icon(Icons.dashboard_outlined),
+              selectedIcon: Icon(Icons.dashboard),
+              label: 'Dashboard',
+            ),
+            NavigationDestination(
+              icon: Icon(Icons.receipt_long_outlined),
+              selectedIcon: Icon(Icons.receipt_long),
+              label: 'Expenses',
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DASHBOARD TAB — everything that happened, filtered, read-only
+// ---------------------------------------------------------------------------
+
+class DashboardTab extends StatefulWidget {
+  const DashboardTab({
+    super.key,
+    required this.transactions,
+    required this.categories,
+    required this.money,
+    required this.dateFormat,
+    required this.loading,
+    required this.onRefresh,
+    required this.onTap,
+  });
+
+  final List<ExpenseTxn> transactions;
+  final List<ExpenseCategory> categories;
+  final NumberFormat money;
+  final DateFormat dateFormat;
+  final bool loading;
+  final Future<void> Function() onRefresh;
+
+  /// Hands the transaction to the Expenses tab, where it can be changed.
+  final void Function(ExpenseTxn) onTap;
+
+  @override
+  State<DashboardTab> createState() => _DashboardTabState();
+}
+
+class _DashboardTabState extends State<DashboardTab> {
+  int? _categoryId;
+  String? _paymentType;
+
+  void _clearFilters() => setState(() {
+        _categoryId = null;
+        _paymentType = null;
+      });
+
+  @override
+  Widget build(BuildContext context) {
+    // Every card and account the ledger has seen. Derived from the loaded rows
+    // rather than queried, so it stays in step with the list for free.
+    final List<String> paymentTypes = widget.transactions
+        .map((ExpenseTxn t) => t.paymentType)
+        .toSet()
+        .toList()
+      ..sort();
+
+    // Only categories something actually falls under, so the dropdown can never
+    // offer a choice that filters to nothing.
+    final List<ExpenseCategory> categories =
+        categoriesInUse(widget.transactions, widget.categories);
+
+    // A selection can outlive its data — delete the last transaction on a card
+    // and that card is gone from the list. Fall back to "all" for this build
+    // rather than handing the dropdown a value no item carries.
+    final String? paymentType =
+        paymentTypes.contains(_paymentType) ? _paymentType : null;
+    final int? categoryId =
+        categories.any((ExpenseCategory c) => c.id == _categoryId)
+            ? _categoryId
+            : null;
+
+    final List<ExpenseTxn> visible = applyFilters(
+      widget.transactions,
+      categoryId: categoryId,
+      paymentType: paymentType,
+    );
+
+    return Column(
+      children: <Widget>[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+          child: Row(
+            children: <Widget>[
+              Expanded(
+                child: DropdownButtonFormField<int?>(
+                  initialValue: categoryId,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    labelText: 'Category',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: <DropdownMenuItem<int?>>[
+                    const DropdownMenuItem<int?>(
+                      child: Text('All categories'),
+                    ),
+                    for (final ExpenseCategory category in categories)
+                      DropdownMenuItem<int?>(
+                        value: category.id,
+                        child: Text(
+                          category.name,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                  ],
+                  onChanged: (int? value) =>
+                      setState(() => _categoryId = value),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: DropdownButtonFormField<String?>(
+                  initialValue: paymentType,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    labelText: 'Card / account',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: <DropdownMenuItem<String?>>[
+                    const DropdownMenuItem<String?>(
+                      child: Text('All'),
+                    ),
+                    for (final String type in paymentTypes)
+                      DropdownMenuItem<String?>(
+                        value: type,
+                        child: Text(type, overflow: TextOverflow.ellipsis),
+                      ),
+                  ],
+                  onChanged: (String? value) =>
+                      setState(() => _paymentType = value),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: widget.loading
+              ? const Center(child: CircularProgressIndicator())
+              : RefreshIndicator(
+                  onRefresh: widget.onRefresh,
+                  child: widget.transactions.isEmpty
+                      ? const _EmptyState()
+                      : visible.isEmpty
+                          ? _NoMatchState(onClear: _clearFilters)
+                          : ListView.builder(
+                              padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+                              itemCount: visible.length + 1,
+                              itemBuilder: (context, index) {
+                                if (index == 0) {
+                                  return _SummaryHeader(
+                                    transactions: visible,
+                                    uncategorizedCount: visible
+                                        .where((ExpenseTxn t) =>
+                                            t.isUncategorized)
+                                        .length,
+                                    money: widget.money,
+                                  );
+                                }
+                                final txn = visible[index - 1];
+                                return _TransactionTile(
+                                  txn: txn,
+                                  money: widget.money,
+                                  dateFormat: widget.dateFormat,
+                                  onTap: () => widget.onTap(txn),
+                                );
+                              },
+                            ),
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// EXPENSES TAB — the same ledger, but editable
+// ---------------------------------------------------------------------------
+
+class ExpensesTab extends StatelessWidget {
+  const ExpensesTab({
+    super.key,
+    required this.transactions,
+    required this.money,
+    required this.dateFormat,
+    required this.loading,
+    required this.selected,
+    required this.onRefresh,
+    required this.onTap,
+    required this.onToggleSelected,
+    required this.onDelete,
+    required this.onAddSms,
+  });
+
+  final List<ExpenseTxn> transactions;
+  final NumberFormat money;
+  final DateFormat dateFormat;
+  final bool loading;
+
+  /// Ids currently marked. Non-empty means the list is in selection mode.
+  final Set<int> selected;
+
+  final Future<void> Function() onRefresh;
+  final void Function(ExpenseTxn) onTap;
+  final void Function(ExpenseTxn) onToggleSelected;
+  final void Function(ExpenseTxn) onDelete;
+  final VoidCallback onAddSms;
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) return const Center(child: CircularProgressIndicator());
+
+    final uncategorizedCount =
+        transactions.where((ExpenseTxn t) => t.isUncategorized).length;
+    final selecting = selected.isNotEmpty;
+
+    return RefreshIndicator(
+      onRefresh: onRefresh,
+      child: transactions.isEmpty
+          ? _EmptyState(onAdd: onAddSms)
+          : ListView.builder(
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
+              itemCount: transactions.length + 1,
+              itemBuilder: (context, index) {
+                if (index == 0) {
+                  return _SummaryHeader(
+                    transactions: transactions,
+                    uncategorizedCount: uncategorizedCount,
+                    money: money,
+                  );
+                }
+                final txn = transactions[index - 1];
+                final tile = _TransactionTile(
+                  txn: txn,
+                  money: money,
+                  dateFormat: dateFormat,
+                  selected: selected.contains(txn.id),
+                  selecting: selecting,
+                  // While marking, a tap toggles rather than categorises.
+                  onTap: selecting
+                      ? () => onToggleSelected(txn)
+                      : () => onTap(txn),
+                  onLongPress: () => onToggleSelected(txn),
+                );
+                return Dismissible(
+                  key: ValueKey<int>(txn.id),
+                  // Swipe is off while marking, so a stray gesture can't delete
+                  // outside the selection flow.
+                  direction: selecting
+                      ? DismissDirection.none
+                      : DismissDirection.endToStart,
+                  onDismissed: (_) => onDelete(txn),
+                  background: _DismissBackground(),
+                  child: tile,
+                );
+              },
+            ),
+    );
+  }
+}
+
+class _DismissBackground extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      alignment: Alignment.centerRight,
+      decoration: BoxDecoration(
+        color: theme.colorScheme.errorContainer,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Icon(
+        Icons.delete_outline,
+        color: theme.colorScheme.onErrorContainer,
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TRANSACTION ACTIONS — what a dashboard tap opens on the Expenses tab
+// ---------------------------------------------------------------------------
+
+enum _TxnAction { categorize, delete }
+
+class TransactionActionsSheet extends StatelessWidget {
+  const TransactionActionsSheet({
+    super.key,
+    required this.txn,
+    required this.money,
+    required this.dateFormat,
+  });
+
+  final ExpenseTxn txn;
+  final NumberFormat money;
+  final DateFormat dateFormat;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    txn.merchant,
+                    style: theme.textTheme.titleLarge,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  txn.isCredit
+                      ? '+${money.format(txn.amount)}'
+                      : money.format(txn.amount),
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: txn.isCredit ? creditColor(theme) : null,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '${txn.paymentType} · ${dateFormat.format(txn.date)}',
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            Chip(
+              avatar: Icon(categoryIcon(txn.categoryName), size: 18),
+              label: Text(txn.categoryName),
+              visualDensity: VisualDensity.compact,
+            ),
+            const Divider(height: 28),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.label_outline),
+              title: const Text('Change category'),
+              onTap: () => Navigator.pop(context, _TxnAction.categorize),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.delete_outline, color: theme.colorScheme.error),
+              title: Text(
+                'Delete',
+                style: TextStyle(color: theme.colorScheme.error),
+              ),
+              subtitle: const Text('Kept out of future scans; restorable'),
+              onTap: () => Navigator.pop(context, _TxnAction.delete),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DELETED SECTION — every tombstone, and the way back
+// ---------------------------------------------------------------------------
+
+class DeletedScreen extends StatefulWidget {
+  const DeletedScreen({
+    super.key,
+    required this.money,
+    required this.dateFormat,
+    required this.onChanged,
+  });
+
+  final NumberFormat money;
+  final DateFormat dateFormat;
+
+  /// Lets the shell underneath reload, so a restored transaction is already in
+  /// the ledger by the time this screen is popped.
+  final Future<void> Function() onChanged;
+
+  @override
+  State<DeletedScreen> createState() => _DeletedScreenState();
+}
+
+class _DeletedScreenState extends State<DeletedScreen> {
+  final AppDatabase _db = AppDatabase.instance;
+
+  List<DeletedTxn> _deleted = <DeletedTxn>[];
+  bool _loading = true;
+
+  /// Marked rows, held by natural key — a tombstone has no id of its own.
+  final Set<String> _selected = <String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final rows = await _db.deletedTransactions();
+    if (!mounted) return;
+    setState(() {
+      _deleted = rows;
+      _loading = false;
+      // Anything restored elsewhere is no longer here to stay marked.
+      _selected.retainAll(rows.map((DeletedTxn d) => d.key));
+    });
+  }
+
+  void _toggle(DeletedTxn row) {
+    setState(() {
+      if (!_selected.remove(row.key)) _selected.add(row.key);
+    });
+  }
+
+  void _clearSelection() => setState(_selected.clear);
+
+  Future<void> _restore(List<DeletedTxn> rows) async {
+    if (rows.isEmpty) return;
+    await _db.restoreTransactions(rows);
+    setState(_selected.clear);
+    await Future.wait(<Future<void>>[_load(), widget.onChanged()]);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(rows.length == 1
+            ? 'Restored ${rows.single.merchant}'
+            : 'Restored ${rows.length} transactions'),
+      ));
+  }
+
+  AppBar _appBar() {
+    if (_selected.isEmpty) {
+      return AppBar(title: const Text('Deleted transactions'));
+    }
+    return AppBar(
+      leading: IconButton(
+        tooltip: 'Cancel',
+        onPressed: _clearSelection,
+        icon: const Icon(Icons.close),
+      ),
+      title: Text('${_selected.length} selected'),
+      actions: <Widget>[
+        IconButton(
+          tooltip: 'Select all',
+          onPressed: () => setState(() => _selected
+            ..clear()
+            ..addAll(_deleted.map((DeletedTxn d) => d.key))),
+          icon: const Icon(Icons.select_all),
+        ),
+        IconButton(
+          tooltip: 'Restore',
+          onPressed: () => _restore(_deleted
+              .where((DeletedTxn d) => _selected.contains(d.key))
+              .toList()),
+          icon: const Icon(Icons.restore),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final selecting = _selected.isNotEmpty;
+
+    return PopScope(
+      // Back should leave selection mode before it leaves the screen.
+      canPop: !selecting,
+      onPopInvokedWithResult: (bool didPop, Object? result) {
+        if (!didPop) _clearSelection();
+      },
+      child: Scaffold(
+        appBar: _appBar(),
+        body: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : _deleted.isEmpty
+                ? _DeletedEmptyState()
+                : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+                    itemCount: _deleted.length,
+                    itemBuilder: (context, index) {
+                      final row = _deleted[index];
+                      final selected = _selected.contains(row.key);
+
+                      // Laid out by hand rather than with `ListTile`, whose
+                      // trailing slot is too short for an amount stacked over a
+                      // button.
+                      return Card(
+                        key: ValueKey<String>(row.key),
+                        margin: const EdgeInsets.only(bottom: 8),
+                        clipBehavior: Clip.antiAlias,
+                        color:
+                            selected ? theme.colorScheme.primaryContainer : null,
+                        child: InkWell(
+                          // Long-press starts marking; once anything is marked,
+                          // a plain tap toggles.
+                          onTap: selecting ? () => _toggle(row) : null,
+                          onLongPress: () => _toggle(row),
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(14, 12, 8, 8),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
+                                if (selecting) ...<Widget>[
+                                  Padding(
+                                    padding: const EdgeInsets.only(top: 2),
+                                    child: Icon(
+                                      selected
+                                          ? Icons.check_circle
+                                          : Icons.circle_outlined,
+                                      color: selected
+                                          ? theme.colorScheme.primary
+                                          : theme.colorScheme.outline,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                ],
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: <Widget>[
+                                      Text(
+                                        row.merchant,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                            fontWeight: FontWeight.w600),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        '${row.paymentType} · '
+                                        '${widget.dateFormat.format(row.date)}',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: theme.textTheme.bodySmall,
+                                      ),
+                                      Text(
+                                        row.deletedAt == null
+                                            // A tombstone from before v4.
+                                            ? '${row.categoryName} · deleted'
+                                            : '${row.categoryName} · deleted '
+                                                '${widget.dateFormat.format(row.deletedAt!)}',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: theme.textTheme.bodySmall,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: <Widget>[
+                                    Padding(
+                                      padding: EdgeInsets.only(
+                                          top: selecting ? 2 : 0),
+                                      child: Text(
+                                        row.isCredit
+                                            ? '+${widget.money.format(row.amount)}'
+                                            : widget.money.format(row.amount),
+                                        style: theme.textTheme.titleSmall
+                                            ?.copyWith(
+                                          fontWeight: FontWeight.bold,
+                                          color: row.isCredit
+                                              ? creditColor(theme)
+                                              : null,
+                                        ),
+                                      ),
+                                    ),
+                                    // The per-row button would be a second,
+                                    // conflicting way to act while marking.
+                                    if (!selecting)
+                                      TextButton.icon(
+                                        onPressed: () =>
+                                            _restore(<DeletedTxn>[row]),
+                                        icon:
+                                            const Icon(Icons.restore, size: 18),
+                                        label: const Text('Restore'),
+                                      ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+      ),
+    );
+  }
+}
+
+class _DeletedEmptyState extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return ListView(
+      padding: const EdgeInsets.all(32),
+      children: <Widget>[
+        const SizedBox(height: 100),
+        Icon(Icons.delete_outline, size: 64, color: theme.colorScheme.outline),
+        const SizedBox(height: 16),
+        Text(
+          'Nothing deleted',
+          textAlign: TextAlign.center,
+          style: theme.textTheme.titleMedium,
+        ),
+        const SizedBox(height: 8),
+        Text(
+          'Deleting a transaction also keeps it from being imported again by a '
+          'later inbox scan. Anything you delete lands here, and restoring it '
+          'undoes both.',
+          textAlign: TextAlign.center,
+          style: theme.textTheme.bodySmall,
+        ),
+      ],
+    );
+  }
+}
+
+/// Shown when there are transactions but the current filters exclude all of
+/// them — distinct from [_EmptyState], which means the ledger itself is empty.
+class _NoMatchState extends StatelessWidget {
+  const _NoMatchState({required this.onClear});
+
+  final VoidCallback onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      // A scrollable child keeps pull-to-refresh working.
+      padding: const EdgeInsets.all(32),
+      children: <Widget>[
+        const SizedBox(height: 100),
+        Icon(Icons.filter_alt_off_outlined,
+            size: 64, color: Theme.of(context).colorScheme.outline),
+        const SizedBox(height: 16),
+        Text(
+          'No transactions match these filters',
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 20),
+        Center(
+          child: FilledButton.tonalIcon(
+            onPressed: onClear,
+            icon: const Icon(Icons.clear),
+            label: const Text('Clear filters'),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1126,13 +2405,28 @@ class _TransactionTile extends StatelessWidget {
     required this.txn,
     required this.money,
     required this.dateFormat,
-    required this.onTap,
+    this.onTap,
+    this.onLongPress,
+    this.selected = false,
+    this.selecting = false,
   });
 
   final ExpenseTxn txn;
   final NumberFormat money;
   final DateFormat dateFormat;
-  final VoidCallback onTap;
+
+  /// Null where the row is not interactive — `ListTile` renders itself
+  /// non-interactive when there is nothing to tap.
+  final VoidCallback? onTap;
+
+  /// Starts (or extends) a selection on the Expenses tab. Null elsewhere.
+  final VoidCallback? onLongPress;
+
+  /// Marked as part of a selection.
+  final bool selected;
+
+  /// The list is in selection mode, so a tap marks rather than categorises.
+  final bool selecting;
 
   @override
   Widget build(BuildContext context) {
@@ -1142,20 +2436,31 @@ class _TransactionTile extends StatelessWidget {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       clipBehavior: Clip.antiAlias,
+      color: selected ? theme.colorScheme.primaryContainer : null,
       child: ListTile(
         onTap: onTap,
+        onLongPress: onLongPress,
+        selected: selected,
         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        leading: CircleAvatar(
-          backgroundColor: needsCategory
-              ? theme.colorScheme.errorContainer
-              : theme.colorScheme.secondaryContainer,
-          foregroundColor: needsCategory
-              ? theme.colorScheme.onErrorContainer
-              : theme.colorScheme.onSecondaryContainer,
-          child: Icon(
-            txn.isCredit ? Icons.south_west : categoryIcon(txn.categoryName),
-          ),
-        ),
+        leading: selected
+            ? CircleAvatar(
+                backgroundColor: theme.colorScheme.primary,
+                foregroundColor: theme.colorScheme.onPrimary,
+                child: const Icon(Icons.check),
+              )
+            : CircleAvatar(
+                backgroundColor: needsCategory
+                    ? theme.colorScheme.errorContainer
+                    : theme.colorScheme.secondaryContainer,
+                foregroundColor: needsCategory
+                    ? theme.colorScheme.onErrorContainer
+                    : theme.colorScheme.onSecondaryContainer,
+                child: Icon(
+                  txn.isCredit
+                      ? Icons.south_west
+                      : categoryIcon(txn.categoryName),
+                ),
+              ),
         title: Text(
           txn.merchant,
           maxLines: 1,
@@ -1186,7 +2491,13 @@ class _TransactionTile extends StatelessWidget {
                         : theme.colorScheme.surfaceContainerHighest,
                   ),
                   child: Text(
-                    needsCategory ? 'Tap to categorize' : txn.categoryName,
+                    !needsCategory
+                        ? txn.categoryName
+                        // Only promise what a tap will actually do: nothing on
+                        // a read-only list, and marking while selecting.
+                        : onTap == null || selecting
+                            ? AppDatabase.uncategorized
+                            : 'Tap to categorize',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: needsCategory
                           ? theme.colorScheme.onErrorContainer
@@ -1213,9 +2524,10 @@ class _TransactionTile extends StatelessWidget {
 }
 
 class _EmptyState extends StatelessWidget {
-  const _EmptyState({required this.onAdd});
+  const _EmptyState({this.onAdd});
 
-  final VoidCallback onAdd;
+  /// Null on the dashboard, where there is nothing to press.
+  final VoidCallback? onAdd;
 
   @override
   Widget build(BuildContext context) {
@@ -1238,14 +2550,16 @@ class _EmptyState extends StatelessWidget {
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodySmall,
         ),
-        const SizedBox(height: 20),
-        Center(
-          child: FilledButton.tonalIcon(
-            onPressed: onAdd,
-            icon: const Icon(Icons.add),
-            label: const Text('Paste an SMS'),
+        if (onAdd != null) ...<Widget>[
+          const SizedBox(height: 20),
+          Center(
+            child: FilledButton.tonalIcon(
+              onPressed: onAdd,
+              icon: const Icon(Icons.add),
+              label: const Text('Paste an SMS'),
+            ),
           ),
-        ),
+        ],
       ],
     );
   }

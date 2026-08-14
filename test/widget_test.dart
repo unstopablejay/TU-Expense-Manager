@@ -259,4 +259,119 @@ void main() {
       expect(parsed.direction, TxnDirection.credit);
     });
   });
+
+  group('applyFilters', () {
+    ExpenseTxn txn({
+      required int id,
+      required String paymentType,
+      required int categoryId,
+      required String categoryName,
+      TxnDirection direction = TxnDirection.debit,
+    }) =>
+        ExpenseTxn(
+          id: id,
+          amount: 100,
+          paymentType: paymentType,
+          merchant: 'MERCHANT $id',
+          date: DateTime(2026, 8, id),
+          categoryId: categoryId,
+          categoryName: categoryName,
+          direction: direction,
+          reference: '',
+        );
+
+    final ledger = <ExpenseTxn>[
+      txn(id: 1, paymentType: 'YES BANK Card X2858', categoryId: 2, categoryName: 'Food'),
+      txn(id: 2, paymentType: 'HDFC Bank A/C *0444', categoryId: 2, categoryName: 'Food'),
+      txn(id: 3, paymentType: 'YES BANK Card X2858', categoryId: 3, categoryName: 'Fuel'),
+      txn(
+        id: 4,
+        paymentType: 'HDFC Bank A/C *0444',
+        categoryId: 4,
+        categoryName: 'Salary',
+        direction: TxnDirection.credit,
+      ),
+    ];
+
+    List<int> idsOf(List<ExpenseTxn> rows) =>
+        rows.map((ExpenseTxn t) => t.id).toList();
+
+    test('no filters returns the list untouched', () {
+      expect(identical(applyFilters(ledger), ledger), isTrue);
+    });
+
+    test('filters by category alone', () {
+      expect(idsOf(applyFilters(ledger, categoryId: 2)), <int>[1, 2]);
+    });
+
+    test('filters by card or account alone', () {
+      expect(
+        idsOf(applyFilters(ledger, paymentType: 'HDFC Bank A/C *0444')),
+        <int>[2, 4],
+      );
+    });
+
+    test('credits are filtered like any other row', () {
+      expect(idsOf(applyFilters(ledger, categoryId: 4)), <int>[4]);
+    });
+
+    test('both filters together are an AND, not an OR', () {
+      expect(
+        idsOf(applyFilters(
+          ledger,
+          categoryId: 2,
+          paymentType: 'YES BANK Card X2858',
+        )),
+        <int>[1],
+      );
+    });
+
+    test('a combination nothing matches yields an empty list', () {
+      expect(
+        applyFilters(
+          ledger,
+          categoryId: 3, // Fuel, only ever on the YES card
+          paymentType: 'HDFC Bank A/C *0444',
+        ),
+        isEmpty,
+      );
+    });
+
+    group('categoriesInUse', () {
+      // The seed list, in the order the database hands it back: Uncategorized
+      // pinned first, the rest alphabetical.
+      const all = <ExpenseCategory>[
+        ExpenseCategory(id: 1, name: 'Uncategorized'),
+        ExpenseCategory(id: 2, name: 'Food'),
+        ExpenseCategory(id: 3, name: 'Fuel'),
+        ExpenseCategory(id: 4, name: 'Salary'),
+        ExpenseCategory(id: 5, name: 'Travel'),
+      ];
+
+      List<String> namesOf(List<ExpenseCategory> rows) =>
+          rows.map((ExpenseCategory c) => c.name).toList();
+
+      test('drops categories no transaction uses', () {
+        // The ledger uses 2 (Food), 3 (Fuel) and 4 (Salary) — never 1 or 5.
+        expect(namesOf(categoriesInUse(ledger, all)),
+            <String>['Food', 'Fuel', 'Salary']);
+      });
+
+      test('keeps the order of the full list', () {
+        final shuffled = <ExpenseTxn>[ledger[3], ledger[2], ledger[0]];
+        expect(namesOf(categoriesInUse(shuffled, all)),
+            <String>['Food', 'Fuel', 'Salary']);
+      });
+
+      test('a category used only by a credit still counts', () {
+        // id 4 (Salary) is worn by the single credit in the ledger.
+        expect(namesOf(categoriesInUse(<ExpenseTxn>[ledger[3]], all)),
+            <String>['Salary']);
+      });
+
+      test('an empty ledger uses no categories', () {
+        expect(categoriesInUse(<ExpenseTxn>[], all), isEmpty);
+      });
+    });
+  });
 }
