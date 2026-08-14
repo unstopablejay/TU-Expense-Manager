@@ -1,6 +1,10 @@
 name: Release APK
 
-# Tag a version to publish it:  git tag v1.0.0 && git push origin v1.0.0
+# Tag a version to publish it:  git tag v1.1.0 && git push origin v1.1.0
+# The tag name becomes the APK's version, so that is the only place a version
+# number needs changing. Tags are frozen to one commit: a new release always
+# needs a new tag, and re-releasing an old tag rebuilds the old code.
+#
 # Tag globs are case-sensitive, so both cases are listed — a `V1.0.0` tag would
 # silently match nothing against a `v*` pattern alone.
 on:
@@ -54,7 +58,31 @@ jobs:
           keyPassword=$KEY_PASSWORD
           EOF
 
-      - run: flutter build apk --release
+      # The tag is the single source of truth for the version a release reports:
+      # `v1.2.0` builds an APK that calls itself 1.2.0. Without this the APK takes
+      # its version from pubspec.yaml, which then has to be remembered separately
+      # and silently drifts — v1.0.0, v1.0.1 and v1.0.3 each shipped an APK that
+      # still called itself 1.0.0 build 1, so no device could tell them apart.
+      #
+      # versionCode is the run number rather than anything parsed from the tag.
+      # Android only cares that it increases, and run numbers always do, which
+      # digits taken from a version would not: 1.9.0 -> 1.10.0 goes backwards.
+      - name: Derive the version from the tag
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            NAME="${GITHUB_REF_NAME#[vV]}"
+            echo "args=--build-name=$NAME --build-number=$GITHUB_RUN_NUMBER" \
+              >> "$GITHUB_OUTPUT"
+            echo "Building $GITHUB_REF_NAME as versionName=$NAME " \
+                 "versionCode=$GITHUB_RUN_NUMBER"
+          else
+            # A manual run has no tag to read, so pubspec.yaml's version stands.
+            echo "args=" >> "$GITHUB_OUTPUT"
+            echo "No tag — taking the version from pubspec.yaml"
+          fi
+
+      - run: flutter build apk --release ${{ steps.version.outputs.args }}
 
       # Manual runs have no tag to release against, so keep the APK reachable.
       - name: Upload APK as a build artifact
