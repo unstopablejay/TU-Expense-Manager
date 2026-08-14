@@ -165,6 +165,58 @@ transaction, so a mapping can never be saved without its backfill:
 
 The row count from step 2 is what the confirmation snackbar reports.
 
+## App icon
+
+The artwork lives at `assets/icon/app_icon.png` and is the source of truth — it is not
+bundled into the APK (it is not declared under `flutter: assets:`), it is only what the
+launcher icons are cut from.
+
+`android/app/src/main/res/` carries two forms of it:
+
+- **`mipmap-anydpi-v26/ic_launcher.xml`** — the adaptive icon used from API 26 up. Its
+  background is the flat `@color/ic_launcher_background` (`#EEEBE8`, sampled from the
+  artwork so the two layers meet with no seam) and its foreground is the badge cut out
+  of that backdrop, drawn at the 72dp safe zone of the 108dp canvas.
+- **`mipmap-*/ic_launcher.png`** — the flattened fallback for API 24–25, which predates
+  adaptive icons.
+
+The badge is deliberately kept inside the 72dp safe zone. That is the spec, and it also
+measured right: this emulator's circular mask shows only about 73% of the 108dp canvas,
+so the badge fills 91% of the visible circle while its dark rim — the icon's only edge
+against a light wallpaper — keeps a hair of margin. Scaling past the safe zone clipped
+that rim away entirely.
+
+## Releasing
+
+`.github/workflows/release.yml` builds the signed APK. It runs on two triggers, and
+they do different things:
+
+- **Pushing a `v*` tag** builds the APK and publishes it as a GitHub Release named after
+  the tag. This is the one that produces a keepable, shareable build.
+- **A manual run** (Actions → Release APK → Run workflow) builds the same APK but
+  attaches it to the run as a build artifact, which expires and needs repo access to
+  download. Useful for a throwaway check without minting a version.
+
+Pushing code on its own builds nothing.
+
+```bash
+git tag v1.1.0 && git push origin v1.1.0
+```
+
+**The tag name is the version.** The workflow derives `versionName` from it, so `v1.2.0`
+produces an APK that reports 1.2.0, and `versionCode` comes from the run number, which
+only ever increases. There is nothing to keep in sync by hand — `pubspec.yaml`'s version
+applies only to local builds and manual runs.
+
+That was not always true. `v1.0.0`, `v1.0.1` and `v1.0.3` each shipped an APK still
+reporting `1.0.0` build `1`, because the build read `pubspec.yaml` and nothing ever
+updated it, so no device could tell those releases apart.
+
+A tag is frozen to one commit. **A new release always needs a new tag** — re-releasing an
+existing tag rebuilds that same old commit, and in fact does not even start the workflow,
+since no new ref is pushed. Re-pushing the *same* tag is safe though: the publish step
+uses `--clobber`, so a re-run repairs a release rather than duplicating it.
+
 ## Requirements
 
 Android only. `sqflite` and the SMS plugin have no desktop or web implementation, and
