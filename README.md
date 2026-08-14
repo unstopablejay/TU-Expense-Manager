@@ -165,6 +165,27 @@ transaction, so a mapping can never be saved without its backfill:
 
 The row count from step 2 is what the confirmation snackbar reports.
 
+## App icon
+
+The artwork lives at `assets/icon/app_icon.png` and is the source of truth — it is not
+bundled into the APK (it is not declared under `flutter: assets:`), it is only what the
+launcher icons are cut from.
+
+`android/app/src/main/res/` carries two forms of it:
+
+- **`mipmap-anydpi-v26/ic_launcher.xml`** — the adaptive icon used from API 26 up. Its
+  background is the flat `@color/ic_launcher_background` (`#EEEBE8`, sampled from the
+  artwork so the two layers meet with no seam) and its foreground is the badge cut out
+  of that backdrop, drawn at the 72dp safe zone of the 108dp canvas.
+- **`mipmap-*/ic_launcher.png`** — the flattened fallback for API 24–25, which predates
+  adaptive icons.
+
+The badge is deliberately kept inside the 72dp safe zone. That is the spec, and it also
+measured right: this emulator's circular mask shows only about 73% of the 108dp canvas,
+so the badge fills 91% of the visible circle while its dark rim — the icon's only edge
+against a light wallpaper — keeps a hair of margin. Scaling past the safe zone clipped
+that rim away entirely.
+
 ## Requirements
 
 Android only. `sqflite` and the SMS plugin have no desktop or web implementation, and
