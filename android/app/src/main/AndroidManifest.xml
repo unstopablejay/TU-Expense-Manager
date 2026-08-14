@@ -1,6 +1,17 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 <uses-permission android:name="android.permission.RECEIVE_SMS" />
 <uses-permission android:name="android.permission.READ_SMS" />
+
+<!-- Flutter only injects INTERNET into the debug and profile manifests, so a
+     release build without this line builds fine and then fails every request
+     at runtime. The update check needs it to reach the GitHub releases API. -->
+<uses-permission android:name="android.permission.INTERNET" />
+
+<!-- The app distributes itself as a sideloaded APK, so installing an update
+     means handing the downloaded file to Android's package installer. That
+     needs this permission plus a one-time "install unknown apps" grant the
+     user makes in Settings; the install itself is always a system dialog. -->
+<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <application
         android:label="TU Expense Tracker"
         android:name="${applicationName}"

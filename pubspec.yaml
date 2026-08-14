@@ -35,6 +35,12 @@ dependencies:
   path: ^1.9.0                # Needed for sqflite database paths
   intl: ^0.19.0               # To format the dates and currency on your dashboard
   another_telephony: ^0.4.1
+  # The self-update feature, which reads GitHub Releases and sideloads the APK.
+  http: ^1.6.0                # To query the GitHub releases API and fetch the APK
+  package_info_plus: ^10.2.1  # To read the running build's version at runtime
+  shared_preferences: ^2.5.5  # To remember the toggle and the last-checked time
+  path_provider: ^2.1.6       # To pick the directory the APK downloads into
+  open_filex: ^4.7.0          # To hand the APK to Android's package installer
 
 dev_dependencies:
   flutter_test:
