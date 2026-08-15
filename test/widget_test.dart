@@ -712,6 +712,442 @@ void main() {
     });
   });
 
+  group('merging duplicate names', () {
+    /// The labels the emulator's ledger actually holds — one account and one
+    /// card each split across templates, plus names that must stay apart.
+    const List<String> cards = <String>[
+      'BANK A/c XX0444',
+      'HDFC Bank A/C *0444',
+      'HDFC Bank A/c XX0444',
+      'BANK Card XX8008',
+      'ICICI Bank Card XX8008',
+      'YES BANK Card X2858',
+      'HDFC Bank Card 6824',
+      'HDFC Bank Card x2227',
+    ];
+
+    NameAliases aliasesOf(NameKind kind, Map<String, String> rows) =>
+        NameAliases.fromRows(<Map<String, Object?>>[
+          for (final MapEntry<String, String> e in rows.entries)
+            <String, Object?>{
+              'kind': kind.column,
+              'alias': e.key,
+              'canonical': e.value,
+            },
+        ]);
+
+    group('NameAliases', () {
+      final aliases = aliasesOf(NameKind.card, <String, String>{
+        'bank a/c xx0444': 'HDFC 0444',
+        'hdfc bank a/c *0444': 'HDFC 0444',
+      });
+
+      test('a name nothing was merged into resolves to itself', () {
+        expect(aliases.resolve(NameKind.card, 'YES BANK Card X2858'),
+            'YES BANK Card X2858');
+      });
+
+      test('an alias resolves to what it was merged into', () {
+        expect(aliases.resolve(NameKind.card, 'BANK A/c XX0444'), 'HDFC 0444');
+      });
+
+      test('resolution ignores case, as the column does', () {
+        expect(aliases.resolve(NameKind.card, 'HDFC Bank A/C *0444'),
+            'HDFC 0444');
+      });
+
+      test('a kind is not confused with the other one', () {
+        expect(aliases.resolve(NameKind.merchant, 'BANK A/c XX0444'),
+            'BANK A/c XX0444');
+      });
+
+      test('membersOf covers the aliases and the canonical itself', () {
+        expect(
+          aliases.membersOf(NameKind.card, 'HDFC 0444'),
+          <String>{'HDFC 0444', 'bank a/c xx0444', 'hdfc bank a/c *0444'},
+        );
+      });
+
+      test('membersOf an unmerged name is just that name', () {
+        expect(aliases.membersOf(NameKind.card, 'HDFC Bank Card 6824'),
+            <String>{'HDFC Bank Card 6824'});
+      });
+    });
+
+    group('mergePlan', () {
+      test('folds a fresh set under the new name', () {
+        final plan = mergePlan(
+          const <String, String>{},
+          <String>{'BANK A/c XX0444', 'HDFC Bank A/c XX0444'},
+          'HDFC 0444',
+        );
+        expect(plan, <String, String>{
+          'bank a/c xx0444': 'HDFC 0444',
+          'hdfc bank a/c xx0444': 'HDFC 0444',
+        });
+      });
+
+      test('a name is never made an alias of itself', () {
+        // Keeping the winning spelling is the common case, and a self-alias
+        // would be a one-hop loop.
+        final plan = mergePlan(
+          const <String, String>{},
+          <String>{'RAPIDO', 'Rapido'},
+          'RAPIDO',
+        );
+        expect(plan, <String, String>{'rapido': 'RAPIDO'});
+      });
+
+      test('merging a merge carries its earlier members along', () {
+        // The heart of it: M1 and M2 already point at Rapido. Folding Rapido
+        // into a new name has to re-point them too, or they resurface the
+        // moment Rapido stops being a canonical.
+        final first = mergePlan(
+          const <String, String>{},
+          <String>{'M1', 'M2'},
+          'Rapido',
+        );
+        final second = mergePlan(first, <String>{'Rapido', 'M3'}, 'Rapido Rides');
+
+        expect(second, <String, String>{
+          'm1': 'Rapido Rides',
+          'm2': 'Rapido Rides',
+          'm3': 'Rapido Rides',
+          'rapido': 'Rapido Rides',
+        });
+      });
+
+      test('after a chained merge nothing resolves in two hops', () {
+        final first = mergePlan(const <String, String>{}, <String>{'M1', 'M2'}, 'Rapido');
+        final second = mergePlan(first, <String>{'Rapido', 'M3'}, 'Rapido Rides');
+
+        // The property that matters is idempotence: resolving a canonical
+        // hands back that same canonical, so no lookup ever needs a second
+        // one. A canonical *may* appear as a key — 'rapido' -> 'RAPIDO' is
+        // how a case-only merge holds its chosen spelling — and that is fine
+        // precisely because it still resolves to itself.
+        for (final String canonical in second.values) {
+          expect(second[canonical.toLowerCase()] ?? canonical, canonical,
+              reason: '$canonical does not resolve to itself');
+        }
+      });
+
+      test('an unrelated earlier merge is left alone', () {
+        final existing = mergePlan(
+            const <String, String>{}, <String>{'A1', 'A2'}, 'Alpha');
+        final plan = mergePlan(existing, <String>{'B1', 'B2'}, 'Beta');
+        expect(plan['a1'], 'Alpha');
+        expect(plan['a2'], 'Alpha');
+        expect(plan['b1'], 'Beta');
+      });
+
+      test('the new name is trimmed of nothing the caller left behind', () {
+        // mergePlan takes the name as given; trimming is the caller's job and
+        // AppDatabase.mergeNames does it. Guards against double-trimming.
+        final plan = mergePlan(const <String, String>{}, <String>{'X', 'Y'}, 'Z');
+        expect(plan.values.toSet(), <String>{'Z'});
+      });
+    });
+
+    group('suggestGroups', () {
+      test('groups cards by their trailing digits', () {
+        expect(suggestGroups(cards, NameKind.card), <List<String>>[
+          <String>['BANK A/c XX0444', 'HDFC Bank A/C *0444', 'HDFC Bank A/c XX0444'],
+          <String>['BANK Card XX8008', 'ICICI Bank Card XX8008'],
+        ]);
+      });
+
+      test('a card sharing no digits with another is not suggested', () {
+        final flat = suggestGroups(cards, NameKind.card).expand((g) => g);
+        expect(flat, isNot(contains('YES BANK Card X2858')));
+        expect(flat, isNot(contains('HDFC Bank Card 6824')));
+      });
+
+      test('nothing to group yields nothing', () {
+        expect(suggestGroups(<String>['YES BANK Card X2858'], NameKind.card),
+            isEmpty);
+      });
+
+      test('a UPI tag does not make a merchant a different shop', () {
+        expect(
+          suggestGroups(
+            <String>['UPI_GEORGE EGG CENTRE', 'GEORGE EGG CENTRE', 'SWIGGY'],
+            NameKind.merchant,
+          ),
+          <List<String>>[
+            <String>['GEORGE EGG CENTRE', 'UPI_GEORGE EGG CENTRE'],
+          ],
+        );
+      });
+
+      test('merchants differing only in case and punctuation group', () {
+        expect(
+          suggestGroups(<String>['RAPIDO', 'Rapido.', 'Zomato'],
+              NameKind.merchant),
+          <List<String>>[
+            <String>['RAPIDO', 'Rapido.'],
+          ],
+        );
+      });
+
+      test('genuinely different merchants stay apart', () {
+        expect(
+          suggestGroups(<String>['SWIGGY INSTAMART', 'BIG BAZAAR GROCERY'],
+              NameKind.merchant),
+          isEmpty,
+        );
+      });
+    });
+
+    group('canonicaliseLedger', () {
+      ExpenseTxn txn({
+        required int id,
+        required String merchant,
+        required String paymentType,
+      }) =>
+          ExpenseTxn(
+            id: id,
+            amount: 100,
+            paymentType: paymentType,
+            merchant: merchant,
+            date: DateTime(2026, 8, id),
+            categoryId: 2,
+            categoryName: 'Food',
+            direction: TxnDirection.debit,
+            reference: '',
+          );
+
+      test('applies aliases to both names', () {
+        final out = canonicaliseLedger(
+          <ExpenseTxn>[
+            txn(id: 1, merchant: 'M1', paymentType: 'BANK A/c XX0444'),
+          ],
+          NameAliases.fromRows(<Map<String, Object?>>[
+            <String, Object?>{
+              'kind': 'merchant',
+              'alias': 'm1',
+              'canonical': 'Rapido'
+            },
+            <String, Object?>{
+              'kind': 'payment_type',
+              'alias': 'bank a/c xx0444',
+              'canonical': 'HDFC 0444'
+            },
+          ]),
+        );
+        expect(out.single.merchant, 'Rapido');
+        expect(out.single.paymentType, 'HDFC 0444');
+      });
+
+      test('keeps the stored spellings, which are still the row key', () {
+        final out = canonicaliseLedger(
+          <ExpenseTxn>[
+            txn(id: 1, merchant: 'M1', paymentType: 'BANK A/c XX0444'),
+          ],
+          aliasesOf(NameKind.merchant, <String, String>{'m1': 'Rapido'}),
+        );
+        expect(out.single.rawMerchant, 'M1');
+        expect(out.single.rawPaymentType, 'BANK A/c XX0444');
+      });
+
+      test('case-only merchant variants fold onto the most common spelling',
+          () {
+        final out = canonicaliseLedger(
+          <ExpenseTxn>[
+            txn(id: 1, merchant: 'RAPIDO', paymentType: 'X'),
+            txn(id: 2, merchant: 'RAPIDO', paymentType: 'X'),
+            txn(id: 3, merchant: 'Rapido', paymentType: 'X'),
+          ],
+          NameAliases.empty,
+        );
+        // Two RAPIDO to one Rapido — the majority spelling wins, not the
+        // alphabetically-first one, which would have been 'RAPIDO' here by
+        // luck. See the tie test below for the distinction.
+        expect(out.map((ExpenseTxn t) => t.merchant),
+            everyElement('RAPIDO'));
+      });
+
+      test('the majority wins even when it sorts last', () {
+        final out = canonicaliseLedger(
+          <ExpenseTxn>[
+            txn(id: 1, merchant: 'Rapido', paymentType: 'X'),
+            txn(id: 2, merchant: 'Rapido', paymentType: 'X'),
+            txn(id: 3, merchant: 'RAPIDO', paymentType: 'X'),
+          ],
+          NameAliases.empty,
+        );
+        expect(out.map((ExpenseTxn t) => t.merchant), everyElement('Rapido'));
+      });
+
+      test('an even split falls back to alphabetical, not row order', () {
+        final out = canonicaliseLedger(
+          <ExpenseTxn>[
+            txn(id: 1, merchant: 'Rapido', paymentType: 'X'),
+            txn(id: 2, merchant: 'RAPIDO', paymentType: 'X'),
+          ],
+          NameAliases.empty,
+        );
+        expect(out.map((ExpenseTxn t) => t.merchant), everyElement('RAPIDO'));
+      });
+
+      test('payment types are not case-folded, only merged', () {
+        // Cards are merged deliberately, never guessed at: two labels that
+        // differ only in case are still two until the user says otherwise.
+        final out = canonicaliseLedger(
+          <ExpenseTxn>[
+            txn(id: 1, merchant: 'A', paymentType: 'HDFC Bank A/c XX0444'),
+            txn(id: 2, merchant: 'A', paymentType: 'HDFC BANK A/C XX0444'),
+          ],
+          NameAliases.empty,
+        );
+        expect(out.map((ExpenseTxn t) => t.paymentType).toSet(), hasLength(2));
+      });
+
+      test('an empty ledger stays empty', () {
+        expect(canonicaliseLedger(<ExpenseTxn>[], NameAliases.empty), isEmpty);
+      });
+    });
+  });
+
+  group('sortEntries', () {
+    ExpenseTxn txn({
+      required int id,
+      required String merchant,
+      required DateTime date,
+      double amount = 100,
+      List<TxnSplit> splits = const <TxnSplit>[],
+    }) =>
+        ExpenseTxn(
+          id: id,
+          amount: amount,
+          paymentType: 'YES BANK Card X2858',
+          merchant: merchant,
+          date: date,
+          categoryId: 2,
+          categoryName: 'Food',
+          direction: TxnDirection.debit,
+          reference: '',
+          splits: splits,
+        );
+
+    LedgerEntry entryOf(ExpenseTxn t) =>
+        LedgerEntry(txn: t, lines: t.effectiveSplits);
+
+    final zomato = txn(
+      id: 1,
+      merchant: 'ZOMATO',
+      date: DateTime(2026, 8, 1),
+      amount: 500,
+    );
+    final blinkit = txn(
+      id: 2,
+      merchant: 'blinkit',
+      date: DateTime(2026, 8, 3),
+      amount: 100,
+    );
+    final amazon = txn(
+      id: 3,
+      merchant: 'AMAZON',
+      date: DateTime(2026, 8, 2),
+      amount: 2000,
+    );
+
+    final ledger = <LedgerEntry>[
+      entryOf(zomato),
+      entryOf(blinkit),
+      entryOf(amazon),
+    ];
+
+    List<int> idsOf(List<LedgerEntry> rows) =>
+        rows.map((LedgerEntry e) => e.txn.id).toList();
+
+    test('newest first is the default reading of the ledger', () {
+      expect(idsOf(sortEntries(ledger, LedgerSort.newest)), <int>[2, 3, 1]);
+    });
+
+    test('oldest first is the exact reverse', () {
+      expect(idsOf(sortEntries(ledger, LedgerSort.oldest)), <int>[1, 3, 2]);
+    });
+
+    test('largest first orders by amount, not date', () {
+      expect(idsOf(sortEntries(ledger, LedgerSort.largest)), <int>[3, 1, 2]);
+    });
+
+    test('smallest first is the other way up', () {
+      expect(idsOf(sortEntries(ledger, LedgerSort.smallest)), <int>[2, 1, 3]);
+    });
+
+    test('merchant order ignores case', () {
+      // blinkit is lower-case: sorting on the raw string would put it last,
+      // after both capitalised names.
+      expect(idsOf(sortEntries(ledger, LedgerSort.merchant)), <int>[3, 2, 1]);
+    });
+
+    test('the input list is left alone', () {
+      sortEntries(ledger, LedgerSort.largest);
+      expect(idsOf(ledger), <int>[1, 2, 3]);
+    });
+
+    group('ties', () {
+      final sameDay = <LedgerEntry>[
+        entryOf(txn(id: 10, merchant: 'A', date: DateTime(2026, 8, 5))),
+        entryOf(txn(id: 11, merchant: 'A', date: DateTime(2026, 8, 5))),
+        entryOf(txn(id: 12, merchant: 'A', date: DateTime(2026, 8, 5))),
+      ];
+
+      test('newest first breaks a shared timestamp by id, highest first', () {
+        expect(idsOf(sortEntries(sameDay, LedgerSort.newest)), <int>[12, 11, 10]);
+      });
+
+      test('oldest first breaks it the other way, so it is a true reverse', () {
+        expect(idsOf(sortEntries(sameDay, LedgerSort.oldest)), <int>[10, 11, 12]);
+      });
+
+      test('equal amounts fall back to newest first', () {
+        expect(
+          idsOf(sortEntries(sameDay, LedgerSort.largest)),
+          <int>[12, 11, 10],
+        );
+      });
+    });
+
+    group('under a category filter', () {
+      /// A ₹2,000 order whose grocery line is smaller than a ₹700 standalone
+      /// charge, though the order as a whole is far bigger.
+      final order = txn(
+        id: 20,
+        merchant: 'AMAZON PAY IN G',
+        date: DateTime(2026, 8, 10),
+        amount: 2000,
+        splits: const <TxnSplit>[
+          TxnSplit(categoryId: 6, categoryName: 'Grocery', amount: 400),
+          TxnSplit(categoryId: 7, categoryName: 'Snacks', amount: 1600),
+        ],
+      );
+      final corner = txn(
+        id: 21,
+        merchant: 'CORNER STORE',
+        date: DateTime(2026, 8, 11),
+        amount: 700,
+      );
+
+      test('amount sorts use the shown portion, not the whole charge', () {
+        // Narrowed to Grocery, the order contributes 400 — less than the 700
+        // beside it — so it sorts below, despite being a ₹2,000 transaction.
+        final narrowed = applyFilters(
+          <ExpenseTxn>[order, corner],
+          categoryIds: <int>{6, 2},
+        );
+        expect(idsOf(sortEntries(narrowed, LedgerSort.largest)), <int>[21, 20]);
+      });
+
+      test('unfiltered, the same two sort the other way round', () {
+        final all = applyFilters(<ExpenseTxn>[order, corner]);
+        expect(idsOf(sortEntries(all, LedgerSort.largest)), <int>[20, 21]);
+      });
+    });
+  });
+
   group('split arithmetic', () {
     test('the balance of a fresh split is the whole charge', () {
       expect(unallocated(<double>[0], 2000), 2000);

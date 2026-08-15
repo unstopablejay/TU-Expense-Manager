@@ -94,11 +94,13 @@ Notes on the design:
 
 ### Database
 
-Schema version 5. Six tables, created on first launch (`AppDatabase`):
+Schema version 6. Seven tables, created on first launch (`AppDatabase`):
 
 ```sql
 categories           (id INTEGER PK, name TEXT UNIQUE COLLATE NOCASE)
 merchant_mappings    (merchant_name TEXT PK COLLATE NOCASE, category_id INTEGER FK)
+name_aliases         (kind TEXT, alias TEXT COLLATE NOCASE, canonical TEXT,
+                      PRIMARY KEY (kind, alias))
 transactions         (id INTEGER PK, amount REAL, payment_type TEXT,
                       merchant TEXT COLLATE NOCASE, date INTEGER, category_id INTEGER FK,
                       direction TEXT DEFAULT 'debit', reference TEXT DEFAULT '')
@@ -123,6 +125,13 @@ app_meta             (key TEXT PK, value TEXT)
   a timestamp; `reference` is in it because UPI alerts have no clock time, so two
   genuine same-day payments of the same amount to the same payee are otherwise
   indistinguishable.
+- `name_aliases` records which labels have been merged: `kind` is `'merchant'` or
+  `'payment_type'`, `alias` is a label the bank sent, `canonical` is what to call it. It is
+  applied **when rows are read**, never by rewriting them, which is what lets a future alert
+  in the old format fold in by itself and what makes a merge undoable. Keys are stored
+  lower-cased and the column is `COLLATE NOCASE`, so one row covers `HDFC Bank A/C *0444`
+  and `HDFC Bank A/c *0444` at once. Resolution is always a single hop — merging into a name
+  that is itself a merge result re-points the older rows rather than chaining onto them.
 - `deleted_transactions` holds the natural key of every transaction deleted on purpose,
   and its first five columns mirror that index exactly, `COLLATE NOCASE` included, so
   the two keys compare identically. The index above only stops the *same* SMS being
@@ -199,6 +208,11 @@ The `ALTER` is guarded on `oldVersion >= 3`, the same shape of reasoning as the 
 and dependent on running after it: a database arriving from v2 or earlier had
 `deleted_transactions` created from the shared const moments earlier, which already carries
 `splits_json`. Only one created by the v3 or v4 text is missing the column.
+
+#### Migration v5 → v6
+
+Creates `name_aliases`. No backfill and no column patching: an empty table says nothing has
+been merged, which is true of every database that predates the feature.
 
 ### Categorization
 
@@ -337,12 +351,32 @@ AGP 8+. The fork is API-identical; only the import differs.
 
 ## Usage
 
-Two tabs over one ledger, on a bottom navigation bar.
+One screen over the ledger, with **Settings** alongside it on a bottom navigation bar.
 
-### Dashboard — read-only
+### Dashboard
 
-Everything that happened, spend and received together, with three filters pinned under
-the app bar as chips that open a sheet:
+Everything that happened, spend and received together, filtered, sorted and edited in
+place. Pinned under the app bar is a scrolling row of chips, each opening a sheet.
+
+#### Sorting
+
+The first chip names the current order rather than saying "Sort", since an order is always
+in force:
+
+- **Newest first** (default) — what the query already returns, so it costs nothing.
+- **Oldest first** — the exact reverse, ties included.
+- **Amount: high to low** / **low to high**
+- **Merchant A–Z** — case-insensitive.
+
+Sorting happens in Dart over the filtered rows, not in SQL, and the amount orders compare
+**what the row shows**. Under a category filter a split contributes only its matching
+lines, so a ₹2,000 Amazon order narrowed to Grocery sorts on its ₹400 grocery line, not on
+₹2,000 — otherwise the list would order itself by figures the user has filtered out and
+cannot see. Every order falls back to date then id, so ties come out stable.
+
+#### Filtering
+
+Three facets, as chips that open a sheet:
 
 - **Category** — take as many as you like. Only categories something actually falls under,
   so a choice can never filter to nothing. The category *picker* still offers the full
@@ -367,24 +401,23 @@ so a Grocery-filtered view of a ₹2,000 Amazon order shows ₹1,200 and totals 
 the filters exclude everything, a **Clear filters** button appears (distinct from the empty
 state shown when there are no transactions at all).
 
-Tapping a row here switches to the Expenses tab and opens an actions sheet for that
-transaction — amount, card, date, categories, over **Change category**, **Split** and
-**Delete** — so spotting something wrong on the Dashboard doesn't mean hunting for it by
-hand.
+#### Editing
 
-### Expenses — the working tab
+The list is the working surface — there is nowhere else to go to change something:
 
-The same ledger, editable:
-
-- **Tap any transaction** to open its actions sheet — the same one the Dashboard opens, so
-  a row behaves identically whichever tab it was tapped on. From there: change its
-  category, split it across several, or delete it. Uncategorized rows are flagged in the
+- **Tap any transaction** to open its actions sheet — amount, card, date, categories, over
+  **Change category**, **Split** and **Delete**. Uncategorized rows are flagged in the
   error color. A split row's pill names its first category and counts the rest
   ("Grocery +2"); the sheet lists them all with their amounts.
 - **Swipe a row left to delete it**, with an **Undo** action on the snackbar. Delete is
   permanent by design: a tombstone is recorded so the transaction is not re-imported by
   a later scan, and Undo lifts that tombstone and restores the row under its original
   id. Credits are listed here too, so a mis-parsed one can be removed.
+
+  Swipe is withheld from a row that is showing **less than it would remove**. Under a
+  category filter a split displays only its matching portion, but deleting takes the whole
+  transaction, and swipe is the one delete with no confirmation behind it. Those rows are
+  still deletable through the actions sheet, which prints the full amount at the top.
 - **Long-press to mark**, then tap to mark more. The app bar becomes a selection bar
   with a count, select-all, and delete; the whole marked set goes in one SQL
   transaction, so a bulk delete is all or nothing, and Undo brings back exactly those
@@ -392,14 +425,71 @@ The same ledger, editable:
   stray gesture can't act outside the flow, and Back leaves selection before it leaves
   the app.
 
+  **Select all means all of what the filters left on screen**, not the whole ledger —
+  filter to one merchant and the count matches what you can see. The chip row hides while
+  marking, so the filters cannot move under a selection already made; that is what keeps
+  "all of them" unambiguous, and it makes filter-then-bulk-delete the natural way to clear
+  out a run of rows.
+
   Bulk delete confirms first. That dialog is not ceremony: the selection bar's delete
   icon occupies exactly the screen position the overflow menu does otherwise, so a reach
   for the menu can land on it, and unlike a swipe nothing about tapping an app bar icon
   reads as destructive. A single swipe-delete still goes straight through, since the
   gesture is deliberate and the Undo snackbar catches it.
-- **Add payment** (FAB) is a placeholder — entering a payment by hand is separate work.
-- **Paste an SMS** (toolbar) feeds a message straight into the parser, prefilled with a
+- **Paste an SMS** (FAB) feeds a message straight into the parser, prefilled with a
   sample, so the pipeline can be exercised without SMS permission.
+- **Merge merchant** and **Merge card / account** open the merge screen with that row's
+  name already ticked. They act on the name rather than on the transaction — the row is
+  simply where a duplicate is usually noticed.
+
+### Merging duplicates
+
+One real card, account or merchant arrives under several labels, because each template
+captures the issuer text verbatim and the banks are not consistent. A single account can
+show up as `BANK A/c XX0444`, `HDFC Bank A/C *0444` and `HDFC Bank A/c XX0444` — three
+entries in the filter, with the totals split across them.
+
+**Merge merchants** and **Merge cards & accounts** under Settings → Cleanup fix that, and
+each screen has three parts:
+
+- **Merged** — what is currently folded together, and the labels each name covers, with a
+  **Separate** action. Nothing was overwritten, so separating simply drops the rule.
+- **Looks like duplicates** — groups the app spotted, shown ticked but never merged without
+  a press. Cards group on their trailing digits; merchants group on a squashed form
+  (lower-cased, punctuation stripped, a leading `UPI_` dropped) so `UPI_GEORGE EGG CENTRE`
+  and `GEORGE EGG CENTRE` come up together. Both heuristics can be wrong — two genuinely
+  different cards can end in the same four digits — which is why they only ever suggest.
+- **All** — every current name, tick two or more and Merge.
+
+Merging asks what to call the result, offering the most-used spelling. That sheet is the
+confirmation; the snackbar behind it carries **Undo**.
+
+**Merging a merge works and does not resurrect anything.** Fold A and B into "Rapido", then
+fold "Rapido" and C into "Rapido Rides", and A and B are re-pointed at the new name rather
+than left hanging off the old one. Only "Rapido Rides" is offered afterwards.
+
+Two consequences worth knowing:
+
+- **A default set on a merged merchant is written for every label it covers.** Ingest looks
+  the default up under the raw merchant the SMS parsed to — it has to, since the alias is
+  resolved on the way out, not the way in — so a mapping keyed only on the merged name would
+  never be found. Backfill likewise spans all of them.
+- **`RAPIDO` and `Rapido` never need merging.** The database has always treated them as one
+  merchant (`COLLATE NOCASE` on the column, the mappings key and the natural-key index), and
+  the ledger now folds case-only variants onto the most common spelling on read. Only the UI
+  ever showed them as two.
+
+The Deleted section still shows the label a transaction was actually filed under, not the
+merged name: a tombstone is a record of what was removed, and its merchant is part of the
+key that finds the row again.
+
+### Settings
+
+The second destination on the navigation bar: **Merchants & defaults**, the **Cleanup**
+merge screens, the update controls (automatic check, check now, install), and version
+information. Leaving it reloads the ledger, because a default changed there can be
+backfilled over history — without the reload the rows behind it would keep showing the
+categories they had on the way in.
 
 ### Deleted transactions
 
@@ -453,18 +543,23 @@ statement alerts and promos. Two cases specifically guard against regressions th
 looked plausible: `PZCREDIT9772829` staying a debit, and the trailing `Bal` /
 `Avl Limit:` figures never being mistaken for the amount.
 
-It also covers the dashboard and split logic — `applyFilters`, `amountIn`,
-`spendByCategory`, `categoryOptions`, `merchantOptions`, `pruneSelection`, the split
-arithmetic (`unallocated`, `isBalanced`, `withRemainderInLast`) and the tombstone payload
-(`encodeSplits`, `decodeSplits`). All are pure top-level functions precisely so they can
-be tested without a database behind them; anything worth covering is written that way.
+It also covers the dashboard, merge and split logic — `applyFilters`, `amountIn`,
+`spendByCategory`, `categoryOptions`, `merchantOptions`, `pruneSelection`, `sortEntries`,
+the merge rules (`NameAliases`, `mergePlan`, `canonicaliseLedger`, `suggestGroups`), the
+split arithmetic (`unallocated`, `isBalanced`, `withRemainderInLast`) and the tombstone
+payload (`encodeSplits`, `decodeSplits`). All are pure top-level functions precisely so
+they can be tested without a database behind them; anything worth covering is written that
+way.
 
 Cases specifically guarding regressions this design invites: a split found by the category
 of its *smallest* line (proving the filter reads lines rather than the cached
 `category_id`), a category offered by the facet only because it appears as a minor split
-line, a facet ignoring its own selection so it cannot empty itself, ten paise divided three
-ways staying balanced, and the last line absorbing that drift so what is stored sums
-exactly.
+line, a facet ignoring its own selection so it cannot empty itself, an amount sort reading
+the filtered portion of a split rather than the whole charge, oldest-first breaking its ties
+oldest-first so it is a true reverse of newest-first, a chained merge re-pointing its
+earlier members so they cannot resurface, a case-only merge keeping the spelling that was
+chosen rather than dropping the row as redundant, ten paise divided three ways staying
+balanced, and the last line absorbing that drift so what is stored sums exactly.
 
 The database and widget layers have no automated coverage: `AppDatabase` needs the real
 sqflite plugin, and `sqflite_common_ffi` is deliberately not a dependency. Delete, restore,
@@ -481,7 +576,7 @@ adb emu sms send BANKSMS "INR 160.00 spent using BANK Card XX8008 on 11-Aug-26 o
 
 The transaction should appear on the dashboard within a second or two. Newlines don't
 survive `adb emu sms send`, so for the one-field-per-line transfer alerts use
-**Paste an SMS** in the Expenses toolbar instead. To inspect what was actually stored:
+the **Paste an SMS** button instead. To inspect what was actually stored:
 
 ```bash
 adb shell run-as com.tu.expense.manager cat databases/expense_manager.db > /tmp/e.db
@@ -489,12 +584,17 @@ sqlite3 /tmp/e.db "SELECT t.amount, t.merchant, t.direction, t.reference, c.name
 sqlite3 /tmp/e.db "PRAGMA user_version; SELECT * FROM app_meta; SELECT * FROM deleted_transactions;"
 sqlite3 /tmp/e.db "SELECT s.transaction_id, c.name, s.amount FROM transaction_splits s JOIN categories c ON c.id = s.category_id ORDER BY s.transaction_id, s.position;"
 sqlite3 /tmp/e.db "SELECT merchant_name, category_id FROM merchant_mappings;"
+sqlite3 /tmp/e.db "SELECT kind, alias, canonical FROM name_aliases;"
 ```
 
 Worth walking by hand, since none of it is covered by `flutter test`:
 
 - **Upgrade, not reinstall.** Install the previous build, scan a few alerts, then
-  install this one over the top: the rows must survive and `user_version` must read 5.
+  install this one over the top: the rows must survive and `user_version` must read 6.
+- **Delete after a merge.** The one place merged names could do real damage. Merge a card
+  or merchant, delete one of its transactions, and check the row actually went and the
+  tombstone holds the **raw** label rather than the merged one — `_naturalKeyOf` uses
+  `rawMerchant` precisely so the key still finds the row. Then Undo it.
   Worth doing from a v3-created database too, since the `splits_json` `ALTER` is guarded
   on `oldVersion >= 3` and a v2-or-earlier database must *not* take that branch.
 - **Split adds up.** Split a ₹2,000 charge: the balance must flow into the last row as the
