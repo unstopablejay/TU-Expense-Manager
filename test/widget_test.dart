@@ -433,17 +433,21 @@ void main() {
       required int categoryId,
       required String categoryName,
       TxnDirection direction = TxnDirection.debit,
+      double amount = 100,
+      String? merchant,
+      List<TxnSplit> splits = const <TxnSplit>[],
     }) =>
         ExpenseTxn(
           id: id,
-          amount: 100,
+          amount: amount,
           paymentType: paymentType,
-          merchant: 'MERCHANT $id',
+          merchant: merchant ?? 'MERCHANT $id',
           date: DateTime(2026, 8, id),
           categoryId: categoryId,
           categoryName: categoryName,
           direction: direction,
           reference: '',
+          splits: splits,
         );
 
     final ledger = <ExpenseTxn>[
@@ -459,15 +463,31 @@ void main() {
       ),
     ];
 
-    List<int> idsOf(List<ExpenseTxn> rows) =>
-        rows.map((ExpenseTxn t) => t.id).toList();
+    /// A ₹2,000 Amazon order broken into groceries, snacks and shopping — the
+    /// case splits exist for.
+    final amazon = txn(
+      id: 5,
+      paymentType: 'YES BANK Card X2858',
+      merchant: 'AMAZON PAY IN G',
+      amount: 2000,
+      categoryId: 6,
+      categoryName: 'Grocery',
+      splits: const <TxnSplit>[
+        TxnSplit(categoryId: 6, categoryName: 'Grocery', amount: 1200),
+        TxnSplit(categoryId: 7, categoryName: 'Snacks', amount: 500),
+        TxnSplit(categoryId: 8, categoryName: 'Shopping', amount: 300),
+      ],
+    );
 
-    test('no filters returns the list untouched', () {
-      expect(identical(applyFilters(ledger), ledger), isTrue);
+    List<int> idsOf(List<LedgerEntry> rows) =>
+        rows.map((LedgerEntry e) => e.txn.id).toList();
+
+    test('no filters returns every row', () {
+      expect(idsOf(applyFilters(ledger)), <int>[1, 2, 3, 4]);
     });
 
     test('filters by category alone', () {
-      expect(idsOf(applyFilters(ledger, categoryId: 2)), <int>[1, 2]);
+      expect(idsOf(applyFilters(ledger, categoryIds: <int>{2})), <int>[1, 2]);
     });
 
     test('filters by card or account alone', () {
@@ -477,15 +497,29 @@ void main() {
       );
     });
 
-    test('credits are filtered like any other row', () {
-      expect(idsOf(applyFilters(ledger, categoryId: 4)), <int>[4]);
+    test('filters by merchant alone', () {
+      expect(
+        idsOf(applyFilters(ledger, merchants: <String>{'MERCHANT 3'})),
+        <int>[3],
+      );
     });
 
-    test('both filters together are an AND, not an OR', () {
+    test('several categories at once are an OR within the facet', () {
+      expect(
+        idsOf(applyFilters(ledger, categoryIds: <int>{2, 3})),
+        <int>[1, 2, 3],
+      );
+    });
+
+    test('credits are filtered like any other row', () {
+      expect(idsOf(applyFilters(ledger, categoryIds: <int>{4})), <int>[4]);
+    });
+
+    test('separate facets are an AND, not an OR', () {
       expect(
         idsOf(applyFilters(
           ledger,
-          categoryId: 2,
+          categoryIds: <int>{2},
           paymentType: 'YES BANK Card X2858',
         )),
         <int>[1],
@@ -496,48 +530,278 @@ void main() {
       expect(
         applyFilters(
           ledger,
-          categoryId: 3, // Fuel, only ever on the YES card
+          categoryIds: <int>{3}, // Fuel, only ever on the YES card
           paymentType: 'HDFC Bank A/C *0444',
         ),
         isEmpty,
       );
     });
 
-    group('categoriesInUse', () {
-      // The seed list, in the order the database hands it back: Uncategorized
-      // pinned first, the rest alphabetical.
+    test('an unfiltered split contributes its whole amount', () {
+      final entry = applyFilters(<ExpenseTxn>[amazon]).single;
+      expect(entry.lines, hasLength(3));
+      expect(entry.amount, 2000);
+    });
+
+    test('a category filter narrows a split to the matching line', () {
+      final entry =
+          applyFilters(<ExpenseTxn>[amazon], categoryIds: <int>{6}).single;
+      expect(entry.amount, 1200);
+      expect(entry.lines.single.categoryName, 'Grocery');
+    });
+
+    test('a split matching on two lines contributes both', () {
+      final entry =
+          applyFilters(<ExpenseTxn>[amazon], categoryIds: <int>{6, 8}).single;
+      expect(entry.amount, 1500);
+    });
+
+    test('a split matching no line drops out entirely', () {
+      expect(
+        applyFilters(<ExpenseTxn>[amazon], categoryIds: <int>{2}),
+        isEmpty,
+      );
+    });
+
+    test('a split is found by the category of a minor line', () {
+      // Shopping is the smallest of the three and is not the dominant category
+      // cached on the transaction, so matching on it proves the filter reads
+      // the lines rather than `category_id`.
+      expect(
+        idsOf(applyFilters(<ExpenseTxn>[amazon], categoryIds: <int>{8})),
+        <int>[5],
+      );
+    });
+
+    group('amountIn', () {
+      test('is the full amount with no category filter', () {
+        expect(amountIn(amazon, null), 2000);
+        expect(amountIn(amazon, <int>{}), 2000);
+      });
+
+      test('is the full amount for an unsplit transaction that matches', () {
+        expect(amountIn(ledger[0], <int>{2}), 100);
+      });
+
+      test('is the matching portion of a split', () {
+        expect(amountIn(amazon, <int>{7}), 500);
+      });
+
+      test('is zero when nothing matches', () {
+        expect(amountIn(amazon, <int>{99}), 0);
+      });
+    });
+
+    group('spendByCategory', () {
+      test('attributes a split across all of its lines', () {
+        final breakdown = spendByCategory(applyFilters(<ExpenseTxn>[amazon]));
+        expect(breakdown, <String, double>{
+          'Grocery': 1200,
+          'Snacks': 500,
+          'Shopping': 300,
+        });
+      });
+
+      test('the breakdown sums to what was spent, never more', () {
+        final breakdown = spendByCategory(applyFilters(<ExpenseTxn>[amazon]));
+        final total = breakdown.values.fold<double>(0, (a, b) => a + b);
+        expect(total, amazon.amount);
+      });
+
+      test('credits are left out of the breakdown', () {
+        // id 4 is the only credit, and the only thing under Salary.
+        expect(spendByCategory(applyFilters(ledger)).containsKey('Salary'),
+            isFalse);
+      });
+
+      test('adds up rows sharing a category', () {
+        expect(spendByCategory(applyFilters(ledger))['Food'], 200);
+      });
+    });
+
+    group('facet options', () {
       const all = <ExpenseCategory>[
         ExpenseCategory(id: 1, name: 'Uncategorized'),
         ExpenseCategory(id: 2, name: 'Food'),
         ExpenseCategory(id: 3, name: 'Fuel'),
         ExpenseCategory(id: 4, name: 'Salary'),
         ExpenseCategory(id: 5, name: 'Travel'),
+        ExpenseCategory(id: 6, name: 'Grocery'),
+        ExpenseCategory(id: 7, name: 'Snacks'),
+        ExpenseCategory(id: 8, name: 'Shopping'),
       ];
 
       List<String> namesOf(List<ExpenseCategory> rows) =>
           rows.map((ExpenseCategory c) => c.name).toList();
 
       test('drops categories no transaction uses', () {
-        // The ledger uses 2 (Food), 3 (Fuel) and 4 (Salary) — never 1 or 5.
-        expect(namesOf(categoriesInUse(ledger, all)),
+        expect(namesOf(categoryOptions(ledger, all)),
             <String>['Food', 'Fuel', 'Salary']);
       });
 
       test('keeps the order of the full list', () {
         final shuffled = <ExpenseTxn>[ledger[3], ledger[2], ledger[0]];
-        expect(namesOf(categoriesInUse(shuffled, all)),
+        expect(namesOf(categoryOptions(shuffled, all)),
             <String>['Food', 'Fuel', 'Salary']);
       });
 
       test('a category used only by a credit still counts', () {
-        // id 4 (Salary) is worn by the single credit in the ledger.
-        expect(namesOf(categoriesInUse(<ExpenseTxn>[ledger[3]], all)),
+        expect(namesOf(categoryOptions(<ExpenseTxn>[ledger[3]], all)),
             <String>['Salary']);
       });
 
       test('an empty ledger uses no categories', () {
-        expect(categoriesInUse(<ExpenseTxn>[], all), isEmpty);
+        expect(categoryOptions(<ExpenseTxn>[], all), isEmpty);
       });
+
+      test('a category appearing only as a minor split line is offered', () {
+        // Shopping is neither the dominant category nor a whole transaction's
+        // — reading `category_id` alone would hide it, and the filter would
+        // then be able to match something it never offered.
+        expect(
+          namesOf(categoryOptions(<ExpenseTxn>[amazon], all)),
+          <String>['Grocery', 'Snacks', 'Shopping'],
+        );
+      });
+
+      test('picking a merchant narrows the categories on offer', () {
+        expect(
+          namesOf(categoryOptions(
+            <ExpenseTxn>[...ledger, amazon],
+            all,
+            merchants: <String>{'MERCHANT 3'},
+          )),
+          <String>['Fuel'],
+        );
+      });
+
+      test('picking a category narrows the merchants on offer', () {
+        expect(
+          merchantOptions(
+            <ExpenseTxn>[...ledger, amazon],
+            categoryIds: <int>{7},
+          ),
+          <String>['AMAZON PAY IN G'],
+        );
+      });
+
+      test('a facet ignores its own selection, so it cannot empty itself', () {
+        // Fuel is only ever on MERCHANT 3. If the merchant facet applied the
+        // merchant filter as well, picking MERCHANT 3 would leave the merchant
+        // list holding only the row already chosen — and picking a second
+        // merchant would become impossible.
+        expect(
+          merchantOptions(ledger, categoryIds: <int>{2}),
+          <String>['MERCHANT 1', 'MERCHANT 2'],
+        );
+      });
+    });
+
+    group('pruneSelection', () {
+      test('drops what is no longer available', () {
+        expect(pruneSelection(<int>{1, 2, 3}, <int>[2, 3, 4]), <int>{2, 3});
+      });
+
+      test('keeps everything when all of it survives', () {
+        expect(pruneSelection(<int>{1, 2}, <int>[1, 2, 3]), <int>{1, 2});
+      });
+
+      test('an empty selection stays empty', () {
+        expect(pruneSelection(<int>{}, <int>[1]), isEmpty);
+      });
+    });
+  });
+
+  group('split arithmetic', () {
+    test('the balance of a fresh split is the whole charge', () {
+      expect(unallocated(<double>[0], 2000), 2000);
+    });
+
+    test('typing the first line leaves the rest for the second', () {
+      // 2,000 with 1,200 against Grocery leaves 800.
+      expect(withRemainderInLast(<double>[1200, 0], 2000).last, 800);
+    });
+
+    test('a third line takes what the first two leave', () {
+      // 1,200 and 300 of 2,000 leaves 500 for the row just added.
+      expect(withRemainderInLast(<double>[1200, 300, 0], 2000).last, 500);
+    });
+
+    test('the rows above the last are left exactly as typed', () {
+      expect(
+        withRemainderInLast(<double>[1200, 300, 999], 2000),
+        <double>[1200, 300, 500],
+      );
+    });
+
+    test('over-allocating drives the last line negative', () {
+      expect(withRemainderInLast(<double>[1800, 400, 0], 2000).last, -200);
+      expect(unallocated(<double>[1800, 400], 2000), -200);
+    });
+
+    test('lines that add up are balanced', () {
+      expect(isBalanced(<double>[1200, 500, 300], 2000), isTrue);
+    });
+
+    test('lines that fall short or overshoot are not', () {
+      expect(isBalanced(<double>[1200, 500], 2000), isFalse);
+      expect(isBalanced(<double>[1200, 900], 2000), isFalse);
+    });
+
+    test('no lines at all is never balanced', () {
+      expect(isBalanced(<double>[], 0), isFalse);
+    });
+
+    test('a single line covering the charge is balanced', () {
+      expect(isBalanced(<double>[2000], 2000), isTrue);
+    });
+
+    test('paise-level drift is tolerated', () {
+      // Ten paise three ways cannot land exactly in binary floating point.
+      final third = 0.1 / 3;
+      expect(isBalanced(<double>[third, third, third], 0.1), isTrue);
+    });
+
+    test('the last line absorbs the drift, so the stored set sums exactly', () {
+      final third = 0.1 / 3;
+      final exact = withRemainderInLast(<double>[third, third, third], 0.1);
+      expect(exact.fold<double>(0, (a, b) => a + b), 0.1);
+    });
+
+    test('a rupee out is not drift', () {
+      expect(isBalanced(<double>[1999], 2000), isFalse);
+    });
+  });
+
+  group('encodeSplits / decodeSplits', () {
+    const lines = <TxnSplit>[
+      TxnSplit(categoryId: 6, categoryName: 'Grocery', amount: 1200),
+      TxnSplit(categoryId: 8, categoryName: 'Shopping', amount: 800),
+    ];
+
+    test('round-trips through the tombstone', () {
+      final restored = decodeSplits(encodeSplits(lines));
+      expect(restored, hasLength(2));
+      expect(restored.first.categoryId, 6);
+      expect(restored.first.categoryName, 'Grocery');
+      expect(restored.first.amount, 1200);
+      expect(restored.last.amount, 800);
+    });
+
+    test('no splits encode to null, keeping the column empty', () {
+      expect(encodeSplits(const <TxnSplit>[]), isNull);
+    });
+
+    test('a tombstone written before v5 decodes to no splits', () {
+      expect(decodeSplits(null), isEmpty);
+      expect(decodeSplits(''), isEmpty);
+    });
+
+    test('unreadable payload decodes to no splits rather than throwing', () {
+      // Coming back whole under one category is recoverable; throwing on the
+      // way out of the Deleted screen is not.
+      expect(decodeSplits('not json'), isEmpty);
+      expect(decodeSplits('{"not":"a list"}'), isEmpty);
     });
   });
 }
