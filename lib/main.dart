@@ -1814,6 +1814,43 @@ class LedgerEntry {
       lines.fold<double>(0, (double sum, TxnSplit l) => sum + l.amount);
 }
 
+/// The three facets the ledger can be narrowed by, as one value.
+///
+/// Together rather than as three loose fields because they travel together
+/// everywhere: the shell holds them, the chip strip reads them, and every
+/// change replaces the whole set.
+class LedgerFilters {
+  const LedgerFilters({
+    this.categoryIds = const <int>{},
+    this.merchants = const <String>{},
+    this.paymentType,
+  });
+
+  final Set<int> categoryIds;
+  final Set<String> merchants;
+
+  /// One card or account at a time, unlike the other two.
+  final String? paymentType;
+
+  bool get isEmpty =>
+      categoryIds.isEmpty && merchants.isEmpty && paymentType == null;
+
+  /// `clearPaymentType` because passing `paymentType: null` cannot say whether
+  /// it means "leave it" or "drop it".
+  LedgerFilters copyWith({
+    Set<int>? categoryIds,
+    Set<String>? merchants,
+    String? paymentType,
+    bool clearPaymentType = false,
+  }) =>
+      LedgerFilters(
+        categoryIds: categoryIds ?? this.categoryIds,
+        merchants: merchants ?? this.merchants,
+        paymentType:
+            clearPaymentType ? null : (paymentType ?? this.paymentType),
+      );
+}
+
 /// Narrows the ledger to any combination of categories, merchants and one
 /// card/account, and projects each surviving transaction down to the split
 /// lines that matched. A null or empty filter means "everything".
@@ -1936,6 +1973,60 @@ Set<T> pruneSelection<T>(Set<T> selected, Iterable<T> available) {
   return selected.where(keep.contains).toSet();
 }
 
+/// The orders the ledger can be read in. [newest] is what the database already
+/// hands back, so it is the default and costs nothing.
+enum LedgerSort {
+  newest('Newest first'),
+  oldest('Oldest first'),
+  largest('Amount: high to low'),
+  smallest('Amount: low to high'),
+  merchant('Merchant A–Z');
+
+  const LedgerSort(this.label);
+
+  /// What the chip and the sheet call this order.
+  final String label;
+}
+
+/// Orders an already-filtered view.
+///
+/// The amount orders compare [LedgerEntry.amount] — the part of the transaction
+/// this row actually shows — rather than the whole charge, so a view narrowed to
+/// one category sorts by what it contributed to that category. Sorting by the
+/// full amount would put a ₹2,000 order above a ₹1,500 one on the strength of
+/// lines the user has filtered out and cannot see.
+///
+/// Pure and top-level so it can be tested without a database behind it.
+List<LedgerEntry> sortEntries(List<LedgerEntry> entries, LedgerSort sort) {
+  // A copy: the caller's list is derived per build and reused, and an in-place
+  // sort would make the order depend on how many times this had been called.
+  final List<LedgerEntry> ordered = List<LedgerEntry>.of(entries);
+
+  // Two rows can tie on whatever is being sorted by — same amount, same
+  // merchant — and several share a timestamp to the minute. Date then id
+  // settles those, so the order is total and a rebuild cannot reshuffle it.
+  int byNewest(LedgerEntry a, LedgerEntry b) {
+    final int byDate = b.txn.date.compareTo(a.txn.date);
+    return byDate != 0 ? byDate : b.txn.id.compareTo(a.txn.id);
+  }
+
+  ordered.sort((LedgerEntry a, LedgerEntry b) {
+    // Zero means "these tie on what was asked for", and the fallback decides.
+    final int primary = switch (sort) {
+      // Reversed whole rather than by date alone, so oldest-first breaks its
+      // ties oldest-first too.
+      LedgerSort.newest || LedgerSort.oldest => 0,
+      LedgerSort.largest => b.amount.compareTo(a.amount),
+      LedgerSort.smallest => a.amount.compareTo(b.amount),
+      LedgerSort.merchant =>
+        a.txn.merchant.toLowerCase().compareTo(b.txn.merchant.toLowerCase()),
+    };
+    if (primary != 0) return primary;
+    return sort == LedgerSort.oldest ? -byNewest(a, b) : byNewest(a, b);
+  });
+  return ordered;
+}
+
 // ---------------------------------------------------------------------------
 // SPLIT ARITHMETIC — pure, so the one fiddly calculation in the app is tested
 // ---------------------------------------------------------------------------
@@ -2005,9 +2096,10 @@ class _ScanResult {
   final int skipped;
 }
 
-/// Two tabs over one ledger: a read-only Dashboard with quick filters, and an
-/// Expenses tab where rows can be categorised, deleted, or (eventually) added
-/// by hand. This shell owns the data; the tabs only render it.
+/// One ledger, one screen: filter it, sort it, categorise, split and delete
+/// from it. Settings sits alongside as the only other destination. This shell
+/// owns the data and the view over it; the tabs only render what they are
+/// handed.
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -2029,8 +2121,14 @@ class _HomeShellState extends State<HomeShell> {
   bool _scanning = false;
   int _tab = 0;
 
-  /// Ids marked on the Expenses tab. Lives here rather than in the tab because
-  /// the app bar it takes over is built here.
+  /// How the ledger is narrowed and ordered. Held here rather than in the tab
+  /// because the selection app bar — built here — has to know which rows are on
+  /// screen before it can offer to select or delete "all" of them.
+  LedgerFilters _filters = const LedgerFilters();
+  LedgerSort _sort = LedgerSort.newest;
+
+  /// Ids marked for deletion. Lives here rather than in the tab because the app
+  /// bar it takes over is built here.
   final Set<int> _selected = <int>{};
 
   @override
@@ -2354,10 +2452,9 @@ class _HomeShellState extends State<HomeShell> {
     await _delete(gone);
   }
 
-  /// Opens the transaction from the read-only dashboard on the tab where it can
-  /// actually be changed, with its actions already in reach.
+  /// Everything that can be done to one row — categorise, split, delete — in
+  /// one sheet, so the list itself needs no per-row controls.
   Future<void> _openTransaction(ExpenseTxn txn) async {
-    setState(() => _tab = 1);
     final action = await showModalBottomSheet<_TxnAction>(
       context: context,
       showDragHandle: true,
@@ -2400,17 +2497,6 @@ class _HomeShellState extends State<HomeShell> {
         onChanged: _load,
       ),
     ));
-  }
-
-  Future<void> _openSettings() async {
-    await Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => const SettingsScreen(),
-    ));
-    if (!mounted) return;
-    // Settings reaches Merchants & defaults, where a default can be backfilled
-    // over history. Without this the ledger behind it keeps showing the
-    // categories those rows had on the way in.
-    await _load();
   }
 
   /// The launch-time update check. Silent unless there is something to install:
@@ -2462,7 +2548,76 @@ class _HomeShellState extends State<HomeShell> {
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  AppBar _selectionAppBar() {
+  // ---- The view over the ledger -------------------------------------------
+
+  /// Everything the list and its chips are built from, worked out once per
+  /// build: what each facet can still offer, the filters with anything stale
+  /// dropped, and the rows that survive them in the chosen order.
+  ({
+    List<ExpenseCategory> categories,
+    List<String> merchants,
+    List<String> paymentTypes,
+    LedgerFilters filters,
+    List<LedgerEntry> visible,
+  }) _derive() {
+    // Every card and account the ledger has seen. Derived from the loaded rows
+    // rather than queried, so it stays in step with the list for free.
+    final List<String> paymentTypes = _transactions
+        .map((ExpenseTxn t) => t.paymentType)
+        .toSet()
+        .toList()
+      ..sort();
+
+    // Each facet offers what the *other* filters leave available, so the two
+    // narrow each other without either being able to empty itself out from
+    // under a selection already made in it.
+    final List<ExpenseCategory> categories = categoryOptions(
+      _transactions,
+      _categories,
+      merchants: _filters.merchants,
+      paymentType: _filters.paymentType,
+    );
+    final List<String> merchants = merchantOptions(
+      _transactions,
+      categoryIds: _filters.categoryIds,
+      paymentType: _filters.paymentType,
+    );
+
+    // A selection can outlive its data — delete the last transaction on a card
+    // and that card is gone from the list. Drop anything no longer on offer for
+    // this build rather than filtering on a value nothing carries.
+    final LedgerFilters filters = LedgerFilters(
+      categoryIds: pruneSelection(
+        _filters.categoryIds,
+        categories.map((ExpenseCategory c) => c.id),
+      ),
+      merchants: pruneSelection(_filters.merchants, merchants),
+      paymentType: paymentTypes.contains(_filters.paymentType)
+          ? _filters.paymentType
+          : null,
+    );
+
+    return (
+      categories: categories,
+      merchants: merchants,
+      paymentTypes: paymentTypes,
+      filters: filters,
+      visible: sortEntries(
+        applyFilters(
+          _transactions,
+          categoryIds: filters.categoryIds,
+          merchants: filters.merchants,
+          paymentType: filters.paymentType,
+        ),
+        _sort,
+      ),
+    );
+  }
+
+  /// [visible] is what the filters currently leave on screen. Select all means
+  /// all of *those* — marking rows a filter has hidden would hand the delete
+  /// button transactions the user cannot see.
+  AppBar _selectionAppBar(List<LedgerEntry> visible) {
     return AppBar(
       leading: IconButton(
         tooltip: 'Cancel',
@@ -2475,7 +2630,7 @@ class _HomeShellState extends State<HomeShell> {
           tooltip: 'Select all',
           onPressed: () => setState(() => _selected
             ..clear()
-            ..addAll(_transactions.map((ExpenseTxn t) => t.id))),
+            ..addAll(visible.map((LedgerEntry e) => e.txn.id))),
           icon: const Icon(Icons.select_all),
         ),
         IconButton(
@@ -2487,9 +2642,9 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
-  AppBar _normalAppBar({required bool onExpenses}) {
+  AppBar _normalAppBar() {
     return AppBar(
-      title: Text(onExpenses ? 'Expenses' : 'Dashboard'),
+      title: const Text('Dashboard'),
       actions: <Widget>[
         if (_scanning)
           const Center(
@@ -2508,12 +2663,6 @@ class _HomeShellState extends State<HomeShell> {
             onPressed: () => _scanFromToolbar(),
             icon: const Icon(Icons.sms_outlined),
           ),
-        if (onExpenses)
-          IconButton(
-            tooltip: 'Paste an SMS',
-            onPressed: _addSmsManually,
-            icon: const Icon(Icons.content_paste_outlined),
-          ),
         PopupMenuButton<String>(
           onSelected: (String value) {
             switch (value) {
@@ -2521,8 +2670,6 @@ class _HomeShellState extends State<HomeShell> {
                 _scanFromToolbar(full: true);
               case 'deleted':
                 _openDeleted();
-              case 'settings':
-                _openSettings();
             }
           },
           itemBuilder: (_) => const <PopupMenuEntry<String>>[
@@ -2534,21 +2681,30 @@ class _HomeShellState extends State<HomeShell> {
               value: 'rescan',
               child: Text('Rescan all messages'),
             ),
-            PopupMenuDivider(),
-            PopupMenuItem<String>(
-              value: 'settings',
-              child: Text('Settings'),
-            ),
           ],
         ),
       ],
     );
   }
 
+  /// Settings can change what the ledger says — Merchants & defaults backfills
+  /// a category over history — so coming back from it reloads rather than
+  /// showing rows still carrying the categories they had on the way in.
+  void _selectTab(int index) {
+    final bool leavingSettings = _tab == 1 && index != 1;
+    setState(() {
+      _tab = index;
+      // Marks are about rows on the ledger; leaving it drops them.
+      _selected.clear();
+    });
+    if (leavingSettings) _load();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final bool onExpenses = _tab == 1;
-    final bool selecting = onExpenses && _selected.isNotEmpty;
+    final bool onLedger = _tab == 0;
+    final bool selecting = _selected.isNotEmpty;
+    final view = _derive();
 
     return PopScope(
       // Back should leave selection mode before it leaves the app.
@@ -2557,55 +2713,51 @@ class _HomeShellState extends State<HomeShell> {
         if (!didPop) _clearSelection();
       },
       child: Scaffold(
-        appBar:
-            selecting ? _selectionAppBar() : _normalAppBar(onExpenses: onExpenses),
-        // IndexedStack rather than a swap, so switching tabs keeps each one's
-        // scroll position and the dashboard's filter selections.
+        appBar: selecting
+            ? _selectionAppBar(view.visible)
+            : onLedger
+                ? _normalAppBar()
+                : AppBar(title: const Text('Settings')),
+        // IndexedStack rather than a swap, so switching tabs keeps the ledger's
+        // scroll position and Settings' loaded state.
         body: IndexedStack(
           index: _tab,
           children: <Widget>[
             DashboardTab(
-              transactions: _transactions,
-              categories: _categories,
+              entries: view.visible,
+              filters: view.filters,
+              sort: _sort,
+              categoryChoices: view.categories,
+              merchantChoices: view.merchants,
+              paymentTypeChoices: view.paymentTypes,
               money: _money,
               dateFormat: _dateFormat,
               loading: _loading,
-              onRefresh: _load,
-              onTap: _openTransaction,
-            ),
-            ExpensesTab(
-              transactions: _transactions,
-              money: _money,
-              dateFormat: _dateFormat,
-              loading: _loading,
+              // The list can be empty because the ledger is, or because the
+              // filters excluded everything — two different things to say.
+              ledgerIsEmpty: _transactions.isEmpty,
               selected: _selected,
+              onFiltersChanged: (LedgerFilters f) =>
+                  setState(() => _filters = f),
+              onSortChanged: (LedgerSort s) => setState(() => _sort = s),
               onRefresh: _load,
-              // The same sheet the Dashboard opens, so a row behaves the same
-              // way whichever tab it was tapped on — and so Split is reachable
-              // from both.
               onTap: _openTransaction,
               onToggleSelected: _toggleSelected,
               onDelete: (ExpenseTxn txn) => _delete(<ExpenseTxn>[txn]),
-              onAddSms: _addSmsManually,
             ),
+            const SettingsScreen(),
           ],
         ),
-        floatingActionButton: onExpenses && !selecting
+        floatingActionButton: onLedger && !selecting
             ? FloatingActionButton.extended(
-                // Placeholder. Entering a payment by hand is its own piece of
-                // work — this reserves the spot it will live in.
-                onPressed: () => _toast('Manual payment entry is coming soon.'),
-                icon: const Icon(Icons.add),
-                label: const Text('Add payment'),
+                onPressed: _addSmsManually,
+                icon: const Icon(Icons.content_paste_outlined),
+                label: const Text('Paste an SMS'),
               )
             : null,
         bottomNavigationBar: NavigationBar(
           selectedIndex: _tab,
-          onDestinationSelected: (int index) => setState(() {
-            _tab = index;
-            // Marks belong to the Expenses tab; leaving it drops them.
-            _selected.clear();
-          }),
+          onDestinationSelected: _selectTab,
           destinations: const <NavigationDestination>[
             NavigationDestination(
               icon: Icon(Icons.dashboard_outlined),
@@ -2613,9 +2765,9 @@ class _HomeShellState extends State<HomeShell> {
               label: 'Dashboard',
             ),
             NavigationDestination(
-              icon: Icon(Icons.receipt_long_outlined),
-              selectedIcon: Icon(Icons.receipt_long),
-              label: 'Expenses',
+              icon: Icon(Icons.settings_outlined),
+              selectedIcon: Icon(Icons.settings),
+              label: 'Settings',
             ),
           ],
         ),
@@ -2625,49 +2777,70 @@ class _HomeShellState extends State<HomeShell> {
 }
 
 // ---------------------------------------------------------------------------
-// DASHBOARD TAB — everything that happened, filtered, read-only
+// DASHBOARD TAB — the whole ledger: filtered, sorted, and editable in place
 // ---------------------------------------------------------------------------
 
-class DashboardTab extends StatefulWidget {
+/// The one screen over the ledger.
+///
+/// It renders and nothing more: the shell works out which rows survive the
+/// filters and in what order, and owns the marks, so that the app bar — which
+/// the shell builds — and this list can never disagree about what "all of them"
+/// means.
+class DashboardTab extends StatelessWidget {
   const DashboardTab({
     super.key,
-    required this.transactions,
-    required this.categories,
+    required this.entries,
+    required this.filters,
+    required this.sort,
+    required this.categoryChoices,
+    required this.merchantChoices,
+    required this.paymentTypeChoices,
     required this.money,
     required this.dateFormat,
     required this.loading,
+    required this.ledgerIsEmpty,
+    required this.selected,
+    required this.onFiltersChanged,
+    required this.onSortChanged,
     required this.onRefresh,
     required this.onTap,
+    required this.onToggleSelected,
+    required this.onDelete,
   });
 
-  final List<ExpenseTxn> transactions;
-  final List<ExpenseCategory> categories;
+  /// The rows to show: already filtered, already in order.
+  final List<LedgerEntry> entries;
+
+  final LedgerFilters filters;
+  final LedgerSort sort;
+
+  /// What each facet can still offer under the other two.
+  final List<ExpenseCategory> categoryChoices;
+  final List<String> merchantChoices;
+  final List<String> paymentTypeChoices;
+
   final NumberFormat money;
   final DateFormat dateFormat;
   final bool loading;
+
+  /// Whether the ledger itself is empty, as opposed to filtered down to
+  /// nothing — the two want different things said about them.
+  final bool ledgerIsEmpty;
+
+  /// Ids currently marked. Non-empty means the list is in selection mode.
+  final Set<int> selected;
+
+  final ValueChanged<LedgerFilters> onFiltersChanged;
+  final ValueChanged<LedgerSort> onSortChanged;
   final Future<void> Function() onRefresh;
-
-  /// Hands the transaction to the Expenses tab, where it can be changed.
   final void Function(ExpenseTxn) onTap;
-
-  @override
-  State<DashboardTab> createState() => _DashboardTabState();
-}
-
-class _DashboardTabState extends State<DashboardTab> {
-  Set<int> _categoryIds = <int>{};
-  Set<String> _merchants = <String>{};
-  String? _paymentType;
-
-  void _clearFilters() => setState(() {
-        _categoryIds = <int>{};
-        _merchants = <String>{};
-        _paymentType = null;
-      });
+  final void Function(ExpenseTxn) onToggleSelected;
+  final void Function(ExpenseTxn) onDelete;
 
   /// Lets the user tick several of [options] at once, returning the new
   /// selection or null if they backed out.
-  Future<Set<T>?> _chooseMany<T>({
+  Future<Set<T>?> _chooseMany<T>(
+    BuildContext context, {
     required String title,
     required List<T> options,
     required Set<T> selected,
@@ -2687,165 +2860,218 @@ class _DashboardTabState extends State<DashboardTab> {
         ),
       );
 
+  /// Three filters and an order, two of which take several values at once, do
+  /// not fit as dropdowns side by side — and Material has no multi-select one.
+  /// A scrolling row of chips that each open a sheet does fit, and matches how
+  /// the rest of the app asks for a choice.
+  Widget _chipStrip(BuildContext context) {
+    return SizedBox(
+      height: 56,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+        children: <Widget>[
+          ActionChip(
+            avatar: const Icon(Icons.swap_vert, size: 18),
+            // The order is always in force, so the chip names the current one
+            // rather than saying "Sort" and leaving it to be guessed at.
+            label: Text(sort.label),
+            onPressed: () async {
+              final LedgerSort? picked = await showModalBottomSheet<LedgerSort>(
+                context: context,
+                showDragHandle: true,
+                builder: (_) => _SortSheet(selected: sort),
+              );
+              if (picked != null) onSortChanged(picked);
+            },
+          ),
+          const SizedBox(width: 8),
+          _FilterChip(
+            label: 'Category',
+            count: filters.categoryIds.length,
+            onPressed: () async {
+              final Set<int>? picked = await _chooseMany<int>(
+                context,
+                title: 'Categories',
+                options:
+                    categoryChoices.map((ExpenseCategory c) => c.id).toList(),
+                selected: filters.categoryIds,
+                label: (int id) => categoryChoices
+                    .firstWhere((ExpenseCategory c) => c.id == id)
+                    .name,
+                leading: (int id) => Icon(
+                  categoryIcon(categoryChoices
+                      .firstWhere((ExpenseCategory c) => c.id == id)
+                      .name),
+                ),
+              );
+              if (picked != null) {
+                onFiltersChanged(filters.copyWith(categoryIds: picked));
+              }
+            },
+          ),
+          const SizedBox(width: 8),
+          _FilterChip(
+            label: 'Merchant',
+            count: filters.merchants.length,
+            onPressed: () async {
+              final Set<String>? picked = await _chooseMany<String>(
+                context,
+                title: 'Merchants',
+                options: merchantChoices,
+                selected: filters.merchants,
+                label: (String m) => m,
+              );
+              if (picked != null) {
+                onFiltersChanged(filters.copyWith(merchants: picked));
+              }
+            },
+          ),
+          const SizedBox(width: 8),
+          _FilterChip(
+            label: filters.paymentType ?? 'Card / account',
+            count: filters.paymentType == null ? 0 : 1,
+            onPressed: () async {
+              final Set<String>? picked = await _chooseMany<String>(
+                context,
+                title: 'Card / account',
+                options: paymentTypeChoices,
+                selected: <String>{?filters.paymentType},
+                label: (String t) => t,
+              );
+              if (picked == null) return;
+              onFiltersChanged(picked.isEmpty
+                  ? filters.copyWith(clearPaymentType: true)
+                  : filters.copyWith(paymentType: picked.first));
+            },
+          ),
+          if (!filters.isEmpty) ...<Widget>[
+            const SizedBox(width: 8),
+            ActionChip(
+              avatar: const Icon(Icons.close, size: 18),
+              label: const Text('Clear'),
+              onPressed: () => onFiltersChanged(const LedgerFilters()),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    // Every card and account the ledger has seen. Derived from the loaded rows
-    // rather than queried, so it stays in step with the list for free.
-    final List<String> paymentTypes = widget.transactions
-        .map((ExpenseTxn t) => t.paymentType)
-        .toSet()
-        .toList()
-      ..sort();
-
-    // Each facet offers what the *other* filters leave available, so the two
-    // narrow each other without either being able to empty itself out from
-    // under a selection already made in it.
-    final List<ExpenseCategory> categories = categoryOptions(
-      widget.transactions,
-      widget.categories,
-      merchants: _merchants,
-      paymentType: _paymentType,
-    );
-    final List<String> merchants = merchantOptions(
-      widget.transactions,
-      categoryIds: _categoryIds,
-      paymentType: _paymentType,
-    );
-
-    // A selection can outlive its data — delete the last transaction on a card
-    // and that card is gone from the list. Drop anything no longer on offer for
-    // this build rather than filtering on a value nothing carries.
-    final String? paymentType =
-        paymentTypes.contains(_paymentType) ? _paymentType : null;
-    final Set<int> categoryIds = pruneSelection(
-      _categoryIds,
-      categories.map((ExpenseCategory c) => c.id),
-    );
-    final Set<String> merchantNames = pruneSelection(_merchants, merchants);
-
-    final List<LedgerEntry> visible = applyFilters(
-      widget.transactions,
-      categoryIds: categoryIds,
-      merchants: merchantNames,
-      paymentType: paymentType,
-    );
+    final bool selecting = selected.isNotEmpty;
 
     return Column(
       children: <Widget>[
-        // Three filters, two of which take several values at once, do not fit
-        // as dropdowns side by side — and Material has no multi-select one. A
-        // scrolling row of chips that each open a sheet does fit, and matches
-        // how the rest of the app asks for a choice.
-        SizedBox(
-          height: 56,
-          child: ListView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-            children: <Widget>[
-              _FilterChip(
-                label: 'Category',
-                count: categoryIds.length,
-                onPressed: () async {
-                  final Set<int>? picked = await _chooseMany<int>(
-                    title: 'Categories',
-                    options:
-                        categories.map((ExpenseCategory c) => c.id).toList(),
-                    selected: categoryIds,
-                    label: (int id) => categories
-                        .firstWhere((ExpenseCategory c) => c.id == id)
-                        .name,
-                    leading: (int id) => Icon(
-                      categoryIcon(categories
-                          .firstWhere((ExpenseCategory c) => c.id == id)
-                          .name),
-                    ),
-                  );
-                  if (picked != null) setState(() => _categoryIds = picked);
-                },
-              ),
-              const SizedBox(width: 8),
-              _FilterChip(
-                label: 'Merchant',
-                count: merchantNames.length,
-                onPressed: () async {
-                  final Set<String>? picked = await _chooseMany<String>(
-                    title: 'Merchants',
-                    options: merchants,
-                    selected: merchantNames,
-                    label: (String m) => m,
-                  );
-                  if (picked != null) setState(() => _merchants = picked);
-                },
-              ),
-              const SizedBox(width: 8),
-              _FilterChip(
-                label: paymentType ?? 'Card / account',
-                count: paymentType == null ? 0 : 1,
-                onPressed: () async {
-                  final Set<String>? picked = await _chooseMany<String>(
-                    title: 'Card / account',
-                    options: paymentTypes,
-                    selected: <String>{?paymentType},
-                    label: (String t) => t,
-                  );
-                  if (picked != null) {
-                    setState(() => _paymentType =
-                        picked.isEmpty ? null : picked.first);
-                  }
-                },
-              ),
-              if (categoryIds.isNotEmpty ||
-                  merchantNames.isNotEmpty ||
-                  paymentType != null) ...<Widget>[
-                const SizedBox(width: 8),
-                ActionChip(
-                  avatar: const Icon(Icons.close, size: 18),
-                  label: const Text('Clear'),
-                  onPressed: _clearFilters,
-                ),
-              ],
-            ],
-          ),
-        ),
+        // While marking, the filters go. Rows can then only be marked from what
+        // is already on screen, which is what lets "Select all" and the delete
+        // beside it mean one unambiguous thing.
+        if (!selecting) _chipStrip(context),
         Expanded(
-          child: widget.loading
+          child: loading
               ? const Center(child: CircularProgressIndicator())
               : RefreshIndicator(
-                  onRefresh: widget.onRefresh,
-                  child: widget.transactions.isEmpty
+                  onRefresh: onRefresh,
+                  child: ledgerIsEmpty
                       ? const _EmptyState()
-                      : visible.isEmpty
-                          ? _NoMatchState(onClear: _clearFilters)
+                      : entries.isEmpty
+                          ? _NoMatchState(
+                              onClear: () =>
+                                  onFiltersChanged(const LedgerFilters()),
+                            )
                           : ListView.builder(
-                              padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
-                              itemCount: visible.length + 1,
+                              // Bottom padding clears the FAB.
+                              padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
+                              itemCount: entries.length + 1,
                               itemBuilder: (context, index) {
                                 if (index == 0) {
                                   return _SummaryHeader(
-                                    entries: visible,
-                                    uncategorizedCount: visible
+                                    entries: entries,
+                                    uncategorizedCount: entries
                                         .where((LedgerEntry e) =>
                                             e.txn.isUncategorized)
                                         .length,
-                                    money: widget.money,
+                                    money: money,
                                   );
                                 }
-                                final entry = visible[index - 1];
-                                return _TransactionTile(
-                                  txn: entry.txn,
-                                  money: widget.money,
-                                  dateFormat: widget.dateFormat,
-                                  // Under a category filter the row shows what
-                                  // it contributed, not what was charged.
-                                  shownAmount: entry.amount,
-                                  shownLines: entry.lines,
-                                  onTap: () => widget.onTap(entry.txn),
-                                );
+                                return _ledgerRow(entries[index - 1], selecting);
                               },
                             ),
                 ),
         ),
       ],
+    );
+  }
+
+  Widget _ledgerRow(LedgerEntry entry, bool selecting) {
+    final ExpenseTxn txn = entry.txn;
+
+    // Under a category filter a split shows only the part that matched, but
+    // deleting takes the whole transaction. Swipe is the one delete with no
+    // confirmation behind it, so it is withheld from rows that are showing
+    // less than they would remove; the actions sheet, which prints the full
+    // amount at the top, still deletes them.
+    final bool partial = entry.amount != txn.amount;
+
+    return Dismissible(
+      key: ValueKey<int>(txn.id),
+      // Swipe is also off while marking, so a stray gesture can't delete
+      // outside the selection flow.
+      direction: selecting || partial
+          ? DismissDirection.none
+          : DismissDirection.endToStart,
+      onDismissed: (_) => onDelete(txn),
+      background: _DismissBackground(),
+      child: _TransactionTile(
+        txn: txn,
+        money: money,
+        dateFormat: dateFormat,
+        // Under a category filter the row shows what it contributed, not what
+        // was charged.
+        shownAmount: entry.amount,
+        shownLines: entry.lines,
+        selected: selected.contains(txn.id),
+        selecting: selecting,
+        // While marking, a tap toggles rather than opens.
+        onTap: selecting ? () => onToggleSelected(txn) : () => onTap(txn),
+        onLongPress: () => onToggleSelected(txn),
+      ),
+    );
+  }
+}
+
+/// Picks one order. Single choice, so tapping a row is the answer — there is
+/// nothing for an Apply button to confirm.
+class _SortSheet extends StatelessWidget {
+  const _SortSheet({required this.selected});
+
+  final LedgerSort selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+            child: Text('Sort by', style: theme.textTheme.titleLarge),
+          ),
+          for (final LedgerSort option in LedgerSort.values)
+            ListTile(
+              title: Text(option.label),
+              trailing: option == selected
+                  ? Icon(Icons.check, color: theme.colorScheme.primary)
+                  : null,
+              onTap: () => Navigator.pop(context, option),
+            ),
+          const SizedBox(height: 12),
+        ],
+      ),
     );
   }
 }
@@ -2978,97 +3204,7 @@ class _MultiSelectSheetState<T> extends State<_MultiSelectSheet<T>> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// EXPENSES TAB — the same ledger, but editable
-// ---------------------------------------------------------------------------
-
-class ExpensesTab extends StatelessWidget {
-  const ExpensesTab({
-    super.key,
-    required this.transactions,
-    required this.money,
-    required this.dateFormat,
-    required this.loading,
-    required this.selected,
-    required this.onRefresh,
-    required this.onTap,
-    required this.onToggleSelected,
-    required this.onDelete,
-    required this.onAddSms,
-  });
-
-  final List<ExpenseTxn> transactions;
-  final NumberFormat money;
-  final DateFormat dateFormat;
-  final bool loading;
-
-  /// Ids currently marked. Non-empty means the list is in selection mode.
-  final Set<int> selected;
-
-  final Future<void> Function() onRefresh;
-  final void Function(ExpenseTxn) onTap;
-  final void Function(ExpenseTxn) onToggleSelected;
-  final void Function(ExpenseTxn) onDelete;
-  final VoidCallback onAddSms;
-
-  @override
-  Widget build(BuildContext context) {
-    if (loading) return const Center(child: CircularProgressIndicator());
-
-    final uncategorizedCount =
-        transactions.where((ExpenseTxn t) => t.isUncategorized).length;
-    final selecting = selected.isNotEmpty;
-
-    return RefreshIndicator(
-      onRefresh: onRefresh,
-      child: transactions.isEmpty
-          ? _EmptyState(onAdd: onAddSms)
-          : ListView.builder(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
-              itemCount: transactions.length + 1,
-              itemBuilder: (context, index) {
-                if (index == 0) {
-                  return _SummaryHeader(
-                    // The Expenses tab is unfiltered, so every transaction
-                    // contributes all of its lines.
-                    entries: <LedgerEntry>[
-                      for (final ExpenseTxn t in transactions)
-                        LedgerEntry(txn: t, lines: t.effectiveSplits),
-                    ],
-                    uncategorizedCount: uncategorizedCount,
-                    money: money,
-                  );
-                }
-                final txn = transactions[index - 1];
-                final tile = _TransactionTile(
-                  txn: txn,
-                  money: money,
-                  dateFormat: dateFormat,
-                  selected: selected.contains(txn.id),
-                  selecting: selecting,
-                  // While marking, a tap toggles rather than categorises.
-                  onTap: selecting
-                      ? () => onToggleSelected(txn)
-                      : () => onTap(txn),
-                  onLongPress: () => onToggleSelected(txn),
-                );
-                return Dismissible(
-                  key: ValueKey<int>(txn.id),
-                  // Swipe is off while marking, so a stray gesture can't delete
-                  // outside the selection flow.
-                  direction: selecting
-                      ? DismissDirection.none
-                      : DismissDirection.endToStart,
-                  onDismissed: (_) => onDelete(txn),
-                  background: _DismissBackground(),
-                  child: tile,
-                );
-              },
-            ),
-    );
-  }
-}
-
+/// What a row slides away to reveal: the delete it is on its way to.
 class _DismissBackground extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
@@ -3739,11 +3875,10 @@ class _TransactionTile extends StatelessWidget {
   }
 }
 
+/// No transactions at all. Carries no button of its own: the "Paste an SMS"
+/// FAB is already on screen, and the toolbar offers the inbox scan.
 class _EmptyState extends StatelessWidget {
-  const _EmptyState({this.onAdd});
-
-  /// Null on the dashboard, where there is nothing to press.
-  final VoidCallback? onAdd;
+  const _EmptyState();
 
   @override
   Widget build(BuildContext context) {
@@ -3766,16 +3901,6 @@ class _EmptyState extends StatelessWidget {
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodySmall,
         ),
-        if (onAdd != null) ...<Widget>[
-          const SizedBox(height: 20),
-          Center(
-            child: FilledButton.tonalIcon(
-              onPressed: onAdd,
-              icon: const Icon(Icons.add),
-              label: const Text('Paste an SMS'),
-            ),
-          ),
-        ],
       ],
     );
   }
@@ -4503,6 +4628,8 @@ class _MerchantDefaultsScreenState extends State<MerchantDefaultsScreen> {
   }
 }
 
+/// The second destination. A body only — the shell it sits in supplies the
+/// Scaffold and the app bar, so there is no second one of either here.
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -4587,13 +4714,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final theme = Theme.of(context);
     final release = _available;
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('Settings')),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              children: <Widget>[
-                _SettingsHeader('Categorization'),
+    return _loading
+        ? const Center(child: CircularProgressIndicator())
+        : ListView(
+            children: <Widget>[
+              _SettingsHeader('Categorization'),
                 ListTile(
                   leading: const Icon(Icons.storefront_outlined),
                   title: const Text('Merchants & defaults'),
@@ -4671,8 +4796,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 const SizedBox(height: 24),
               ],
-            ),
-    );
+            );
   }
 }
 

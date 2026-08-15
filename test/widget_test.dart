@@ -712,6 +712,145 @@ void main() {
     });
   });
 
+  group('sortEntries', () {
+    ExpenseTxn txn({
+      required int id,
+      required String merchant,
+      required DateTime date,
+      double amount = 100,
+      List<TxnSplit> splits = const <TxnSplit>[],
+    }) =>
+        ExpenseTxn(
+          id: id,
+          amount: amount,
+          paymentType: 'YES BANK Card X2858',
+          merchant: merchant,
+          date: date,
+          categoryId: 2,
+          categoryName: 'Food',
+          direction: TxnDirection.debit,
+          reference: '',
+          splits: splits,
+        );
+
+    LedgerEntry entryOf(ExpenseTxn t) =>
+        LedgerEntry(txn: t, lines: t.effectiveSplits);
+
+    final zomato = txn(
+      id: 1,
+      merchant: 'ZOMATO',
+      date: DateTime(2026, 8, 1),
+      amount: 500,
+    );
+    final blinkit = txn(
+      id: 2,
+      merchant: 'blinkit',
+      date: DateTime(2026, 8, 3),
+      amount: 100,
+    );
+    final amazon = txn(
+      id: 3,
+      merchant: 'AMAZON',
+      date: DateTime(2026, 8, 2),
+      amount: 2000,
+    );
+
+    final ledger = <LedgerEntry>[
+      entryOf(zomato),
+      entryOf(blinkit),
+      entryOf(amazon),
+    ];
+
+    List<int> idsOf(List<LedgerEntry> rows) =>
+        rows.map((LedgerEntry e) => e.txn.id).toList();
+
+    test('newest first is the default reading of the ledger', () {
+      expect(idsOf(sortEntries(ledger, LedgerSort.newest)), <int>[2, 3, 1]);
+    });
+
+    test('oldest first is the exact reverse', () {
+      expect(idsOf(sortEntries(ledger, LedgerSort.oldest)), <int>[1, 3, 2]);
+    });
+
+    test('largest first orders by amount, not date', () {
+      expect(idsOf(sortEntries(ledger, LedgerSort.largest)), <int>[3, 1, 2]);
+    });
+
+    test('smallest first is the other way up', () {
+      expect(idsOf(sortEntries(ledger, LedgerSort.smallest)), <int>[2, 1, 3]);
+    });
+
+    test('merchant order ignores case', () {
+      // blinkit is lower-case: sorting on the raw string would put it last,
+      // after both capitalised names.
+      expect(idsOf(sortEntries(ledger, LedgerSort.merchant)), <int>[3, 2, 1]);
+    });
+
+    test('the input list is left alone', () {
+      sortEntries(ledger, LedgerSort.largest);
+      expect(idsOf(ledger), <int>[1, 2, 3]);
+    });
+
+    group('ties', () {
+      final sameDay = <LedgerEntry>[
+        entryOf(txn(id: 10, merchant: 'A', date: DateTime(2026, 8, 5))),
+        entryOf(txn(id: 11, merchant: 'A', date: DateTime(2026, 8, 5))),
+        entryOf(txn(id: 12, merchant: 'A', date: DateTime(2026, 8, 5))),
+      ];
+
+      test('newest first breaks a shared timestamp by id, highest first', () {
+        expect(idsOf(sortEntries(sameDay, LedgerSort.newest)), <int>[12, 11, 10]);
+      });
+
+      test('oldest first breaks it the other way, so it is a true reverse', () {
+        expect(idsOf(sortEntries(sameDay, LedgerSort.oldest)), <int>[10, 11, 12]);
+      });
+
+      test('equal amounts fall back to newest first', () {
+        expect(
+          idsOf(sortEntries(sameDay, LedgerSort.largest)),
+          <int>[12, 11, 10],
+        );
+      });
+    });
+
+    group('under a category filter', () {
+      /// A ₹2,000 order whose grocery line is smaller than a ₹700 standalone
+      /// charge, though the order as a whole is far bigger.
+      final order = txn(
+        id: 20,
+        merchant: 'AMAZON PAY IN G',
+        date: DateTime(2026, 8, 10),
+        amount: 2000,
+        splits: const <TxnSplit>[
+          TxnSplit(categoryId: 6, categoryName: 'Grocery', amount: 400),
+          TxnSplit(categoryId: 7, categoryName: 'Snacks', amount: 1600),
+        ],
+      );
+      final corner = txn(
+        id: 21,
+        merchant: 'CORNER STORE',
+        date: DateTime(2026, 8, 11),
+        amount: 700,
+      );
+
+      test('amount sorts use the shown portion, not the whole charge', () {
+        // Narrowed to Grocery, the order contributes 400 — less than the 700
+        // beside it — so it sorts below, despite being a ₹2,000 transaction.
+        final narrowed = applyFilters(
+          <ExpenseTxn>[order, corner],
+          categoryIds: <int>{6, 2},
+        );
+        expect(idsOf(sortEntries(narrowed, LedgerSort.largest)), <int>[21, 20]);
+      });
+
+      test('unfiltered, the same two sort the other way round', () {
+        final all = applyFilters(<ExpenseTxn>[order, corner]);
+        expect(idsOf(sortEntries(all, LedgerSort.largest)), <int>[20, 21]);
+      });
+    });
+  });
+
   group('split arithmetic', () {
     test('the balance of a fresh split is the whole charge', () {
       expect(unallocated(<double>[0], 2000), 2000);
