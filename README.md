@@ -337,12 +337,32 @@ AGP 8+. The fork is API-identical; only the import differs.
 
 ## Usage
 
-Two tabs over one ledger, on a bottom navigation bar.
+One screen over the ledger, with **Settings** alongside it on a bottom navigation bar.
 
-### Dashboard — read-only
+### Dashboard
 
-Everything that happened, spend and received together, with three filters pinned under
-the app bar as chips that open a sheet:
+Everything that happened, spend and received together, filtered, sorted and edited in
+place. Pinned under the app bar is a scrolling row of chips, each opening a sheet.
+
+#### Sorting
+
+The first chip names the current order rather than saying "Sort", since an order is always
+in force:
+
+- **Newest first** (default) — what the query already returns, so it costs nothing.
+- **Oldest first** — the exact reverse, ties included.
+- **Amount: high to low** / **low to high**
+- **Merchant A–Z** — case-insensitive.
+
+Sorting happens in Dart over the filtered rows, not in SQL, and the amount orders compare
+**what the row shows**. Under a category filter a split contributes only its matching
+lines, so a ₹2,000 Amazon order narrowed to Grocery sorts on its ₹400 grocery line, not on
+₹2,000 — otherwise the list would order itself by figures the user has filtered out and
+cannot see. Every order falls back to date then id, so ties come out stable.
+
+#### Filtering
+
+Three facets, as chips that open a sheet:
 
 - **Category** — take as many as you like. Only categories something actually falls under,
   so a choice can never filter to nothing. The category *picker* still offers the full
@@ -367,24 +387,23 @@ so a Grocery-filtered view of a ₹2,000 Amazon order shows ₹1,200 and totals 
 the filters exclude everything, a **Clear filters** button appears (distinct from the empty
 state shown when there are no transactions at all).
 
-Tapping a row here switches to the Expenses tab and opens an actions sheet for that
-transaction — amount, card, date, categories, over **Change category**, **Split** and
-**Delete** — so spotting something wrong on the Dashboard doesn't mean hunting for it by
-hand.
+#### Editing
 
-### Expenses — the working tab
+The list is the working surface — there is nowhere else to go to change something:
 
-The same ledger, editable:
-
-- **Tap any transaction** to open its actions sheet — the same one the Dashboard opens, so
-  a row behaves identically whichever tab it was tapped on. From there: change its
-  category, split it across several, or delete it. Uncategorized rows are flagged in the
+- **Tap any transaction** to open its actions sheet — amount, card, date, categories, over
+  **Change category**, **Split** and **Delete**. Uncategorized rows are flagged in the
   error color. A split row's pill names its first category and counts the rest
   ("Grocery +2"); the sheet lists them all with their amounts.
 - **Swipe a row left to delete it**, with an **Undo** action on the snackbar. Delete is
   permanent by design: a tombstone is recorded so the transaction is not re-imported by
   a later scan, and Undo lifts that tombstone and restores the row under its original
   id. Credits are listed here too, so a mis-parsed one can be removed.
+
+  Swipe is withheld from a row that is showing **less than it would remove**. Under a
+  category filter a split displays only its matching portion, but deleting takes the whole
+  transaction, and swipe is the one delete with no confirmation behind it. Those rows are
+  still deletable through the actions sheet, which prints the full amount at the top.
 - **Long-press to mark**, then tap to mark more. The app bar becomes a selection bar
   with a count, select-all, and delete; the whole marked set goes in one SQL
   transaction, so a bulk delete is all or nothing, and Undo brings back exactly those
@@ -392,14 +411,26 @@ The same ledger, editable:
   stray gesture can't act outside the flow, and Back leaves selection before it leaves
   the app.
 
+  **Select all means all of what the filters left on screen**, not the whole ledger —
+  filter to one merchant and the count matches what you can see. The chip row hides while
+  marking, so the filters cannot move under a selection already made; that is what keeps
+  "all of them" unambiguous, and it makes filter-then-bulk-delete the natural way to clear
+  out a run of rows.
+
   Bulk delete confirms first. That dialog is not ceremony: the selection bar's delete
   icon occupies exactly the screen position the overflow menu does otherwise, so a reach
   for the menu can land on it, and unlike a swipe nothing about tapping an app bar icon
   reads as destructive. A single swipe-delete still goes straight through, since the
   gesture is deliberate and the Undo snackbar catches it.
-- **Add payment** (FAB) is a placeholder — entering a payment by hand is separate work.
-- **Paste an SMS** (toolbar) feeds a message straight into the parser, prefilled with a
+- **Paste an SMS** (FAB) feeds a message straight into the parser, prefilled with a
   sample, so the pipeline can be exercised without SMS permission.
+
+### Settings
+
+The second destination on the navigation bar: **Merchants & defaults**, the update controls
+(automatic check, check now, install), and version information. Leaving it reloads the
+ledger, because a default changed there can be backfilled over history — without the
+reload the rows behind it would keep showing the categories they had on the way in.
 
 ### Deleted transactions
 
@@ -454,17 +485,19 @@ looked plausible: `PZCREDIT9772829` staying a debit, and the trailing `Bal` /
 `Avl Limit:` figures never being mistaken for the amount.
 
 It also covers the dashboard and split logic — `applyFilters`, `amountIn`,
-`spendByCategory`, `categoryOptions`, `merchantOptions`, `pruneSelection`, the split
-arithmetic (`unallocated`, `isBalanced`, `withRemainderInLast`) and the tombstone payload
-(`encodeSplits`, `decodeSplits`). All are pure top-level functions precisely so they can
-be tested without a database behind them; anything worth covering is written that way.
+`spendByCategory`, `categoryOptions`, `merchantOptions`, `pruneSelection`, `sortEntries`,
+the split arithmetic (`unallocated`, `isBalanced`, `withRemainderInLast`) and the tombstone
+payload (`encodeSplits`, `decodeSplits`). All are pure top-level functions precisely so
+they can be tested without a database behind them; anything worth covering is written that
+way.
 
 Cases specifically guarding regressions this design invites: a split found by the category
 of its *smallest* line (proving the filter reads lines rather than the cached
 `category_id`), a category offered by the facet only because it appears as a minor split
-line, a facet ignoring its own selection so it cannot empty itself, ten paise divided three
-ways staying balanced, and the last line absorbing that drift so what is stored sums
-exactly.
+line, a facet ignoring its own selection so it cannot empty itself, an amount sort reading
+the filtered portion of a split rather than the whole charge, oldest-first breaking its ties
+oldest-first so it is a true reverse of newest-first, ten paise divided three ways staying
+balanced, and the last line absorbing that drift so what is stored sums exactly.
 
 The database and widget layers have no automated coverage: `AppDatabase` needs the real
 sqflite plugin, and `sqflite_common_ffi` is deliberately not a dependency. Delete, restore,
@@ -481,7 +514,7 @@ adb emu sms send BANKSMS "INR 160.00 spent using BANK Card XX8008 on 11-Aug-26 o
 
 The transaction should appear on the dashboard within a second or two. Newlines don't
 survive `adb emu sms send`, so for the one-field-per-line transfer alerts use
-**Paste an SMS** in the Expenses toolbar instead. To inspect what was actually stored:
+the **Paste an SMS** button instead. To inspect what was actually stored:
 
 ```bash
 adb shell run-as com.tu.expense.manager cat databases/expense_manager.db > /tmp/e.db
