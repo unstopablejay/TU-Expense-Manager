@@ -524,7 +524,10 @@ class ExpenseTxn {
     required this.direction,
     required this.reference,
     this.splits = const <TxnSplit>[],
-  });
+    String? rawMerchant,
+    String? rawPaymentType,
+  })  : rawMerchant = rawMerchant ?? merchant,
+        rawPaymentType = rawPaymentType ?? paymentType;
 
   factory ExpenseTxn.fromMap(
     Map<String, Object?> map, {
@@ -547,17 +550,47 @@ class ExpenseTxn {
 
   final int id;
   final double amount;
+
+  /// What to show and filter by — already resolved through any merge.
   final String paymentType;
   final String merchant;
+
   final DateTime date;
   final int categoryId;
   final String categoryName;
   final TxnDirection direction;
   final String reference;
 
+  /// What the columns actually hold. Equal to the pair above until a merge
+  /// renames them.
+  ///
+  /// These are not for display. They exist because the merchant is part of the
+  /// natural key that finds this row again — writing a tombstone under the
+  /// merged name would match nothing, and the delete would quietly not happen.
+  final String rawMerchant;
+  final String rawPaymentType;
+
   /// The lines this transaction was split into, or empty when it is not split.
   /// Read through [effectiveSplits] rather than directly.
   final List<TxnSplit> splits;
+
+  /// Only the two merged names can be replaced; everything else about a
+  /// transaction comes from the row and has no reason to be rewritten in
+  /// memory. Passing null for either keeps it as it is.
+  ExpenseTxn copyWith({String? merchant, String? paymentType}) => ExpenseTxn(
+        id: id,
+        amount: amount,
+        paymentType: paymentType ?? this.paymentType,
+        merchant: merchant ?? this.merchant,
+        date: date,
+        categoryId: categoryId,
+        categoryName: categoryName,
+        direction: direction,
+        reference: reference,
+        splits: splits,
+        rawMerchant: rawMerchant,
+        rawPaymentType: rawPaymentType,
+      );
 
   bool get isUncategorized => categoryName == AppDatabase.uncategorized;
 
@@ -673,7 +706,7 @@ class AppDatabase {
     final path = p.join(await getDatabasesPath(), 'expense_manager.db');
     return openDatabase(
       path,
-      version: 5,
+      version: 6,
       onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
@@ -717,6 +750,7 @@ class AppDatabase {
     await db.execute(_createAppMeta);
     await db.execute(_createTransactionSplits);
     await db.execute(_createTransactionSplitsIndex);
+    await db.execute(_createNameAliases);
 
     final batch = db.batch();
     for (final name in _defaultCategories) {
@@ -806,6 +840,28 @@ class AppDatabase {
       )
     ''';
 
+  /// What several labels for one real card, account or merchant are agreed to
+  /// be called. `kind` is 'merchant' or 'payment_type'; one table rather than
+  /// two because the two behave identically.
+  ///
+  /// This is a rule rather than a one-off rename, and that is the point: every
+  /// SMS template captures the issuer text verbatim, so an alert in the old
+  /// format parses to the old label again. Rewriting the rows would fix the
+  /// ledger until the next message arrived. Resolving on the way out fixes it
+  /// for good, and leaves `transactions` holding what the bank actually said —
+  /// which is what makes a merge undoable.
+  ///
+  /// COLLATE NOCASE on `alias` is load-bearing: it is what lets one row cover
+  /// both `HDFC Bank A/C *0444` and `HDFC Bank A/c *0444`.
+  static const String _createNameAliases = '''
+      CREATE TABLE name_aliases (
+        kind      TEXT NOT NULL,
+        alias     TEXT NOT NULL COLLATE NOCASE,
+        canonical TEXT NOT NULL,
+        PRIMARY KEY (kind, alias)
+      )
+    ''';
+
   /// v1 predates any notion of spend-vs-receive, so every existing row is a
   /// debit with no reference — which is exactly what the column defaults say.
   /// v2 predates delete and incremental scanning; both new tables start empty,
@@ -818,6 +874,9 @@ class AppDatabase {
   /// already says every existing transaction is unsplit, and that is true.
   /// `splits_json` must be nullable, and NULL is exactly right: a tombstone
   /// written before v5 has no splits to carry.
+  /// v6 adds `name_aliases`, which needs no backfill either — an empty table
+  /// says nothing has been merged yet, which is true of every database that
+  /// predates the feature.
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await db.execute(
@@ -860,6 +919,9 @@ class AppDatabase {
           'ALTER TABLE deleted_transactions ADD COLUMN splits_json TEXT',
         );
       }
+    }
+    if (oldVersion < 6) {
+      await db.execute(_createNameAliases);
     }
   }
 
@@ -930,12 +992,79 @@ class AppDatabase {
           .add(TxnSplit.fromMap(row));
     }
 
-    return rows
-        .map((Map<String, Object?> row) => ExpenseTxn.fromMap(
-              row,
-              splits: splits[row['id'] as int] ?? const <TxnSplit>[],
-            ))
-        .toList();
+    // The one place the whole ledger is materialised, and so the one place
+    // merged names have to be applied. Everything downstream — the filters, the
+    // facets, the summary, the tiles — reads these objects and needs no idea
+    // that the columns say something else.
+    return canonicaliseLedger(
+      rows
+          .map((Map<String, Object?> row) => ExpenseTxn.fromMap(
+                row,
+                splits: splits[row['id'] as int] ?? const <TxnSplit>[],
+              ))
+          .toList(),
+      await aliases(),
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // 2b. MERGED NAMES
+  // -------------------------------------------------------------------------
+
+  Future<NameAliases> aliases() async {
+    final db = await database;
+    return NameAliases.fromRows(await db.query('name_aliases'));
+  }
+
+  /// Replaces every alias row for [kind] in one transaction.
+  ///
+  /// All of a kind at once rather than row by row, because [mergePlan] may
+  /// re-point existing rows as well as add new ones, and a half-applied plan
+  /// would leave a name resolving through two hops. It also makes undo exact:
+  /// hand back the map read before the change and the state is restored, which
+  /// a targeted insert or delete could not promise.
+  Future<void> setAliases(NameKind kind, Map<String, String> rows) async {
+    final db = await database;
+    await db.transaction((Transaction txn) async {
+      await txn.delete('name_aliases',
+          where: 'kind = ?', whereArgs: <Object?>[kind.column]);
+      final batch = txn.batch();
+      for (final MapEntry<String, String> row in rows.entries) {
+        batch.insert('name_aliases', <String, Object?>{
+          'kind': kind.column,
+          'alias': row.key,
+          'canonical': row.value,
+        });
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  /// Folds [members] together under [newName].
+  Future<void> mergeNames({
+    required NameKind kind,
+    required Set<String> members,
+    required String newName,
+  }) async {
+    final NameAliases current = await aliases();
+    await setAliases(
+      kind,
+      mergePlan(current.rowsFor(kind), members, newName.trim()),
+    );
+  }
+
+  /// Undoes a merge: the labels folded into [canonical] go back to standing on
+  /// their own. Nothing was overwritten, so this is just dropping the rule.
+  Future<void> separateName({
+    required NameKind kind,
+    required String canonical,
+  }) async {
+    final db = await database;
+    await db.delete(
+      'name_aliases',
+      where: 'kind = ? AND canonical = ?',
+      whereArgs: <Object?>[kind.column, canonical],
+    );
   }
 
   /// The lines for one transaction, in the order they were entered — what the
@@ -964,10 +1093,15 @@ class AppDatabase {
   /// A merchant with a mapping but no surviving transactions does not appear.
   /// That is the right trade until merchants can be configured before they have
   /// been seen, which nothing does today.
+  ///
+  /// Merged merchants group under the name they were merged into, so this lists
+  /// one row per merchant the user believes in rather than one per spelling the
+  /// banks sent. The mapping join follows the same expression: a default set
+  /// here has to be found again from whichever label the next SMS arrives under.
   Future<List<MerchantSummary>> merchants() async {
     final db = await database;
     final rows = await db.rawQuery('''
-      SELECT MIN(t.merchant) AS merchant,
+      SELECT MIN(COALESCE(a.canonical, t.merchant)) AS merchant,
              COUNT(*)        AS txn_count,
              SUM(CASE WHEN t.direction = 'debit' THEN t.amount ELSE 0 END)
                              AS total_spent,
@@ -975,9 +1109,12 @@ class AppDatabase {
              m.category_id   AS default_category_id,
              c.name          AS default_category_name
       FROM transactions t
-      LEFT JOIN merchant_mappings m ON m.merchant_name = t.merchant
+      LEFT JOIN name_aliases a
+             ON a.kind = 'merchant' AND a.alias = t.merchant
+      LEFT JOIN merchant_mappings m
+             ON m.merchant_name = COALESCE(a.canonical, t.merchant)
       LEFT JOIN categories        c ON c.id = m.category_id
-      GROUP BY t.merchant
+      GROUP BY COALESCE(a.canonical, t.merchant) COLLATE NOCASE
       ORDER BY txn_count DESC, merchant ASC
     ''');
     return rows.map(MerchantSummary.fromMap).toList();
@@ -1060,9 +1197,17 @@ class AppDatabase {
   /// Excluding split rows is the important one: a split is a statement about
   /// where that money really went, made by hand, and a merchant-wide default is
   /// a much weaker claim than that. It must never overwrite one.
-  static const String _backfillableWhere =
-      'merchant = ? AND category_id <> ? '
+  /// The `merchant = ?` is expanded to `merchant IN (?, ?, …)` by
+  /// [_merchantMatch] when the name has been merged, so a default set on the
+  /// merged name reaches the rows filed under every label it covers.
+  static String _backfillableWhere(int merchants) =>
+      '${_merchantMatch(merchants)} AND category_id <> ? '
       'AND id NOT IN (SELECT transaction_id FROM transaction_splits)';
+
+  /// `merchant = ?` for one label, `merchant IN (?, …)` for a merged set.
+  static String _merchantMatch(int count) => count == 1
+      ? 'merchant = ?'
+      : 'merchant IN (${List<String>.filled(count, '?').join(', ')})';
 
   /// Re-tags this transaction and nothing else, and drops any split on it —
   /// one category and a set of lines are mutually exclusive statements about
@@ -1094,9 +1239,12 @@ class AppDatabase {
     required int categoryId,
   }) async {
     final db = await database;
+    final List<String> labels =
+        (await aliases()).membersOf(NameKind.merchant, merchant).toList();
     final rows = await db.rawQuery(
-      'SELECT COUNT(*) AS n FROM transactions WHERE $_backfillableWhere',
-      <Object?>[merchant, categoryId],
+      'SELECT COUNT(*) AS n FROM transactions '
+      'WHERE ${_backfillableWhere(labels.length)}',
+      <Object?>[...labels, categoryId],
     );
     return Sqflite.firstIntValue(rows) ?? 0;
   }
@@ -1109,6 +1257,12 @@ class AppDatabase {
   /// merchant like Amazon whose charges always need splitting by hand. It is
   /// never backfilled even if asked: applying it to history would erase
   /// per-transaction work rather than save any.
+  ///
+  /// When [merchant] is a merged name the mapping is written for **every** label
+  /// it covers, not just the merged one. Ingest looks the default up under the
+  /// raw merchant the SMS parsed to (it has to — the alias is resolved on the
+  /// way out, not the way in), so a row keyed only on the merged name would
+  /// never be found and the default would silently apply to nothing.
   Future<int> setMerchantDefault({
     required String merchant,
     required int categoryId,
@@ -1116,22 +1270,28 @@ class AppDatabase {
   }) async {
     final db = await database;
     final int uncategorized = await uncategorizedId();
+    final List<String> labels =
+        (await aliases()).membersOf(NameKind.merchant, merchant).toList();
     return db.transaction<int>((txn) async {
-      await txn.insert(
-        'merchant_mappings',
-        <String, Object?>{
-          'merchant_name': merchant,
-          'category_id': categoryId,
-        },
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
+      final batch = txn.batch();
+      for (final String label in labels) {
+        batch.insert(
+          'merchant_mappings',
+          <String, Object?>{
+            'merchant_name': label,
+            'category_id': categoryId,
+          },
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      await batch.commit(noResult: true);
 
       if (!backfill || categoryId == uncategorized) return 0;
       return txn.update(
         'transactions',
         <String, Object?>{'category_id': categoryId},
-        where: _backfillableWhere,
-        whereArgs: <Object?>[merchant, categoryId],
+        where: _backfillableWhere(labels.length),
+        whereArgs: <Object?>[...labels, categoryId],
       );
     });
   }
@@ -1206,9 +1366,14 @@ class AppDatabase {
   /// The five columns of [_naturalKeyWhere], in that order — `whereArgs` for
   /// the clause above is `_naturalKeyOf(txn).values.toList()`, which holds
   /// because Dart maps iterate in insertion order.
+  ///
+  /// [ExpenseTxn.rawMerchant], not `merchant`: this key has to match the row as
+  /// stored. Under a merge the two differ, and the displayed name would find
+  /// nothing — leaving a tombstone that keeps out an SMS nobody deleted while
+  /// the row it was meant to remove stayed put.
   static Map<String, Object?> _naturalKeyOf(ExpenseTxn txn) => <String, Object?>{
         'amount': txn.amount,
-        'merchant': txn.merchant,
+        'merchant': txn.rawMerchant,
         'date': txn.date.millisecondsSinceEpoch,
         'direction': txn.direction.name,
         'reference': txn.reference,
@@ -1219,7 +1384,9 @@ class AppDatabase {
   static Map<String, Object?> _tombstoneOf(ExpenseTxn txn, DateTime at) =>
       <String, Object?>{
         ..._naturalKeyOf(txn),
-        'payment_type': txn.paymentType,
+        // Raw again: restore replays this straight back into the row, and the
+        // merge will rename it on the way out as it did the first time.
+        'payment_type': txn.rawPaymentType,
         'category_id': txn.categoryId,
         'original_id': txn.id,
         'deleted_at': at.millisecondsSinceEpoch,
@@ -2028,6 +2195,222 @@ List<LedgerEntry> sortEntries(List<LedgerEntry> entries, LedgerSort sort) {
 }
 
 // ---------------------------------------------------------------------------
+// MERGING DUPLICATE NAMES — pure, so the folding rules are tested
+// ---------------------------------------------------------------------------
+
+/// The two kinds of name a ledger row carries that the banks spell
+/// inconsistently, and that can therefore be merged.
+enum NameKind {
+  merchant('merchant', 'merchant', 'merchants'),
+  card('payment_type', 'card / account', 'cards & accounts');
+
+  const NameKind(this.column, this.label, this.plural);
+
+  /// The `kind` written into `name_aliases`, which is also the column it names.
+  final String column;
+
+  /// What to call this in a sentence. Spelled out rather than pluralised by
+  /// appending an s, which turns "card / account" into "card / accounts".
+  final String label;
+  final String plural;
+}
+
+/// Which labels have been agreed to mean the same thing.
+///
+/// Resolution is always a single hop. Merging into a name that is itself a
+/// merge result re-points the older rows rather than chaining onto them (see
+/// [mergePlan]), so there is never a path to follow and never a cycle to
+/// guard against.
+class NameAliases {
+  const NameAliases(this._byKind);
+
+  /// Nothing merged. The state every database starts in.
+  static const NameAliases empty = NameAliases(<NameKind, Map<String, String>>{});
+
+  /// alias → canonical, per kind. Aliases are compared case-insensitively, to
+  /// match the `COLLATE NOCASE` on the column, so keys are held lower-cased.
+  final Map<NameKind, Map<String, String>> _byKind;
+
+  /// Builds from raw `name_aliases` rows.
+  factory NameAliases.fromRows(List<Map<String, Object?>> rows) {
+    final map = <NameKind, Map<String, String>>{};
+    for (final Map<String, Object?> row in rows) {
+      final String kindName = row['kind'] as String;
+      final NameKind? kind = NameKind.values
+          .where((NameKind k) => k.column == kindName)
+          .firstOrNull;
+      // A kind this build does not know about is skipped rather than crashing
+      // the whole ledger load.
+      if (kind == null) continue;
+      (map[kind] ??= <String, String>{})[(row['alias'] as String).toLowerCase()] =
+          row['canonical'] as String;
+    }
+    return NameAliases(map);
+  }
+
+  /// What [raw] is called now, or [raw] itself if it has not been merged.
+  String resolve(NameKind kind, String raw) =>
+      _byKind[kind]?[raw.toLowerCase()] ?? raw;
+
+  /// Every label folded into [canonical], including [canonical] itself.
+  ///
+  /// This is what a query has to expand to when it needs the *stored* rows
+  /// behind a merged name.
+  Set<String> membersOf(NameKind kind, String canonical) => <String>{
+        canonical,
+        ...?_byKind[kind]
+            ?.entries
+            .where((MapEntry<String, String> e) => e.value == canonical)
+            .map((MapEntry<String, String> e) => e.key),
+      };
+
+  /// The alias rows for [kind], as stored. Lower-cased keys.
+  Map<String, String> rowsFor(NameKind kind) =>
+      Map<String, String>.unmodifiable(
+          _byKind[kind] ?? const <String, String>{});
+
+  /// Canonical names that have something folded into them — what the "Merged"
+  /// section lists.
+  ///
+  /// How many labels each covers is deliberately not answered here: one alias
+  /// row can stand for two stored spellings that differ only in case, so the
+  /// honest count comes from the ledger, not from this table.
+  List<String> mergedNames(NameKind kind) =>
+      (_byKind[kind]?.values.toSet().toList() ?? <String>[])..sort();
+}
+
+/// The alias rows for one kind after folding [members] into [newName].
+///
+/// Takes and returns the whole `alias → canonical` map so the rewrite is one
+/// pure step the caller can simply save.
+///
+/// Two rules keep resolution single-hop:
+///  * anything already pointing at one of [members] is re-pointed at
+///    [newName] — merging a merge must carry its earlier members along, or
+///    they would surface again the moment their canonical stopped existing;
+///  * a row that says nothing — the alias and the canonical are the same
+///    string — is dropped. Note that `rapido → RAPIDO` is *not* one of those:
+///    keys are lower-cased, so that row is what holds the chosen spelling
+///    against the other casing of it.
+Map<String, String> mergePlan(
+  Map<String, String> existing,
+  Set<String> members,
+  String newName,
+) {
+  final Set<String> lowerMembers =
+      members.map((String m) => m.toLowerCase()).toSet();
+  final plan = <String, String>{};
+
+  for (final MapEntry<String, String> row in existing.entries) {
+    // Re-point rather than leave a hop behind.
+    final bool pointsAtMerged = lowerMembers.contains(row.value.toLowerCase());
+    plan[row.key] = pointsAtMerged ? newName : row.value;
+  }
+  for (final String member in members) {
+    plan[member.toLowerCase()] = newName;
+  }
+
+  plan.removeWhere((String alias, String canonical) => alias == canonical);
+  return plan;
+}
+
+/// Applies [aliases] to every row, then folds merchant spellings that differ
+/// only in case onto the most common one.
+///
+/// A list-level pass rather than a per-row one because "most common spelling"
+/// is a fact about the whole ledger. The case fold is not cosmetic: the
+/// database already treats `RAPIDO` and `Rapido` as one merchant — the column
+/// and the mappings key are both COLLATE NOCASE — so leaving the two apart in
+/// Dart means the filter offers a choice the rest of the system cannot honour.
+///
+/// The stored spellings are kept on [ExpenseTxn.rawMerchant] and
+/// [ExpenseTxn.rawPaymentType], because they are still the key that finds the
+/// row again.
+List<ExpenseTxn> canonicaliseLedger(
+  List<ExpenseTxn> rows,
+  NameAliases aliases,
+) {
+  // Tally the post-alias merchant spellings before rewriting anything, so the
+  // winner is decided over the whole ledger rather than row by row.
+  final counts = <String, Map<String, int>>{};
+  for (final ExpenseTxn t in rows) {
+    final String merchant = aliases.resolve(NameKind.merchant, t.merchant);
+    final byCase = counts[merchant.toLowerCase()] ??= <String, int>{};
+    byCase[merchant] = (byCase[merchant] ?? 0) + 1;
+  }
+
+  final display = <String, String>{
+    for (final MapEntry<String, Map<String, int>> group in counts.entries)
+      group.key: (group.value.entries.toList()
+            // Count first; alphabetical only to break a tie, so the result
+            // does not depend on the order rows came back in.
+            ..sort((MapEntry<String, int> a, MapEntry<String, int> b) {
+              final int byCount = b.value.compareTo(a.value);
+              return byCount != 0 ? byCount : a.key.compareTo(b.key);
+            }))
+          .first
+          .key,
+  };
+
+  return <ExpenseTxn>[
+    for (final ExpenseTxn t in rows)
+      t.copyWith(
+        merchant: display[
+            aliases.resolve(NameKind.merchant, t.merchant).toLowerCase()],
+        paymentType: aliases.resolve(NameKind.card, t.paymentType),
+      ),
+  ];
+}
+
+/// Groups of [names] that look like the same thing under different labels.
+///
+/// Only ever a suggestion — groups are offered pre-ticked and merged solely on
+/// a confirmation, because both heuristics can be wrong: two genuinely
+/// different cards can end in the same four digits, and two merchants can
+/// squash to the same letters.
+///
+/// Singletons are not groups, so anything that matched nothing is left out.
+List<List<String>> suggestGroups(List<String> names, NameKind kind) {
+  final groups = <String, List<String>>{};
+  for (final String name in names) {
+    final String? key = _suggestionKey(name, kind);
+    if (key == null) continue;
+    (groups[key] ??= <String>[]).add(name);
+  }
+
+  final List<List<String>> out = groups.values
+      .where((List<String> group) => group.length > 1)
+      .map((List<String> group) => group..sort())
+      .toList()
+    ..sort((List<String> a, List<String> b) => a.first.compareTo(b.first));
+  return out;
+}
+
+/// What two labels have to share to be worth suggesting, or null when a name
+/// offers nothing to match on.
+String? _suggestionKey(String name, NameKind kind) {
+  switch (kind) {
+    case NameKind.card:
+      // The trailing digits are the account. Everything in front of them is
+      // the part the templates disagree about — `BANK A/c XX0444`,
+      // `HDFC Bank A/C *0444` and `HDFC Bank A/c XX0444` share only the 0444.
+      final RegExpMatch? tail =
+          RegExp(r'(\d{3,})\D*$').firstMatch(name);
+      return tail?.group(1);
+
+    case NameKind.merchant:
+      // Case, punctuation, spacing and a leading UPI tag are all noise a bank
+      // adds inconsistently: `UPI_GEORGE EGG CENTRE` and `GEORGE EGG CENTRE`
+      // are one shop.
+      final String squashed = name
+          .toLowerCase()
+          .replaceFirst(RegExp(r'^upi[\s_-]+'), '')
+          .replaceAll(RegExp(r'[^a-z0-9]'), '');
+      return squashed.isEmpty ? null : squashed;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SPLIT ARITHMETIC — pure, so the one fiddly calculation in the app is tested
 // ---------------------------------------------------------------------------
 
@@ -2452,8 +2835,9 @@ class _HomeShellState extends State<HomeShell> {
     await _delete(gone);
   }
 
-  /// Everything that can be done to one row — categorise, split, delete — in
-  /// one sheet, so the list itself needs no per-row controls.
+  /// Everything that can be done from one row — categorise, split, merge its
+  /// names, delete — in one sheet, so the list itself needs no per-row
+  /// controls.
   Future<void> _openTransaction(ExpenseTxn txn) async {
     final action = await showModalBottomSheet<_TxnAction>(
       context: context,
@@ -2470,9 +2854,27 @@ class _HomeShellState extends State<HomeShell> {
         await _pickCategory(txn);
       case _TxnAction.split:
         await _splitTransaction(txn);
+      case _TxnAction.mergeMerchant:
+        await _openMerge(NameKind.merchant, txn.merchant);
+      case _TxnAction.mergeCard:
+        await _openMerge(NameKind.card, txn.paymentType);
       case _TxnAction.delete:
         await _delete(<ExpenseTxn>[txn]);
     }
+  }
+
+  /// Opens the merge screen with [preselect] already ticked — the name on the
+  /// row the user was looking at when they noticed the duplicate.
+  Future<void> _openMerge(NameKind kind, String preselect) async {
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => MergeNamesScreen(
+        kind: kind,
+        preselect: preselect,
+        // Unlike the Settings route, this one comes off the Dashboard, which is
+        // still underneath and holding the old names.
+        onChanged: _load,
+      ),
+    ));
   }
 
   Future<void> _splitTransaction(ExpenseTxn txn) async {
@@ -3226,10 +3628,10 @@ class _DismissBackground extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// TRANSACTION ACTIONS — what a dashboard tap opens on the Expenses tab
+// TRANSACTION ACTIONS — everything one row can be told to do
 // ---------------------------------------------------------------------------
 
-enum _TxnAction { categorize, split, delete }
+enum _TxnAction { categorize, split, mergeMerchant, mergeCard, delete }
 
 class TransactionActionsSheet extends StatelessWidget {
   const TransactionActionsSheet({
@@ -3312,6 +3714,32 @@ class TransactionActionsSheet extends StatelessWidget {
               subtitle: const Text('Across several categories'),
               onTap: () => Navigator.pop(context, _TxnAction.split),
             ),
+            const Divider(height: 28),
+            // These two act on the name, not on this transaction — the row is
+            // just where a duplicate is usually noticed.
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.merge_type),
+              title: const Text('Merge merchant'),
+              subtitle: Text(
+                txn.merchant,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: () => Navigator.pop(context, _TxnAction.mergeMerchant),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.credit_card),
+              title: const Text('Merge card / account'),
+              subtitle: Text(
+                txn.paymentType,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: () => Navigator.pop(context, _TxnAction.mergeCard),
+            ),
+            const Divider(height: 28),
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: Icon(Icons.delete_outline, color: theme.colorScheme.error),
@@ -4431,11 +4859,510 @@ IconData categoryIcon(String category) {
 }
 
 // ---------------------------------------------------------------------------
+// MERGING DUPLICATE NAMES
+// ---------------------------------------------------------------------------
+
+/// Folds several labels for one real card, account or merchant into one name.
+///
+/// The banks are not consistent — the same account arrives as `BANK A/c
+/// XX0444`, `HDFC Bank A/C *0444` and `HDFC Bank A/c XX0444` depending on which
+/// template the alert matched — so the filter offers three choices where there
+/// is one account, and the totals split across them.
+///
+/// Nothing here rewrites a transaction. A merge is a standing rule kept in
+/// `name_aliases` and applied when rows are read, which is what lets a future
+/// alert in the old format fold in by itself, and what makes [_separate]
+/// possible at all.
+class MergeNamesScreen extends StatefulWidget {
+  const MergeNamesScreen({
+    super.key,
+    required this.kind,
+    this.preselect,
+    this.onChanged,
+  });
+
+  final NameKind kind;
+
+  /// Ticked on arrival — set when this was opened from a transaction, so the
+  /// name the user was looking at is already in the selection.
+  final String? preselect;
+
+  /// Reloads whoever pushed this. Null from Settings, where the shell already
+  /// reloads on leaving the tab.
+  final Future<void> Function()? onChanged;
+
+  @override
+  State<MergeNamesScreen> createState() => _MergeNamesScreenState();
+}
+
+class _MergeNamesScreenState extends State<MergeNamesScreen> {
+  final AppDatabase _db = AppDatabase.instance;
+
+  bool _loading = true;
+  NameAliases _aliases = NameAliases.empty;
+
+  /// Current name → how many transactions are under it.
+  Map<String, int> _counts = <String, int>{};
+
+  /// Current name → the spellings actually stored beneath it. Read from the
+  /// ledger rather than from the alias table, which cannot tell two labels
+  /// differing only in case apart.
+  Map<String, Set<String>> _labels = <String, Set<String>>{};
+
+  final Set<String> _selected = <String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    final String? preselect = widget.preselect;
+    if (preselect != null) _selected.add(preselect);
+    _load();
+  }
+
+  String _nameOf(ExpenseTxn t) =>
+      widget.kind == NameKind.merchant ? t.merchant : t.paymentType;
+
+  String _rawOf(ExpenseTxn t) =>
+      widget.kind == NameKind.merchant ? t.rawMerchant : t.rawPaymentType;
+
+  Future<void> _load() async {
+    final results = await Future.wait(<Future<Object>>[
+      _db.transactions(),
+      _db.aliases(),
+    ]);
+    if (!mounted) return;
+
+    final counts = <String, int>{};
+    final labels = <String, Set<String>>{};
+    for (final ExpenseTxn t in results[0] as List<ExpenseTxn>) {
+      final String name = _nameOf(t);
+      counts[name] = (counts[name] ?? 0) + 1;
+      (labels[name] ??= <String>{}).add(_rawOf(t));
+    }
+
+    setState(() {
+      _aliases = results[1] as NameAliases;
+      _counts = counts;
+      _labels = labels;
+      _loading = false;
+      // A name can stop existing while this screen is open — its last
+      // transaction deleted, or it was folded into something else.
+      _selected.retainAll(counts.keys);
+    });
+  }
+
+  void _toggle(String name) {
+    setState(() {
+      if (!_selected.remove(name)) _selected.add(name);
+    });
+  }
+
+  void _clearSelection() => setState(_selected.clear);
+
+  /// Writes [rows] as the whole alias set, reloads, and offers to put back
+  /// whatever was there before.
+  Future<void> _apply(Map<String, String> rows, String message) async {
+    final Map<String, String> before = _aliases.rowsFor(widget.kind);
+    await _db.setAliases(widget.kind, rows);
+    setState(_selected.clear);
+    await Future.wait(<Future<void>>[
+      _load(),
+      if (widget.onChanged != null) widget.onChanged!(),
+    ]);
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(message),
+        action: SnackBarAction(
+          label: 'Undo',
+          onPressed: () async {
+            await _db.setAliases(widget.kind, before);
+            await Future.wait(<Future<void>>[
+              _load(),
+              if (widget.onChanged != null) widget.onChanged!(),
+            ]);
+          },
+        ),
+      ));
+  }
+
+  Future<void> _mergeSelected() async {
+    // Most-used first, so the sheet can offer the winning spelling as the name.
+    final List<String> members = _selected.toList()
+      ..sort((String a, String b) {
+        final int byCount = (_counts[b] ?? 0).compareTo(_counts[a] ?? 0);
+        return byCount != 0 ? byCount : a.compareTo(b);
+      });
+    if (members.length < 2) return;
+
+    final String? name = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _MergeNameSheet(
+        kind: widget.kind,
+        members: members,
+        counts: _counts,
+      ),
+    );
+    if (!mounted || name == null || name.trim().isEmpty) return;
+
+    final int moved =
+        members.fold<int>(0, (int sum, String m) => sum + (_counts[m] ?? 0));
+    await _apply(
+      mergePlan(_aliases.rowsFor(widget.kind), members.toSet(), name.trim()),
+      'Merged ${members.length} labels · $moved '
+      'transaction${moved == 1 ? '' : 's'}',
+    );
+  }
+
+  Future<void> _mergeSuggested(List<String> group) async {
+    setState(() {
+      _selected
+        ..clear()
+        ..addAll(group);
+    });
+    await _mergeSelected();
+  }
+
+  Future<void> _separate(String canonical) async {
+    final Map<String, String> rows =
+        Map<String, String>.of(_aliases.rowsFor(widget.kind))
+          ..removeWhere((_, String c) => c == canonical);
+    await _apply(rows, 'Separated $canonical');
+  }
+
+  AppBar _appBar() {
+    if (_selected.isEmpty) {
+      return AppBar(title: Text('Merge ${widget.kind.plural}'));
+    }
+    return AppBar(
+      leading: IconButton(
+        tooltip: 'Cancel',
+        onPressed: _clearSelection,
+        icon: const Icon(Icons.close),
+      ),
+      title: Text('${_selected.length} selected'),
+      actions: <Widget>[
+        IconButton(
+          tooltip: 'Merge',
+          // One name is not a merge. Left visible but dead so the bar does not
+          // reshuffle as the second one is ticked.
+          onPressed: _selected.length < 2 ? null : _mergeSelected,
+          icon: const Icon(Icons.merge_type),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final List<String> names = _counts.keys.toList()..sort();
+    final List<String> merged = _aliases
+        .mergedNames(widget.kind)
+        // A merge whose transactions have all been deleted is still a rule
+        // worth being able to drop, so it stays listed.
+        .toList();
+    final List<List<String>> suggestions =
+        suggestGroups(names, widget.kind).where((List<String> group) {
+      // Never suggest what is already one name.
+      return group.length > 1;
+    }).toList();
+
+    return PopScope(
+      canPop: _selected.isEmpty,
+      onPopInvokedWithResult: (bool didPop, Object? result) {
+        if (!didPop) _clearSelection();
+      },
+      child: Scaffold(
+        appBar: _appBar(),
+        body: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : names.isEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(32),
+                      child: Text(
+                        'Nothing to merge yet — no transactions have been '
+                        'recorded.',
+                        textAlign: TextAlign.center,
+                        style: theme.textTheme.bodyMedium,
+                      ),
+                    ),
+                  )
+                : ListView(
+                    padding: const EdgeInsets.only(bottom: 24),
+                    children: <Widget>[
+                      if (merged.isNotEmpty) ...<Widget>[
+                        _SettingsHeader('Merged'),
+                        for (final String canonical in merged)
+                          _MergedTile(
+                            canonical: canonical,
+                            labels: _labels[canonical] ?? <String>{},
+                            onSeparate: () => _separate(canonical),
+                          ),
+                        const Divider(height: 32),
+                      ],
+                      if (suggestions.isNotEmpty) ...<Widget>[
+                        _SettingsHeader('Looks like duplicates'),
+                        for (final List<String> group in suggestions)
+                          _SuggestionCard(
+                            group: group,
+                            counts: _counts,
+                            onMerge: () => _mergeSuggested(group),
+                          ),
+                        const Divider(height: 32),
+                      ],
+                      _SettingsHeader('All ${widget.kind.plural}'),
+                      for (final String name in names)
+                        _NameTile(
+                          name: name,
+                          count: _counts[name] ?? 0,
+                          selected: _selected.contains(name),
+                          selecting: _selected.isNotEmpty,
+                          onTap: () => _toggle(name),
+                        ),
+                    ],
+                  ),
+      ),
+    );
+  }
+}
+
+/// One name already standing for several, and the way to undo that.
+class _MergedTile extends StatelessWidget {
+  const _MergedTile({
+    required this.canonical,
+    required this.labels,
+    required this.onSeparate,
+  });
+
+  final String canonical;
+  final Set<String> labels;
+  final VoidCallback onSeparate;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final List<String> sorted = labels.toList()..sort();
+
+    return ListTile(
+      leading: const Icon(Icons.merge_type),
+      title: Text(canonical),
+      subtitle: Text(
+        sorted.isEmpty
+            ? 'No transactions under it right now'
+            : 'Covers ${sorted.join(' · ')}',
+        style: theme.textTheme.bodySmall,
+      ),
+      isThreeLine: sorted.length > 1,
+      trailing: TextButton(
+        onPressed: onSeparate,
+        child: const Text('Separate'),
+      ),
+    );
+  }
+}
+
+/// A group the app thinks is one thing under several labels. Shown already
+/// ticked, but merged only when the button is pressed — the heuristics can be
+/// wrong, and two cards really can end in the same four digits.
+class _SuggestionCard extends StatelessWidget {
+  const _SuggestionCard({
+    required this.group,
+    required this.counts,
+    required this.onMerge,
+  });
+
+  final List<String> group;
+  final Map<String, int> counts;
+  final VoidCallback onMerge;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Card(
+      margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 12, 8, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            for (final String name in group)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Row(
+                  children: <Widget>[
+                    Icon(Icons.check_circle,
+                        size: 18, color: theme.colorScheme.primary),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(name,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                    ),
+                    Text('${counts[name] ?? 0}',
+                        style: theme.textTheme.bodySmall),
+                  ],
+                ),
+              ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: FilledButton.tonal(
+                onPressed: onMerge,
+                child: Text('Merge these ${group.length}'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One current name, tickable.
+class _NameTile extends StatelessWidget {
+  const _NameTile({
+    required this.name,
+    required this.count,
+    required this.selected,
+    required this.selecting,
+    required this.onTap,
+  });
+
+  final String name;
+  final int count;
+  final bool selected;
+  final bool selecting;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return ListTile(
+      selected: selected,
+      selectedTileColor: theme.colorScheme.primaryContainer,
+      leading: Icon(
+        selected ? Icons.check_circle : Icons.circle_outlined,
+        color: selected ? theme.colorScheme.primary : theme.colorScheme.outline,
+      ),
+      title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: Text('$count transaction${count == 1 ? '' : 's'}'),
+      onTap: onTap,
+    );
+  }
+}
+
+/// Names the result of a merge.
+///
+/// This sheet is the confirmation — typing a name and pressing Merge is a
+/// deliberate enough act that a dialog after it would only be in the way, and
+/// the snackbar behind it carries Undo.
+class _MergeNameSheet extends StatefulWidget {
+  const _MergeNameSheet({
+    required this.kind,
+    required this.members,
+    required this.counts,
+  });
+
+  final NameKind kind;
+
+  /// Most-used first — [_MergeNamesScreenState._mergeSelected] sorts them, and
+  /// the first is offered as the name.
+  final List<String> members;
+  final Map<String, int> counts;
+
+  @override
+  State<_MergeNameSheet> createState() => _MergeNameSheetState();
+}
+
+class _MergeNameSheetState extends State<_MergeNameSheet> {
+  late final TextEditingController _name =
+      TextEditingController(text: widget.members.first);
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final String name = _name.text.trim();
+    if (name.isEmpty) return;
+    Navigator.pop(context, name);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final int moved = widget.members
+        .fold<int>(0, (int sum, String m) => sum + (widget.counts[m] ?? 0));
+
+    return Padding(
+      // Lifts the field clear of the keyboard.
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        bottom: MediaQuery.viewInsetsOf(context).bottom + 20,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(
+              'Merge ${widget.members.length} ${widget.kind.plural}',
+              style: theme.textTheme.titleLarge,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '$moved transaction${moved == 1 ? '' : 's'} will be filed under '
+              'one name. Nothing is rewritten — this can be undone.',
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            for (final String member in widget.members)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text('· $member',
+                    style: theme.textTheme.bodySmall,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis),
+              ),
+            const Divider(height: 28),
+            TextField(
+              controller: _name,
+              autofocus: true,
+              textCapitalization: TextCapitalization.words,
+              onSubmitted: (_) => _submit(),
+              decoration: const InputDecoration(
+                isDense: true,
+                border: OutlineInputBorder(),
+                labelText: 'Call them',
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: <Widget>[
+                const Spacer(),
+                FilledButton(onPressed: _submit, child: const Text('Merge')),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SETTINGS
 // ---------------------------------------------------------------------------
 
-/// Preferences and app information. Two sections today — the update controls
-/// and an About block — reached from the kebab menu.
 /// Every merchant the ledger has seen, and what each one is filed under by
 /// default.
 ///
@@ -4729,6 +5656,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onTap: () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
                       builder: (_) => const MerchantDefaultsScreen(),
+                    ),
+                  ),
+                ),
+                const Divider(height: 32),
+                _SettingsHeader('Cleanup'),
+                ListTile(
+                  leading: const Icon(Icons.merge_type),
+                  title: const Text('Merge merchants'),
+                  subtitle: const Text(
+                    'Fold several spellings of one shop into a single name',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          const MergeNamesScreen(kind: NameKind.merchant),
+                    ),
+                  ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.credit_card),
+                  title: const Text('Merge cards & accounts'),
+                  subtitle: const Text(
+                    'One account can arrive labelled differently by each alert',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          const MergeNamesScreen(kind: NameKind.card),
                     ),
                   ),
                 ),
