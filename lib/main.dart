@@ -446,6 +446,70 @@ class ExpenseCategory {
   final String name;
 }
 
+/// One category/amount line of a split transaction.
+///
+/// Carries the category *name* as well as its id so a tombstone snapshot and
+/// the Deleted screen can render without a join, and so a line still reads
+/// correctly if the category is renamed afterwards.
+class TxnSplit {
+  const TxnSplit({
+    required this.categoryId,
+    required this.categoryName,
+    required this.amount,
+  });
+
+  factory TxnSplit.fromMap(Map<String, Object?> map) => TxnSplit(
+        categoryId: map['category_id'] as int,
+        categoryName: (map['category_name'] ?? map['name']) as String,
+        amount: (map['amount'] as num).toDouble(),
+      );
+
+  final int categoryId;
+  final String categoryName;
+  final double amount;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'category_id': categoryId,
+        'name': categoryName,
+        'amount': amount,
+      };
+}
+
+/// A merchant as the Merchants screen sees it: how much has gone through it and
+/// what it defaults to.
+///
+/// [defaultCategoryId] carries three states. Null means no mapping row at all —
+/// never configured. The Uncategorized id means a mapping was set deliberately
+/// to "always ask me", for a merchant like Amazon that always needs splitting.
+/// Anything else is a real default.
+class MerchantSummary {
+  const MerchantSummary({
+    required this.merchant,
+    required this.txnCount,
+    required this.totalSpent,
+    required this.lastSeen,
+    required this.defaultCategoryId,
+    required this.defaultCategoryName,
+  });
+
+  factory MerchantSummary.fromMap(Map<String, Object?> map) => MerchantSummary(
+        merchant: map['merchant'] as String,
+        txnCount: map['txn_count'] as int,
+        totalSpent: ((map['total_spent'] as num?) ?? 0).toDouble(),
+        lastSeen:
+            DateTime.fromMillisecondsSinceEpoch((map['last_seen'] as int?) ?? 0),
+        defaultCategoryId: map['default_category_id'] as int?,
+        defaultCategoryName: map['default_category_name'] as String?,
+      );
+
+  final String merchant;
+  final int txnCount;
+  final double totalSpent;
+  final DateTime lastSeen;
+  final int? defaultCategoryId;
+  final String? defaultCategoryName;
+}
+
 /// A row of `transactions` joined to its category name.
 /// (Named `ExpenseTxn` because sqflite already exports a `Transaction` type.)
 class ExpenseTxn {
@@ -459,9 +523,15 @@ class ExpenseTxn {
     required this.categoryName,
     required this.direction,
     required this.reference,
+    this.splits = const <TxnSplit>[],
   });
 
-  factory ExpenseTxn.fromMap(Map<String, Object?> map) => ExpenseTxn(
+  factory ExpenseTxn.fromMap(
+    Map<String, Object?> map, {
+    List<TxnSplit> splits = const <TxnSplit>[],
+  }) =>
+      ExpenseTxn(
+        splits: splits,
         id: map['id'] as int,
         amount: (map['amount'] as num).toDouble(),
         paymentType: (map['payment_type'] as String?) ?? 'Unknown',
@@ -485,9 +555,31 @@ class ExpenseTxn {
   final TxnDirection direction;
   final String reference;
 
+  /// The lines this transaction was split into, or empty when it is not split.
+  /// Read through [effectiveSplits] rather than directly.
+  final List<TxnSplit> splits;
+
   bool get isUncategorized => categoryName == AppDatabase.uncategorized;
 
   bool get isCredit => direction == TxnDirection.credit;
+
+  bool get isSplit => splits.isNotEmpty;
+
+  /// The transaction as a list of category/amount lines, whether or not it was
+  /// ever split — an unsplit one is simply a single line for its full amount.
+  ///
+  /// Everything downstream (filters, tiles, the summary breakdown) iterates
+  /// this, so none of it has to ask whether a transaction is split. That is the
+  /// whole point: one code path, and no chance of the two drifting apart.
+  List<TxnSplit> get effectiveSplits => splits.isEmpty
+      ? <TxnSplit>[
+          TxnSplit(
+            categoryId: categoryId,
+            categoryName: categoryName,
+            amount: amount,
+          ),
+        ]
+      : splits;
 }
 
 /// A row of `deleted_transactions`, joined to its category name. Everything the
@@ -504,6 +596,7 @@ class DeletedTxn {
     required this.originalId,
     required this.deletedAt,
     required this.categoryName,
+    this.splits = const <TxnSplit>[],
   });
 
   /// Every column after the natural key is nullable: tombstones written before
@@ -524,6 +617,7 @@ class DeletedTxn {
             : DateTime.fromMillisecondsSinceEpoch(map['deleted_at'] as int),
         categoryName:
             (map['category_name'] as String?) ?? AppDatabase.uncategorized,
+        splits: decodeSplits(map['splits_json'] as String?),
       );
 
   final double amount;
@@ -536,6 +630,11 @@ class DeletedTxn {
   final int? originalId;
   final DateTime? deletedAt;
   final String categoryName;
+
+  /// The lines this transaction was split into when it was deleted, carried in
+  /// the tombstone so restoring puts them back. Empty for an unsplit
+  /// transaction and for every tombstone written before schema v5.
+  final List<TxnSplit> splits;
 
   bool get isCredit => direction == TxnDirection.credit;
 
@@ -574,7 +673,7 @@ class AppDatabase {
     final path = p.join(await getDatabasesPath(), 'expense_manager.db');
     return openDatabase(
       path,
-      version: 4,
+      version: 5,
       onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
@@ -616,6 +715,8 @@ class AppDatabase {
     await db.execute(_createNaturalKeyIndex);
     await db.execute(_createDeletedTransactions);
     await db.execute(_createAppMeta);
+    await db.execute(_createTransactionSplits);
+    await db.execute(_createTransactionSplitsIndex);
 
     final batch = db.batch();
     for (final name in _defaultCategories) {
@@ -658,8 +759,43 @@ class AppDatabase {
         category_id  INTEGER,
         original_id  INTEGER,
         deleted_at   INTEGER,
+        splits_json  TEXT,
         PRIMARY KEY (amount, merchant, date, direction, reference)
       )
+    ''';
+
+  /// One category/amount line of a split. A transaction with no rows here is
+  /// unsplit and its `category_id` speaks for the whole amount; one with rows
+  /// here owns lines summing to that amount, and its `category_id` is a
+  /// denormalised cache of the largest line — never money math.
+  ///
+  /// `transaction_id` cascades, so deleting a transaction drops its lines. That
+  /// is exactly why the tombstone carries `splits_json`: without it, delete and
+  /// undo would silently lose a split.
+  ///
+  /// `category_id` deliberately does *not* cascade — it mirrors
+  /// `transactions.category_id`, so deleting a category still in use is refused
+  /// rather than quietly vaporising lines and leaving a split that no longer
+  /// sums to its transaction, which nothing could repair.
+  ///
+  /// No UNIQUE on (transaction_id, category_id): two lines in one category on
+  /// one transaction is legal and simply adds up. Forbidding it would buy
+  /// nothing and cost a repair path.
+  static const String _createTransactionSplits = '''
+      CREATE TABLE transaction_splits (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        transaction_id INTEGER NOT NULL,
+        category_id    INTEGER NOT NULL,
+        amount         REAL NOT NULL,
+        position       INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY (transaction_id) REFERENCES transactions (id) ON DELETE CASCADE,
+        FOREIGN KEY (category_id)    REFERENCES categories (id)
+      )
+    ''';
+
+  static const String _createTransactionSplitsIndex = '''
+      CREATE INDEX idx_transaction_splits_txn
+        ON transaction_splits (transaction_id)
     ''';
 
   /// Key/value scratch space. Currently holds only the inbox scan watermark.
@@ -678,6 +814,10 @@ class AppDatabase {
   /// v4 columns are what let it be listed and restored later. They must stay
   /// nullable — SQLite cannot `ADD COLUMN ... NOT NULL` without a default — so
   /// a tombstone written by v3 restores into Uncategorized under a fresh id.
+  /// v5 adds `transaction_splits`, which needs no backfill — an empty table
+  /// already says every existing transaction is unsplit, and that is true.
+  /// `splits_json` must be nullable, and NULL is exactly right: a tombstone
+  /// written before v5 has no splits to carry.
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await db.execute(
@@ -705,6 +845,20 @@ class AppDatabase {
         'deleted_at INTEGER',
       ]) {
         await db.execute('ALTER TABLE deleted_transactions ADD COLUMN $column');
+      }
+    }
+    if (oldVersion < 5) {
+      await db.execute(_createTransactionSplits);
+      await db.execute(_createTransactionSplitsIndex);
+      // Same shape of reasoning as the v3 branch above, and it depends on
+      // running after it: a database coming from v2 or earlier had
+      // `deleted_transactions` created from the const a moment ago, which
+      // already carries `splits_json`. Only one created by the v3 or v4 text
+      // is missing the column.
+      if (oldVersion >= 3) {
+        await db.execute(
+          'ALTER TABLE deleted_transactions ADD COLUMN splits_json TEXT',
+        );
       }
     }
   }
@@ -761,7 +915,72 @@ class AppDatabase {
       JOIN categories c ON c.id = t.category_id
       ORDER BY t.date DESC, t.id DESC
     ''');
-    return rows.map(ExpenseTxn.fromMap).toList();
+    // Two queries rather than one per transaction: every split line in one
+    // sweep, grouped in memory. The table holds rows only for transactions that
+    // were actually split, so it stays a great deal smaller than the ledger.
+    final splitRows = await db.rawQuery('''
+      SELECT s.transaction_id, s.category_id, s.amount, c.name AS category_name
+      FROM transaction_splits s
+      JOIN categories c ON c.id = s.category_id
+      ORDER BY s.transaction_id, s.position, s.id
+    ''');
+    final splits = <int, List<TxnSplit>>{};
+    for (final row in splitRows) {
+      (splits[row['transaction_id'] as int] ??= <TxnSplit>[])
+          .add(TxnSplit.fromMap(row));
+    }
+
+    return rows
+        .map((Map<String, Object?> row) => ExpenseTxn.fromMap(
+              row,
+              splits: splits[row['id'] as int] ?? const <TxnSplit>[],
+            ))
+        .toList();
+  }
+
+  /// The lines for one transaction, in the order they were entered — what the
+  /// split editor reopens with.
+  Future<List<TxnSplit>> splitsFor(int transactionId) async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT s.category_id, s.amount, c.name AS category_name
+      FROM transaction_splits s
+      JOIN categories c ON c.id = s.category_id
+      WHERE s.transaction_id = ?
+      ORDER BY s.position, s.id
+    ''', <Object?>[transactionId]);
+    return rows.map(TxnSplit.fromMap).toList();
+  }
+
+  /// Every merchant the ledger has seen, with what it defaults to and how much
+  /// has gone through it.
+  ///
+  /// Both `transactions.merchant` and `merchant_mappings.merchant_name` are
+  /// `COLLATE NOCASE`, so the grouping and the join agree: "AMAZON" and "Amazon"
+  /// collapse into one row *and* find the same mapping. `MIN(t.merchant)` is
+  /// there because under a case-insensitive group a bare column would be an
+  /// arbitrary member of it — this makes the casing on screen deterministic.
+  ///
+  /// A merchant with a mapping but no surviving transactions does not appear.
+  /// That is the right trade until merchants can be configured before they have
+  /// been seen, which nothing does today.
+  Future<List<MerchantSummary>> merchants() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT MIN(t.merchant) AS merchant,
+             COUNT(*)        AS txn_count,
+             SUM(CASE WHEN t.direction = 'debit' THEN t.amount ELSE 0 END)
+                             AS total_spent,
+             MAX(t.date)     AS last_seen,
+             m.category_id   AS default_category_id,
+             c.name          AS default_category_name
+      FROM transactions t
+      LEFT JOIN merchant_mappings m ON m.merchant_name = t.merchant
+      LEFT JOIN categories        c ON c.id = m.category_id
+      GROUP BY t.merchant
+      ORDER BY txn_count DESC, merchant ASC
+    ''');
+    return rows.map(MerchantSummary.fromMap).toList();
   }
 
   // -------------------------------------------------------------------------
@@ -801,6 +1020,12 @@ class AppDatabase {
       limit: 1,
     );
 
+    // Nothing here needs to know about splits or about "always ask me". A
+    // merchant set to always ask has a mapping to Uncategorized, which this
+    // already reads and applies; a merchant never configured has no mapping and
+    // falls through to the same place. Both land uncategorized, which is
+    // exactly right, and a freshly imported alert is never split. Left alone
+    // deliberately.
     final categoryId = mapping.isNotEmpty
         ? mapping.first['category_id'] as int
         : await uncategorizedId();
@@ -824,15 +1049,73 @@ class AppDatabase {
   // 5. LEARN THE MAPPING + BACKFILL
   // -------------------------------------------------------------------------
 
-  /// Remembers `merchant -> categoryId` and retroactively re-tags every
-  /// existing transaction from that merchant. Returns the number of rows
-  /// updated. Both writes share one SQL transaction so the mapping can never
-  /// be saved without the backfill.
-  Future<int> assignCategory({
+  /// A transaction that setting a merchant default may re-tag: same merchant,
+  /// not already in the target category, and not split.
+  ///
+  /// Shared verbatim by [backfillableCount] and [setMerchantDefault] so the
+  /// number the user is asked to confirm is exactly the set that changes.
+  /// Excluding rows already in the target keeps that number honest — "also
+  /// apply to N past transactions" should mean N of them actually move.
+  ///
+  /// Excluding split rows is the important one: a split is a statement about
+  /// where that money really went, made by hand, and a merchant-wide default is
+  /// a much weaker claim than that. It must never overwrite one.
+  static const String _backfillableWhere =
+      'merchant = ? AND category_id <> ? '
+      'AND id NOT IN (SELECT transaction_id FROM transaction_splits)';
+
+  /// Re-tags this transaction and nothing else, and drops any split on it —
+  /// one category and a set of lines are mutually exclusive statements about
+  /// the same money.
+  Future<void> setTransactionCategory({
+    required int transactionId,
+    required int categoryId,
+  }) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete(
+        'transaction_splits',
+        where: 'transaction_id = ?',
+        whereArgs: <Object?>[transactionId],
+      );
+      await txn.update(
+        'transactions',
+        <String, Object?>{'category_id': categoryId},
+        where: 'id = ?',
+        whereArgs: <Object?>[transactionId],
+      );
+    });
+  }
+
+  /// How many past transactions [setMerchantDefault] would re-tag, using the
+  /// identical predicate so the count shown is the count changed.
+  Future<int> backfillableCount({
     required String merchant,
     required int categoryId,
   }) async {
     final db = await database;
+    final rows = await db.rawQuery(
+      'SELECT COUNT(*) AS n FROM transactions WHERE $_backfillableWhere',
+      <Object?>[merchant, categoryId],
+    );
+    return Sqflite.firstIntValue(rows) ?? 0;
+  }
+
+  /// Remembers `merchant -> categoryId` for everything imported from now on,
+  /// and re-tags history only when [backfill] says so. Returns the number of
+  /// rows re-tagged.
+  ///
+  /// A mapping to Uncategorized is how "always ask me" is stored, for a
+  /// merchant like Amazon whose charges always need splitting by hand. It is
+  /// never backfilled even if asked: applying it to history would erase
+  /// per-transaction work rather than save any.
+  Future<int> setMerchantDefault({
+    required String merchant,
+    required int categoryId,
+    bool backfill = false,
+  }) async {
+    final db = await database;
+    final int uncategorized = await uncategorizedId();
     return db.transaction<int>((txn) async {
       await txn.insert(
         'merchant_mappings',
@@ -843,13 +1126,73 @@ class AppDatabase {
         conflictAlgorithm: ConflictAlgorithm.replace,
       );
 
+      if (!backfill || categoryId == uncategorized) return 0;
       return txn.update(
         'transactions',
         <String, Object?>{'category_id': categoryId},
-        where: 'merchant = ?',
-        whereArgs: <Object?>[merchant],
+        where: _backfillableWhere,
+        whereArgs: <Object?>[merchant, categoryId],
       );
     });
+  }
+
+  /// Replaces this transaction's split lines outright — the editor always hands
+  /// over the complete set, which makes "replace" and "clear" the same code.
+  ///
+  /// Throws unless the lines sum to the transaction's amount: a split that does
+  /// not add up is a corrupt ledger, and there is no repair path once written.
+  /// `transactions.category_id` is refreshed to the largest line so the join in
+  /// [transactions], the headline chip and a tombstone restore all still have a
+  /// sensible single category to fall back on. It is never money math.
+  Future<void> saveSplits(ExpenseTxn transaction, List<TxnSplit> lines) async {
+    if (lines.isEmpty) return clearSplits(transaction.id);
+
+    final double sum =
+        lines.fold<double>(0, (double s, TxnSplit l) => s + l.amount);
+    if ((sum - transaction.amount).abs() > _splitTolerance) {
+      throw ArgumentError(
+        'Split lines total $sum, which is not ${transaction.amount}',
+      );
+    }
+
+    final TxnSplit dominant = lines.reduce(
+      (TxnSplit a, TxnSplit b) => b.amount > a.amount ? b : a,
+    );
+
+    final db = await database;
+    await db.transaction((txn) async {
+      await txn.delete(
+        'transaction_splits',
+        where: 'transaction_id = ?',
+        whereArgs: <Object?>[transaction.id],
+      );
+      for (var i = 0; i < lines.length; i++) {
+        await txn.insert('transaction_splits', <String, Object?>{
+          'transaction_id': transaction.id,
+          'category_id': lines[i].categoryId,
+          'amount': lines[i].amount,
+          'position': i,
+        });
+      }
+      await txn.update(
+        'transactions',
+        <String, Object?>{'category_id': dominant.categoryId},
+        where: 'id = ?',
+        whereArgs: <Object?>[transaction.id],
+      );
+    });
+  }
+
+  /// Drops the lines. `transactions.category_id` keeps whatever the dominant
+  /// line left there, which is the sane landing spot for a transaction that has
+  /// stopped being split.
+  Future<void> clearSplits(int transactionId) async {
+    final db = await database;
+    await db.delete(
+      'transaction_splits',
+      where: 'transaction_id = ?',
+      whereArgs: <Object?>[transactionId],
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -880,6 +1223,10 @@ class AppDatabase {
         'category_id': txn.categoryId,
         'original_id': txn.id,
         'deleted_at': at.millisecondsSinceEpoch,
+        // The split lines cascade away with the row itself, so unless they are
+        // carried here a delete-and-undo would quietly return the transaction
+        // under a single category and lose the breakdown entirely.
+        'splits_json': encodeSplits(txn.splits),
       };
 
   /// Removes the rows and records that they were removed, all in one SQL
@@ -915,6 +1262,7 @@ class AppDatabase {
     final rows = await db.rawQuery('''
       SELECT d.amount, d.merchant, d.date, d.direction, d.reference,
              d.payment_type, d.category_id, d.original_id, d.deleted_at,
+             d.splits_json,
              c.name AS category_name
       FROM deleted_transactions d
       LEFT JOIN categories c ON c.id = d.category_id
@@ -945,7 +1293,7 @@ class AppDatabase {
             row.reference,
           ],
         );
-        await txn.insert(
+        final int restoredId = await txn.insert(
           'transactions',
           <String, Object?>{
             if (row.originalId != null) 'id': row.originalId,
@@ -959,6 +1307,32 @@ class AppDatabase {
           },
           conflictAlgorithm: ConflictAlgorithm.ignore,
         );
+
+        // `ignore` returns 0 when a row on this natural key already exists, so
+        // the insert above did nothing and there is no transaction to hang
+        // lines off. Writing them anyway — worse, against `original_id` — would
+        // attach a stranger's split to whatever is living at that id.
+        if (restoredId == 0 || row.splits.isEmpty) continue;
+
+        // A category deleted while the transaction was in the bin would leave a
+        // split that no longer sums. Coming back whole under one category is
+        // recoverable; coming back broken is not.
+        final Set<int> known = (await txn.query('categories',
+                columns: <String>['id']))
+            .map((Map<String, Object?> c) => c['id'] as int)
+            .toSet();
+        if (!row.splits.every((TxnSplit s) => known.contains(s.categoryId))) {
+          continue;
+        }
+
+        for (var i = 0; i < row.splits.length; i++) {
+          await txn.insert('transaction_splits', <String, Object?>{
+            'transaction_id': restoredId,
+            'category_id': row.splits[i].categoryId,
+            'amount': row.splits[i].amount,
+            'position': i,
+          });
+        }
       }
     });
   }
@@ -1422,35 +1796,204 @@ class TuExpenseTrackerApp extends StatelessWidget {
   }
 }
 
-/// Narrows the ledger to one category and/or one card/account. A null filter
-/// means "everything". Pure and top-level so it can be tested without a
-/// database behind it.
-List<ExpenseTxn> applyFilters(
-  List<ExpenseTxn> all, {
-  int? categoryId,
-  String? paymentType,
-}) {
-  if (categoryId == null && paymentType == null) return all;
-  return all
-      .where((ExpenseTxn t) =>
-          (categoryId == null || t.categoryId == categoryId) &&
-          (paymentType == null || t.paymentType == paymentType))
-      .toList();
+/// One row of the ledger as a filtered view sees it: a transaction, plus only
+/// the split lines that survived the filter.
+///
+/// [amount] is the sum of *those* lines, not the transaction's total, which is
+/// what keeps a filtered dashboard honest. Narrow to Grocery and a ₹2,000
+/// Amazon order split three ways contributes its ₹1,200 grocery line and
+/// nothing else — so the category totals still add up to what was really spent
+/// instead of counting the same ₹2,000 under all three of its categories.
+class LedgerEntry {
+  const LedgerEntry({required this.txn, required this.lines});
+
+  final ExpenseTxn txn;
+  final List<TxnSplit> lines;
+
+  double get amount =>
+      lines.fold<double>(0, (double sum, TxnSplit l) => sum + l.amount);
 }
 
-/// The subset of [all] that at least one transaction actually uses, in the same
-/// order — the filter dropdown offers these rather than every seeded category,
-/// so it can never present a choice that filters to nothing.
+/// Narrows the ledger to any combination of categories, merchants and one
+/// card/account, and projects each surviving transaction down to the split
+/// lines that matched. A null or empty filter means "everything".
 ///
-/// Deliberately takes the *whole* ledger, not the currently filtered view:
-/// narrowing to one card must not empty the category dropdown underneath the
-/// selection already made in it.
-List<ExpenseCategory> categoriesInUse(
-  List<ExpenseTxn> transactions,
-  List<ExpenseCategory> all,
-) {
-  final used = transactions.map((ExpenseTxn t) => t.categoryId).toSet();
-  return all.where((ExpenseCategory c) => used.contains(c.id)).toList();
+/// Pure and top-level so it can be tested without a database behind it.
+List<LedgerEntry> applyFilters(
+  List<ExpenseTxn> all, {
+  Set<int>? categoryIds,
+  Set<String>? merchants,
+  String? paymentType,
+}) {
+  final bool byCategory = categoryIds != null && categoryIds.isNotEmpty;
+  final bool byMerchant = merchants != null && merchants.isNotEmpty;
+
+  final List<LedgerEntry> entries = <LedgerEntry>[];
+  for (final ExpenseTxn t in all) {
+    if (paymentType != null && t.paymentType != paymentType) continue;
+    if (byMerchant && !merchants.contains(t.merchant)) continue;
+
+    final List<TxnSplit> lines = byCategory
+        ? t.effectiveSplits
+            .where((TxnSplit l) => categoryIds.contains(l.categoryId))
+            .toList()
+        : t.effectiveSplits;
+    if (lines.isEmpty) continue;
+
+    entries.add(LedgerEntry(txn: t, lines: lines));
+  }
+  return entries;
+}
+
+/// What [t] contributes to a view narrowed to [categoryIds] — the matching
+/// portion of a split, or the full amount when unfiltered or unsplit.
+///
+/// The tile and the summary both need this so a filtered view never prints or
+/// sums the whole of a transaction only part of which matched.
+double amountIn(ExpenseTxn t, Set<int>? categoryIds) {
+  if (categoryIds == null || categoryIds.isEmpty) return t.amount;
+  return t.effectiveSplits
+      .where((TxnSplit l) => categoryIds.contains(l.categoryId))
+      .fold<double>(0, (double sum, TxnSplit l) => sum + l.amount);
+}
+
+/// Spend by category name over an already-filtered view. Debits only — a refund
+/// is not spending.
+///
+/// Iterates split lines, so a transaction split across three categories is
+/// attributed to all three rather than landing wholly under whichever one
+/// happens to be its dominant line.
+Map<String, double> spendByCategory(List<LedgerEntry> entries) {
+  final Map<String, double> byCategory = <String, double>{};
+  for (final LedgerEntry entry in entries) {
+    if (entry.txn.isCredit) continue;
+    for (final TxnSplit line in entry.lines) {
+      byCategory[line.categoryName] =
+          (byCategory[line.categoryName] ?? 0) + line.amount;
+    }
+  }
+  return byCategory;
+}
+
+/// Every merchant the ledger has seen that survives *the other* filters,
+/// alphabetically.
+///
+/// The category filter is deliberately applied here and the merchant filter is
+/// not — see [categoryOptions] for why.
+List<String> merchantOptions(
+  List<ExpenseTxn> all, {
+  Set<int>? categoryIds,
+  String? paymentType,
+}) {
+  final List<String> merchants = applyFilters(
+    all,
+    categoryIds: categoryIds,
+    paymentType: paymentType,
+  ).map((LedgerEntry e) => e.txn.merchant).toSet().toList()
+    ..sort();
+  return merchants;
+}
+
+/// The subset of [all] that something under *the other* filters actually falls
+/// under, in the same order — the filter offers these rather than every seeded
+/// category, so it can never present a choice that filters to nothing.
+///
+/// Each facet applies every filter except its own. That is what lets the two
+/// constrain each other without either collapsing: picking a merchant narrows
+/// the categories on offer, but picking a category must not narrow — and so
+/// possibly empty — the merchant list underneath a selection already made in
+/// it.
+///
+/// Expands over split lines, so a category that only ever appears as a minor
+/// line of a split is still offered. Matching on the dominant category alone
+/// would let the filter hide a choice that would in fact have matched.
+List<ExpenseCategory> categoryOptions(
+  List<ExpenseTxn> all,
+  List<ExpenseCategory> categories, {
+  Set<String>? merchants,
+  String? paymentType,
+}) {
+  final Set<int> used = <int>{};
+  for (final LedgerEntry entry in applyFilters(
+    all,
+    merchants: merchants,
+    paymentType: paymentType,
+  )) {
+    for (final TxnSplit line in entry.lines) {
+      used.add(line.categoryId);
+    }
+  }
+  return categories.where((ExpenseCategory c) => used.contains(c.id)).toList();
+}
+
+/// Drops selections that no longer exist among [available].
+///
+/// A selection can outlive its data — delete the last transaction on a card and
+/// that card is gone from the list — and narrowing one facet can retire options
+/// in another.
+Set<T> pruneSelection<T>(Set<T> selected, Iterable<T> available) {
+  final Set<T> keep = available.toSet();
+  return selected.where(keep.contains).toSet();
+}
+
+// ---------------------------------------------------------------------------
+// SPLIT ARITHMETIC — pure, so the one fiddly calculation in the app is tested
+// ---------------------------------------------------------------------------
+
+/// Paise. Amounts are doubles, so three ways through ₹0.10 cannot land exactly;
+/// anything under half a paisa is a rounding artefact rather than a real gap.
+const double _splitTolerance = 0.005;
+
+/// How much of [total] the lines have not accounted for. Negative means they
+/// have over-allocated it.
+double unallocated(List<double> amounts, double total) =>
+    total - amounts.fold<double>(0, (double sum, double a) => sum + a);
+
+bool isBalanced(
+  List<double> amounts,
+  double total, {
+  double tolerance = _splitTolerance,
+}) =>
+    amounts.isNotEmpty && unallocated(amounts, total).abs() <= tolerance;
+
+/// The same amounts with the last line rewritten to whatever is left over, so
+/// filling in the rows above always leaves the last one holding the balance.
+///
+/// Typing 1200 against a ₹2,000 charge leaves 800 in the second row; adding a
+/// third and typing 300 in the second leaves 500 in the third. The last line
+/// also absorbs any rounding drift, which is what makes the stored lines sum to
+/// the transaction exactly.
+List<double> withRemainderInLast(List<double> amounts, double total) {
+  if (amounts.isEmpty) return amounts;
+  final List<double> out = List<double>.of(amounts);
+  final double allocated = out
+      .take(out.length - 1)
+      .fold<double>(0, (double sum, double a) => sum + a);
+  out[out.length - 1] = total - allocated;
+  return out;
+}
+
+/// Splits as a tombstone carries them — null when there are none, so the column
+/// stays empty for the unsplit transactions that are the overwhelming majority.
+String? encodeSplits(List<TxnSplit> splits) => splits.isEmpty
+    ? null
+    : jsonEncode(splits.map((TxnSplit s) => s.toJson()).toList());
+
+/// The inverse of [encodeSplits]. Anything unreadable decodes to no splits: a
+/// transaction that restores under one category is recoverable, one that throws
+/// on the way out of the Deleted screen is not.
+List<TxnSplit> decodeSplits(String? json) {
+  if (json == null || json.isEmpty) return const <TxnSplit>[];
+  try {
+    final Object? decoded = jsonDecode(json);
+    if (decoded is! List) return const <TxnSplit>[];
+    return decoded
+        .whereType<Map<String, Object?>>()
+        .map(TxnSplit.fromMap)
+        .toList();
+  } on FormatException {
+    return const <TxnSplit>[];
+  }
 }
 
 /// What one pass over the inbox did. [skipped] counts alerts that parsed but
@@ -1623,8 +2166,14 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   /// Step 5: persist the merchant -> category mapping and backfill history.
+  /// Categorises **this transaction** and, only if asked, makes the pick the
+  /// merchant's default as well.
+  ///
+  /// Correcting one row used to re-tag every transaction from that merchant,
+  /// which is far more than anyone means by it — and would silently flatten a
+  /// split. The rule is now the narrow one, and the wider one is opt-in.
   Future<void> _pickCategory(ExpenseTxn txn) async {
-    final chosen = await showModalBottomSheet<ExpenseCategory>(
+    final chosen = await showModalBottomSheet<CategoryChoice>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
@@ -1632,17 +2181,82 @@ class _HomeShellState extends State<HomeShell> {
         merchant: txn.merchant,
         categories: _categories,
         selectedId: txn.isUncategorized ? null : txn.categoryId,
+        subtitle: txn.isSplit
+            ? 'This transaction is split. Picking a category replaces its '
+                'split with one category.'
+            : 'Applies to this transaction.',
+        showMakeDefault: true,
       ),
     );
     if (chosen == null) return;
 
-    final updated = await _db.assignCategory(
-      merchant: txn.merchant,
-      categoryId: chosen.id,
+    await _db.setTransactionCategory(
+      transactionId: txn.id,
+      categoryId: chosen.category.id,
     );
+
+    var updated = 0;
+    if (chosen.makeDefault) {
+      updated = await _setMerchantDefault(txn.merchant, chosen.category);
+      if (!mounted) return;
+    }
+
     await _load();
-    _toast('${txn.merchant} → ${chosen.name} '
-        '($updated transaction${updated == 1 ? '' : 's'} updated)');
+    _toast(chosen.makeDefault
+        ? '${txn.merchant} → ${chosen.category.name} '
+            '(default set${updated > 0 ? ', $updated updated' : ''})'
+        : '${txn.merchant} → ${chosen.category.name}');
+  }
+
+  /// Saves the merchant default, asking first whether history should move with
+  /// it. Returns how many past transactions were re-tagged.
+  Future<int> _setMerchantDefault(
+    String merchant,
+    ExpenseCategory category,
+  ) async {
+    final int uncategorized = await _db.uncategorizedId();
+    var backfill = false;
+
+    // Uncategorized as a default means "always ask me", which is never applied
+    // backwards — see [AppDatabase.setMerchantDefault].
+    if (category.id != uncategorized) {
+      final int n = await _db.backfillableCount(
+        merchant: merchant,
+        categoryId: category.id,
+      );
+      if (!mounted) return 0;
+      if (n > 0) {
+        backfill = await showDialog<bool>(
+              context: context,
+              builder: (BuildContext context) => AlertDialog(
+                title: const Text('Apply to past transactions?'),
+                content: Text(
+                  '$n past transaction${n == 1 ? '' : 's'} from $merchant '
+                  'would move to ${category.name}. Transactions you have '
+                  'split are left alone.',
+                ),
+                actions: <Widget>[
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('Future only'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: Text('Apply to $n'),
+                  ),
+                ],
+              ),
+            ) ??
+            false;
+      }
+    }
+    if (!mounted) return 0;
+
+    return _db.setMerchantDefault(
+      merchant: merchant,
+      categoryId: category.id,
+      backfill: backfill,
+    );
   }
 
   /// Deletes for good — the tombstones written by
@@ -1757,9 +2371,25 @@ class _HomeShellState extends State<HomeShell> {
     switch (action) {
       case _TxnAction.categorize:
         await _pickCategory(txn);
+      case _TxnAction.split:
+        await _splitTransaction(txn);
       case _TxnAction.delete:
         await _delete(<ExpenseTxn>[txn]);
     }
+  }
+
+  Future<void> _splitTransaction(ExpenseTxn txn) async {
+    final bool? changed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => SplitScreen(
+          txn: txn,
+          categories: _categories,
+          money: _money,
+        ),
+      ),
+    );
+    if (changed != true) return;
+    await _load();
   }
 
   Future<void> _openDeleted() async {
@@ -1776,6 +2406,11 @@ class _HomeShellState extends State<HomeShell> {
     await Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => const SettingsScreen(),
     ));
+    if (!mounted) return;
+    // Settings reaches Merchants & defaults, where a default can be backfilled
+    // over history. Without this the ledger behind it keeps showing the
+    // categories those rows had on the way in.
+    await _load();
   }
 
   /// The launch-time update check. Silent unless there is something to install:
@@ -1945,7 +2580,10 @@ class _HomeShellState extends State<HomeShell> {
               loading: _loading,
               selected: _selected,
               onRefresh: _load,
-              onTap: _pickCategory,
+              // The same sheet the Dashboard opens, so a row behaves the same
+              // way whichever tab it was tapped on — and so Split is reachable
+              // from both.
+              onTap: _openTransaction,
               onToggleSelected: _toggleSelected,
               onDelete: (ExpenseTxn txn) => _delete(<ExpenseTxn>[txn]),
               onAddSms: _addSmsManually,
@@ -2017,13 +2655,37 @@ class DashboardTab extends StatefulWidget {
 }
 
 class _DashboardTabState extends State<DashboardTab> {
-  int? _categoryId;
+  Set<int> _categoryIds = <int>{};
+  Set<String> _merchants = <String>{};
   String? _paymentType;
 
   void _clearFilters() => setState(() {
-        _categoryId = null;
+        _categoryIds = <int>{};
+        _merchants = <String>{};
         _paymentType = null;
       });
+
+  /// Lets the user tick several of [options] at once, returning the new
+  /// selection or null if they backed out.
+  Future<Set<T>?> _chooseMany<T>({
+    required String title,
+    required List<T> options,
+    required Set<T> selected,
+    required String Function(T) label,
+    Widget Function(T)? leading,
+  }) =>
+      showModalBottomSheet<Set<T>>(
+        context: context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (BuildContext context) => _MultiSelectSheet<T>(
+          title: title,
+          options: options,
+          selected: selected,
+          label: label,
+          leading: leading,
+        ),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -2035,83 +2697,113 @@ class _DashboardTabState extends State<DashboardTab> {
         .toList()
       ..sort();
 
-    // Only categories something actually falls under, so the dropdown can never
-    // offer a choice that filters to nothing.
-    final List<ExpenseCategory> categories =
-        categoriesInUse(widget.transactions, widget.categories);
+    // Each facet offers what the *other* filters leave available, so the two
+    // narrow each other without either being able to empty itself out from
+    // under a selection already made in it.
+    final List<ExpenseCategory> categories = categoryOptions(
+      widget.transactions,
+      widget.categories,
+      merchants: _merchants,
+      paymentType: _paymentType,
+    );
+    final List<String> merchants = merchantOptions(
+      widget.transactions,
+      categoryIds: _categoryIds,
+      paymentType: _paymentType,
+    );
 
     // A selection can outlive its data — delete the last transaction on a card
-    // and that card is gone from the list. Fall back to "all" for this build
-    // rather than handing the dropdown a value no item carries.
+    // and that card is gone from the list. Drop anything no longer on offer for
+    // this build rather than filtering on a value nothing carries.
     final String? paymentType =
         paymentTypes.contains(_paymentType) ? _paymentType : null;
-    final int? categoryId =
-        categories.any((ExpenseCategory c) => c.id == _categoryId)
-            ? _categoryId
-            : null;
+    final Set<int> categoryIds = pruneSelection(
+      _categoryIds,
+      categories.map((ExpenseCategory c) => c.id),
+    );
+    final Set<String> merchantNames = pruneSelection(_merchants, merchants);
 
-    final List<ExpenseTxn> visible = applyFilters(
+    final List<LedgerEntry> visible = applyFilters(
       widget.transactions,
-      categoryId: categoryId,
+      categoryIds: categoryIds,
+      merchants: merchantNames,
       paymentType: paymentType,
     );
 
     return Column(
       children: <Widget>[
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-          child: Row(
+        // Three filters, two of which take several values at once, do not fit
+        // as dropdowns side by side — and Material has no multi-select one. A
+        // scrolling row of chips that each open a sheet does fit, and matches
+        // how the rest of the app asks for a choice.
+        SizedBox(
+          height: 56,
+          child: ListView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
             children: <Widget>[
-              Expanded(
-                child: DropdownButtonFormField<int?>(
-                  initialValue: categoryId,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    isDense: true,
-                    labelText: 'Category',
-                    border: OutlineInputBorder(),
-                  ),
-                  items: <DropdownMenuItem<int?>>[
-                    const DropdownMenuItem<int?>(
-                      child: Text('All categories'),
+              _FilterChip(
+                label: 'Category',
+                count: categoryIds.length,
+                onPressed: () async {
+                  final Set<int>? picked = await _chooseMany<int>(
+                    title: 'Categories',
+                    options:
+                        categories.map((ExpenseCategory c) => c.id).toList(),
+                    selected: categoryIds,
+                    label: (int id) => categories
+                        .firstWhere((ExpenseCategory c) => c.id == id)
+                        .name,
+                    leading: (int id) => Icon(
+                      categoryIcon(categories
+                          .firstWhere((ExpenseCategory c) => c.id == id)
+                          .name),
                     ),
-                    for (final ExpenseCategory category in categories)
-                      DropdownMenuItem<int?>(
-                        value: category.id,
-                        child: Text(
-                          category.name,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                  ],
-                  onChanged: (int? value) =>
-                      setState(() => _categoryId = value),
-                ),
+                  );
+                  if (picked != null) setState(() => _categoryIds = picked);
+                },
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: DropdownButtonFormField<String?>(
-                  initialValue: paymentType,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    isDense: true,
-                    labelText: 'Card / account',
-                    border: OutlineInputBorder(),
-                  ),
-                  items: <DropdownMenuItem<String?>>[
-                    const DropdownMenuItem<String?>(
-                      child: Text('All'),
-                    ),
-                    for (final String type in paymentTypes)
-                      DropdownMenuItem<String?>(
-                        value: type,
-                        child: Text(type, overflow: TextOverflow.ellipsis),
-                      ),
-                  ],
-                  onChanged: (String? value) =>
-                      setState(() => _paymentType = value),
-                ),
+              const SizedBox(width: 8),
+              _FilterChip(
+                label: 'Merchant',
+                count: merchantNames.length,
+                onPressed: () async {
+                  final Set<String>? picked = await _chooseMany<String>(
+                    title: 'Merchants',
+                    options: merchants,
+                    selected: merchantNames,
+                    label: (String m) => m,
+                  );
+                  if (picked != null) setState(() => _merchants = picked);
+                },
               ),
+              const SizedBox(width: 8),
+              _FilterChip(
+                label: paymentType ?? 'Card / account',
+                count: paymentType == null ? 0 : 1,
+                onPressed: () async {
+                  final Set<String>? picked = await _chooseMany<String>(
+                    title: 'Card / account',
+                    options: paymentTypes,
+                    selected: <String>{?paymentType},
+                    label: (String t) => t,
+                  );
+                  if (picked != null) {
+                    setState(() => _paymentType =
+                        picked.isEmpty ? null : picked.first);
+                  }
+                },
+              ),
+              if (categoryIds.isNotEmpty ||
+                  merchantNames.isNotEmpty ||
+                  paymentType != null) ...<Widget>[
+                const SizedBox(width: 8),
+                ActionChip(
+                  avatar: const Icon(Icons.close, size: 18),
+                  label: const Text('Clear'),
+                  onPressed: _clearFilters,
+                ),
+              ],
             ],
           ),
         ),
@@ -2130,26 +2822,158 @@ class _DashboardTabState extends State<DashboardTab> {
                               itemBuilder: (context, index) {
                                 if (index == 0) {
                                   return _SummaryHeader(
-                                    transactions: visible,
+                                    entries: visible,
                                     uncategorizedCount: visible
-                                        .where((ExpenseTxn t) =>
-                                            t.isUncategorized)
+                                        .where((LedgerEntry e) =>
+                                            e.txn.isUncategorized)
                                         .length,
                                     money: widget.money,
                                   );
                                 }
-                                final txn = visible[index - 1];
+                                final entry = visible[index - 1];
                                 return _TransactionTile(
-                                  txn: txn,
+                                  txn: entry.txn,
                                   money: widget.money,
                                   dateFormat: widget.dateFormat,
-                                  onTap: () => widget.onTap(txn),
+                                  // Under a category filter the row shows what
+                                  // it contributed, not what was charged.
+                                  shownAmount: entry.amount,
+                                  shownLines: entry.lines,
+                                  onTap: () => widget.onTap(entry.txn),
                                 );
                               },
                             ),
                 ),
         ),
       ],
+    );
+  }
+}
+
+/// A filter's entry point: its name, how many values are picked, and a tap that
+/// opens the sheet to change them.
+class _FilterChip extends StatelessWidget {
+  const _FilterChip({
+    required this.label,
+    required this.count,
+    required this.onPressed,
+  });
+
+  final String label;
+  final int count;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool active = count > 0;
+    return FilterChip(
+      selected: active,
+      showCheckmark: false,
+      label: Text(count > 1 ? '$label · $count' : label),
+      avatar: active ? null : const Icon(Icons.arrow_drop_down, size: 20),
+      onSelected: (_) => onPressed(),
+    );
+  }
+}
+
+/// Ticks any number of [options] and returns the new selection on Apply, or
+/// null if it was dismissed.
+///
+/// Selection is held locally so backing out changes nothing — the filter only
+/// moves when Apply says so.
+class _MultiSelectSheet<T> extends StatefulWidget {
+  const _MultiSelectSheet({
+    super.key,
+    required this.title,
+    required this.options,
+    required this.selected,
+    required this.label,
+    this.leading,
+  });
+
+  final String title;
+  final List<T> options;
+  final Set<T> selected;
+  final String Function(T) label;
+  final Widget Function(T)? leading;
+
+  @override
+  State<_MultiSelectSheet<T>> createState() => _MultiSelectSheetState<T>();
+}
+
+class _MultiSelectSheetState<T> extends State<_MultiSelectSheet<T>> {
+  late Set<T> _selected = <T>{...widget.selected};
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 12, 4),
+            child: Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(widget.title, style: theme.textTheme.titleLarge),
+                ),
+                if (_selected.isNotEmpty)
+                  TextButton(
+                    onPressed: () => setState(() => _selected = <T>{}),
+                    child: const Text('Clear'),
+                  ),
+              ],
+            ),
+          ),
+          Flexible(
+            child: widget.options.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(
+                      'Nothing to choose from under the current filters.',
+                      style: theme.textTheme.bodyMedium,
+                    ),
+                  )
+                : ListView.builder(
+                    shrinkWrap: true,
+                    itemCount: widget.options.length,
+                    itemBuilder: (BuildContext context, int index) {
+                      final T option = widget.options[index];
+                      return CheckboxListTile(
+                        value: _selected.contains(option),
+                        secondary: widget.leading?.call(option),
+                        title: Text(
+                          widget.label(option),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        onChanged: (bool? on) => setState(() {
+                          if (on ?? false) {
+                            _selected.add(option);
+                          } else {
+                            _selected.remove(option);
+                          }
+                        }),
+                      );
+                    },
+                  ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
+            child: Row(
+              children: <Widget>[
+                const Spacer(),
+                FilledButton(
+                  onPressed: () => Navigator.pop(context, _selected),
+                  child: const Text('Apply'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -2205,7 +3029,12 @@ class ExpensesTab extends StatelessWidget {
               itemBuilder: (context, index) {
                 if (index == 0) {
                   return _SummaryHeader(
-                    transactions: transactions,
+                    // The Expenses tab is unfiltered, so every transaction
+                    // contributes all of its lines.
+                    entries: <LedgerEntry>[
+                      for (final ExpenseTxn t in transactions)
+                        LedgerEntry(txn: t, lines: t.effectiveSplits),
+                    ],
                     uncategorizedCount: uncategorizedCount,
                     money: money,
                   );
@@ -2264,7 +3093,7 @@ class _DismissBackground extends StatelessWidget {
 // TRANSACTION ACTIONS — what a dashboard tap opens on the Expenses tab
 // ---------------------------------------------------------------------------
 
-enum _TxnAction { categorize, delete }
+enum _TxnAction { categorize, split, delete }
 
 class TransactionActionsSheet extends StatelessWidget {
   const TransactionActionsSheet({
@@ -2317,10 +3146,21 @@ class TransactionActionsSheet extends StatelessWidget {
               style: theme.textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
-            Chip(
-              avatar: Icon(categoryIcon(txn.categoryName), size: 18),
-              label: Text(txn.categoryName),
-              visualDensity: VisualDensity.compact,
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: <Widget>[
+                for (final TxnSplit line in txn.effectiveSplits)
+                  Chip(
+                    avatar: Icon(categoryIcon(line.categoryName), size: 18),
+                    label: Text(
+                      txn.isSplit
+                          ? '${line.categoryName} ${money.format(line.amount)}'
+                          : line.categoryName,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                  ),
+              ],
             ),
             const Divider(height: 28),
             ListTile(
@@ -2328,6 +3168,13 @@ class TransactionActionsSheet extends StatelessWidget {
               leading: const Icon(Icons.label_outline),
               title: const Text('Change category'),
               onTap: () => Navigator.pop(context, _TxnAction.categorize),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.call_split),
+              title: Text(txn.isSplit ? 'Edit split' : 'Split'),
+              subtitle: const Text('Across several categories'),
+              onTap: () => Navigator.pop(context, _TxnAction.split),
             ),
             ListTile(
               contentPadding: EdgeInsets.zero,
@@ -2648,12 +3495,12 @@ class _NoMatchState extends StatelessWidget {
 
 class _SummaryHeader extends StatelessWidget {
   const _SummaryHeader({
-    required this.transactions,
+    required this.entries,
     required this.uncategorizedCount,
     required this.money,
   });
 
-  final List<ExpenseTxn> transactions;
+  final List<LedgerEntry> entries;
   final int uncategorizedCount;
   final NumberFormat money;
 
@@ -2663,18 +3510,18 @@ class _SummaryHeader extends StatelessWidget {
 
     var spent = 0.0;
     var received = 0.0;
-    // Only debits are broken down by category — a refund is not spending.
-    final byCategory = <String, double>{};
-    for (final txn in transactions) {
-      if (txn.isCredit) {
-        received += txn.amount;
+    for (final entry in entries) {
+      // The headline totals add the *entry* amount, which under a category
+      // filter is only the part that matched — and which for an unfiltered
+      // split is the whole charge, since its lines sum to it by construction.
+      if (entry.txn.isCredit) {
+        received += entry.amount;
       } else {
-        spent += txn.amount;
-        byCategory[txn.categoryName] =
-            (byCategory[txn.categoryName] ?? 0) + txn.amount;
+        spent += entry.amount;
       }
     }
-    final breakdown = byCategory.entries.toList()
+    // Only debits are broken down by category — a refund is not spending.
+    final breakdown = spendByCategory(entries).entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
 
     return Card(
@@ -2716,8 +3563,8 @@ class _SummaryHeader extends StatelessWidget {
             ],
             const SizedBox(height: 4),
             Text(
-              '${transactions.length} transaction'
-              '${transactions.length == 1 ? '' : 's'}'
+              '${entries.length} transaction'
+              '${entries.length == 1 ? '' : 's'}'
               '${uncategorizedCount > 0 ? ' · $uncategorizedCount need a category' : ''}',
               style: theme.textTheme.bodySmall,
             ),
@@ -2752,6 +3599,8 @@ class _TransactionTile extends StatelessWidget {
     required this.txn,
     required this.money,
     required this.dateFormat,
+    this.shownAmount,
+    this.shownLines,
     this.onTap,
     this.onLongPress,
     this.selected = false,
@@ -2761,6 +3610,15 @@ class _TransactionTile extends StatelessWidget {
   final ExpenseTxn txn;
   final NumberFormat money;
   final DateFormat dateFormat;
+
+  /// What this row contributed to the view it is being shown in. Null means the
+  /// whole transaction. Under a category filter a split contributes only its
+  /// matching lines, and printing the full charge beside a total that counted
+  /// less than that would simply look wrong.
+  final double? shownAmount;
+
+  /// The lines behind [shownAmount]. Null means all of them.
+  final List<TxnSplit>? shownLines;
 
   /// Null where the row is not interactive — `ListTile` renders itself
   /// non-interactive when there is nothing to tap.
@@ -2774,6 +3632,17 @@ class _TransactionTile extends StatelessWidget {
 
   /// The list is in selection mode, so a tap marks rather than categorises.
   final bool selecting;
+
+  /// The pill's text. A split names its first line and counts the rest —
+  /// "Grocery +2" — since three full names would not fit and the sheet shows
+  /// them all anyway.
+  String get _categoryLabel {
+    final List<TxnSplit> lines = shownLines ?? txn.effectiveSplits;
+    if (lines.length <= 1) {
+      return lines.isEmpty ? txn.categoryName : lines.first.categoryName;
+    }
+    return '${lines.first.categoryName} +${lines.length - 1}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2839,12 +3708,12 @@ class _TransactionTile extends StatelessWidget {
                   ),
                   child: Text(
                     !needsCategory
-                        ? txn.categoryName
+                        ? _categoryLabel
                         // Only promise what a tap will actually do: nothing on
                         // a read-only list, and marking while selecting.
                         : onTap == null || selecting
                             ? AppDatabase.uncategorized
-                            : 'Tap to categorize',
+                            : 'Tap to categorize or split',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: needsCategory
                           ? theme.colorScheme.onErrorContainer
@@ -2858,8 +3727,8 @@ class _TransactionTile extends StatelessWidget {
         ),
         trailing: Text(
           txn.isCredit
-              ? '+${money.format(txn.amount)}'
-              : money.format(txn.amount),
+              ? '+${money.format(shownAmount ?? txn.amount)}'
+              : money.format(shownAmount ?? txn.amount),
           style: theme.textTheme.titleMedium?.copyWith(
             fontWeight: FontWeight.bold,
             color: txn.isCredit ? creditColor(theme) : null,
@@ -2913,17 +3782,373 @@ class _EmptyState extends StatelessWidget {
 }
 
 /// Bottom sheet that picks (or creates) the category for a merchant.
+/// One editable row of the split screen. The controller lives here rather than
+/// in a list beside the data so that deleting a row cannot leave the two out of
+/// step.
+class _SplitRow {
+  _SplitRow({this.category, double? amount})
+      : controller = TextEditingController(
+          text: amount == null ? '' : _plain(amount),
+        );
+
+  /// Two decimals, no grouping separators and no symbol — this is a text field
+  /// being typed into, not a figure being displayed.
+  static String _plain(double v) => v.toStringAsFixed(2);
+
+  ExpenseCategory? category;
+  final TextEditingController controller;
+
+  double get amount => double.tryParse(controller.text.trim()) ?? 0;
+
+  set amount(double v) => controller.text = _plain(v);
+
+  void dispose() => controller.dispose();
+}
+
+/// Splits one transaction across several categories.
+///
+/// A single Amazon charge covers groceries, snacks and shopping, but the bank
+/// only ever says "₹2,000". Tagging the whole amount three times would count it
+/// three times over; splitting it into lines that sum to the charge keeps every
+/// total honest.
+///
+/// The last row always carries whatever is left over, so filling in the rows
+/// above is enough — type 1,200 against a ₹2,000 charge and the second row
+/// becomes 800 on its own.
+class SplitScreen extends StatefulWidget {
+  const SplitScreen({
+    super.key,
+    required this.txn,
+    required this.categories,
+    required this.money,
+  });
+
+  final ExpenseTxn txn;
+  final List<ExpenseCategory> categories;
+  final NumberFormat money;
+
+  @override
+  State<SplitScreen> createState() => _SplitScreenState();
+}
+
+class _SplitScreenState extends State<SplitScreen> {
+  late List<_SplitRow> _rows;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.txn.isSplit) {
+      _rows = widget.txn.splits
+          .map((TxnSplit s) => _SplitRow(
+                category: _categoryById(s.categoryId),
+                amount: s.amount,
+              ))
+          .toList();
+    } else {
+      // Two rows to start: one to fill in, and one already holding the whole
+      // charge as the balance, so the arithmetic is visible before anything is
+      // typed.
+      _rows = <_SplitRow>[
+        _SplitRow(),
+        _SplitRow(amount: widget.txn.amount),
+      ];
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final _SplitRow row in _rows) {
+      row.dispose();
+    }
+    super.dispose();
+  }
+
+  ExpenseCategory? _categoryById(int id) => widget.categories
+      .where((ExpenseCategory c) => c.id == id)
+      .firstOrNull;
+
+  List<double> get _amounts =>
+      _rows.map((_SplitRow r) => r.amount).toList();
+
+  /// Rewrites the last row to the balance. Called after any edit to a row above
+  /// it — editing the last row itself is left alone, so it can be corrected by
+  /// hand even if that leaves the split unbalanced.
+  void _rebalance({required int editedIndex}) {
+    if (editedIndex == _rows.length - 1) {
+      setState(() {});
+      return;
+    }
+    final List<double> next = withRemainderInLast(_amounts, widget.txn.amount);
+    setState(() => _rows.last.amount = next.last);
+  }
+
+  Future<void> _pickCategoryFor(_SplitRow row) async {
+    final CategoryChoice? chosen = await showModalBottomSheet<CategoryChoice>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => CategoryPickerSheet(
+        merchant: widget.txn.merchant,
+        categories: widget.categories,
+        selectedId: row.category?.id,
+        title: 'Category for this line',
+      ),
+    );
+    if (chosen == null) return;
+    setState(() => row.category = chosen.category);
+  }
+
+  void _addRow() => setState(() {
+        // The new row takes the balance, which means the one that was holding
+        // it keeps whatever was typed there.
+        final double remainder = unallocated(_amounts, widget.txn.amount);
+        _rows.add(_SplitRow(amount: remainder > 0 ? remainder : 0));
+      });
+
+  void _removeRow(int index) => setState(() {
+        _rows.removeAt(index).dispose();
+        if (_rows.isNotEmpty) {
+          _rows.last.amount =
+              withRemainderInLast(_amounts, widget.txn.amount).last;
+        }
+      });
+
+  Future<void> _save() async {
+    if (_saving) return;
+    setState(() => _saving = true);
+
+    // The last line absorbs the rounding drift, so what is stored sums to the
+    // charge exactly rather than to within a tolerance of it.
+    final List<double> exact =
+        withRemainderInLast(_amounts, widget.txn.amount);
+    final List<TxnSplit> lines = <TxnSplit>[
+      for (var i = 0; i < _rows.length; i++)
+        TxnSplit(
+          categoryId: _rows[i].category!.id,
+          categoryName: _rows[i].category!.name,
+          amount: exact[i],
+        ),
+    ];
+
+    await AppDatabase.instance.saveSplits(widget.txn, lines);
+    if (!mounted) return;
+    Navigator.pop(context, true);
+  }
+
+  Future<void> _removeSplit() async {
+    setState(() => _saving = true);
+    await AppDatabase.instance.clearSplits(widget.txn.id);
+    if (!mounted) return;
+    Navigator.pop(context, true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final double left = unallocated(_amounts, widget.txn.amount);
+    final bool balanced = isBalanced(_amounts, widget.txn.amount);
+    final bool complete =
+        _rows.isNotEmpty && _rows.every((_SplitRow r) => r.category != null);
+    final bool positive = _rows.every((_SplitRow r) => r.amount > 0);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Split'),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(28),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    widget.txn.merchant,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodyMedium,
+                  ),
+                ),
+                Text(
+                  widget.money.format(widget.txn.amount),
+                  style: theme.textTheme.titleMedium
+                      ?.copyWith(fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+      body: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+        itemCount: _rows.length + 1,
+        itemBuilder: (BuildContext context, int index) {
+          if (index == _rows.length) {
+            return Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _addRow,
+                icon: const Icon(Icons.add),
+                label: const Text('Add row'),
+              ),
+            );
+          }
+          final _SplitRow row = _rows[index];
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Row(
+              children: <Widget>[
+                Expanded(
+                  flex: 3,
+                  child: OutlinedButton(
+                    onPressed: () => _pickCategoryFor(row),
+                    child: Row(
+                      children: <Widget>[
+                        Icon(
+                          categoryIcon(row.category?.name ?? ''),
+                          size: 18,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            row.category?.name ?? 'Choose category',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: row.category == null
+                                ? TextStyle(color: theme.colorScheme.error)
+                                : null,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  flex: 2,
+                  child: TextField(
+                    controller: row.controller,
+                    textAlign: TextAlign.end,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                      prefixText: '₹',
+                    ),
+                    onChanged: (_) => _rebalance(editedIndex: index),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Remove row',
+                  // Below two rows there is nothing left to split.
+                  onPressed:
+                      _rows.length > 2 ? () => _removeRow(index) : null,
+                  icon: const Icon(Icons.close),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                balanced
+                    ? 'Allocated ${widget.money.format(widget.txn.amount)} '
+                        'of ${widget.money.format(widget.txn.amount)}'
+                    : left > 0
+                        ? '${widget.money.format(left)} unallocated'
+                        : '${widget.money.format(left.abs())} over',
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: balanced
+                      ? theme.colorScheme.primary
+                      : theme.colorScheme.error,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              if (!complete)
+                Text(
+                  'Every row needs a category.',
+                  style: theme.textTheme.bodySmall
+                      ?.copyWith(color: theme.colorScheme.error),
+                ),
+              const SizedBox(height: 8),
+              Row(
+                children: <Widget>[
+                  if (widget.txn.isSplit)
+                    TextButton(
+                      onPressed: _saving ? null : _removeSplit,
+                      child: const Text('Remove split'),
+                    ),
+                  const Spacer(),
+                  FilledButton(
+                    onPressed:
+                        balanced && complete && positive && !_saving
+                            ? _save
+                            : null,
+                    child: const Text('Save'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// What came back from [CategoryPickerSheet]: the category, and whether the
+/// user also asked for it to become the merchant's default.
+///
+/// The two are separate because picking a category is now a statement about
+/// *this transaction* — making it the merchant's rule as well is a second,
+/// deliberate act.
+class CategoryChoice {
+  const CategoryChoice({required this.category, this.makeDefault = false});
+
+  final ExpenseCategory category;
+  final bool makeDefault;
+}
+
+/// Picks a category, and — where the caller asks for it — offers to make that
+/// pick the merchant's default too.
+///
+/// Used in three places: correcting one transaction, filling a row of a split,
+/// and setting a merchant's default outright. [showMakeDefault] and
+/// [alwaysAskLabel] are what separate them.
 class CategoryPickerSheet extends StatefulWidget {
   const CategoryPickerSheet({
     super.key,
     required this.merchant,
     required this.categories,
     this.selectedId,
+    this.title = 'Categorize',
+    this.subtitle,
+    this.showMakeDefault = false,
+    this.alwaysAskLabel,
   });
 
   final String merchant;
   final List<ExpenseCategory> categories;
   final int? selectedId;
+  final String title;
+  final String? subtitle;
+
+  /// Shows the "also make this the default" checkbox. Off for a split row,
+  /// where the pick describes one line of one transaction and nothing more.
+  final bool showMakeDefault;
+
+  /// When set, an entry with this label appears first and returns the
+  /// Uncategorized category — how "always ask me" is chosen and stored.
+  final String? alwaysAskLabel;
 
   @override
   State<CategoryPickerSheet> createState() => _CategoryPickerSheetState();
@@ -2932,6 +4157,7 @@ class CategoryPickerSheet extends StatefulWidget {
 class _CategoryPickerSheetState extends State<CategoryPickerSheet> {
   final TextEditingController _newCategory = TextEditingController();
   bool _creating = false;
+  bool _makeDefault = false;
 
   @override
   void dispose() {
@@ -2939,18 +4165,26 @@ class _CategoryPickerSheetState extends State<CategoryPickerSheet> {
     super.dispose();
   }
 
+  void _choose(ExpenseCategory category) => Navigator.pop(
+        context,
+        CategoryChoice(category: category, makeDefault: _makeDefault),
+      );
+
   Future<void> _createAndSelect() async {
     final name = _newCategory.text.trim();
     if (name.isEmpty || _creating) return;
     setState(() => _creating = true);
     final category = await AppDatabase.instance.addCategory(name);
     if (!mounted) return;
-    Navigator.pop(context, category);
+    _choose(category);
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final ExpenseCategory? uncategorized = widget.categories
+        .where((ExpenseCategory c) => c.name == AppDatabase.uncategorized)
+        .firstOrNull;
 
     return Padding(
       padding: EdgeInsets.only(
@@ -2958,61 +4192,89 @@ class _CategoryPickerSheetState extends State<CategoryPickerSheet> {
         right: 20,
         bottom: MediaQuery.viewInsetsOf(context).bottom + 20,
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Text('Categorize', style: theme.textTheme.titleLarge),
-          const SizedBox(height: 4),
-          Text(
-            widget.merchant,
-            style: theme.textTheme.bodyMedium
-                ?.copyWith(color: theme.colorScheme.primary),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'Every past and future transaction from this merchant will use '
-            'the category you pick.',
-            style: theme.textTheme.bodySmall,
-          ),
-          const SizedBox(height: 16),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: <Widget>[
-              for (final category in widget.categories)
-                ChoiceChip(
-                  avatar: Icon(categoryIcon(category.name), size: 18),
-                  label: Text(category.name),
-                  selected: category.id == widget.selectedId,
-                  onSelected: (_) => Navigator.pop(context, category),
-                ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(widget.title, style: theme.textTheme.titleLarge),
+            const SizedBox(height: 4),
+            Text(
+              widget.merchant,
+              style: theme.textTheme.bodyMedium
+                  ?.copyWith(color: theme.colorScheme.primary),
+            ),
+            if (widget.subtitle != null) ...<Widget>[
+              const SizedBox(height: 4),
+              Text(widget.subtitle!, style: theme.textTheme.bodySmall),
             ],
-          ),
-          const Divider(height: 32),
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: TextField(
-                  controller: _newCategory,
-                  textCapitalization: TextCapitalization.words,
-                  onSubmitted: (_) => _createAndSelect(),
-                  decoration: const InputDecoration(
-                    isDense: true,
-                    border: OutlineInputBorder(),
-                    labelText: 'New category',
+            const SizedBox(height: 16),
+            if (widget.alwaysAskLabel != null && uncategorized != null) ...[
+              ActionChip(
+                avatar: const Icon(Icons.help_outline, size: 18),
+                label: Text(widget.alwaysAskLabel!),
+                onPressed: () => _choose(uncategorized),
+              ),
+              const SizedBox(height: 12),
+            ],
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: <Widget>[
+                for (final category in widget.categories)
+                  // Uncategorized is not a category anyone means to pick; where
+                  // it is meaningful it is offered above, in the words that
+                  // actually describe what it does.
+                  if (category.name != AppDatabase.uncategorized)
+                    ChoiceChip(
+                      avatar: Icon(categoryIcon(category.name), size: 18),
+                      label: Text(category.name),
+                      selected: category.id == widget.selectedId,
+                      onSelected: (_) => _choose(category),
+                    ),
+              ],
+            ),
+            if (widget.showMakeDefault) ...<Widget>[
+              const SizedBox(height: 8),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                controlAffinity: ListTileControlAffinity.leading,
+                dense: true,
+                value: _makeDefault,
+                onChanged: (bool? v) =>
+                    setState(() => _makeDefault = v ?? false),
+                title: const Text('Also make this the default'),
+                subtitle: Text(
+                  'Future transactions from ${widget.merchant} will use it.',
+                  style: theme.textTheme.bodySmall,
+                ),
+              ),
+            ],
+            const Divider(height: 32),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    controller: _newCategory,
+                    textCapitalization: TextCapitalization.words,
+                    onSubmitted: (_) => _createAndSelect(),
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                      labelText: 'New category',
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 12),
-              FilledButton(
-                onPressed: _creating ? null : _createAndSelect,
-                child: const Text('Add'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-        ],
+                const SizedBox(width: 12),
+                FilledButton(
+                  onPressed: _creating ? null : _createAndSelect,
+                  child: const Text('Add'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
       ),
     );
   }
@@ -3049,6 +4311,198 @@ IconData categoryIcon(String category) {
 
 /// Preferences and app information. Two sections today — the update controls
 /// and an About block — reached from the kebab menu.
+/// Every merchant the ledger has seen, and what each one is filed under by
+/// default.
+///
+/// Three states, and the difference between the first two is the point of the
+/// screen: a merchant with no default at all has simply never been set up,
+/// while one set to "always ask me" has been looked at and deliberately left
+/// uncategorised — because its charges cover several categories at once and
+/// always need splitting by hand.
+class MerchantDefaultsScreen extends StatefulWidget {
+  const MerchantDefaultsScreen({super.key});
+
+  @override
+  State<MerchantDefaultsScreen> createState() => _MerchantDefaultsScreenState();
+}
+
+class _MerchantDefaultsScreenState extends State<MerchantDefaultsScreen> {
+  final NumberFormat _money =
+      NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 0);
+
+  List<MerchantSummary> _merchants = <MerchantSummary>[];
+  List<ExpenseCategory> _categories = <ExpenseCategory>[];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final results = await Future.wait(<Future<Object>>[
+      AppDatabase.instance.merchants(),
+      AppDatabase.instance.categories(),
+    ]);
+    if (!mounted) return;
+    setState(() {
+      _merchants = results[0] as List<MerchantSummary>;
+      _categories = results[1] as List<ExpenseCategory>;
+      _loading = false;
+    });
+  }
+
+  Future<void> _setDefault(MerchantSummary merchant) async {
+    final CategoryChoice? chosen = await showModalBottomSheet<CategoryChoice>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => CategoryPickerSheet(
+        merchant: merchant.merchant,
+        categories: _categories,
+        selectedId: merchant.defaultCategoryId,
+        title: 'Default category',
+        subtitle: 'Used for transactions imported from now on.',
+        alwaysAskLabel: 'Always ask me',
+      ),
+    );
+    if (chosen == null || !mounted) return;
+
+    final int uncategorized = await AppDatabase.instance.uncategorizedId();
+    var backfill = false;
+
+    // "Always ask me" is never applied backwards — doing so would wipe out
+    // exactly the per-transaction work it exists to protect.
+    if (chosen.category.id != uncategorized) {
+      final int n = await AppDatabase.instance.backfillableCount(
+        merchant: merchant.merchant,
+        categoryId: chosen.category.id,
+      );
+      if (!mounted) return;
+      if (n > 0) {
+        backfill = await showDialog<bool>(
+              context: context,
+              builder: (BuildContext context) => AlertDialog(
+                title: const Text('Apply to past transactions?'),
+                content: Text(
+                  '$n past transaction${n == 1 ? '' : 's'} from '
+                  '${merchant.merchant} would move to '
+                  '${chosen.category.name}. Transactions you have split are '
+                  'left alone.',
+                ),
+                actions: <Widget>[
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: const Text('Future only'),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: Text('Apply to $n'),
+                  ),
+                ],
+              ),
+            ) ??
+            false;
+      }
+    }
+    if (!mounted) return;
+
+    final int updated = await AppDatabase.instance.setMerchantDefault(
+      merchant: merchant.merchant,
+      categoryId: chosen.category.id,
+      backfill: backfill,
+    );
+    await _load();
+    if (!mounted) return;
+    final String label = chosen.category.id == uncategorized
+        ? 'Always ask me'
+        : chosen.category.name;
+    ScaffoldMessenger.of(context)
+      ..clearSnackBars()
+      ..showSnackBar(SnackBar(
+        content: Text(
+          '${merchant.merchant} → $label'
+          '${updated > 0 ? ' ($updated updated)' : ''}',
+        ),
+      ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Merchants & defaults')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _merchants.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(32),
+                    child: Text(
+                      'No merchants yet. They appear here as transactions '
+                      'arrive.',
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.bodyMedium,
+                    ),
+                  ),
+                )
+              : ListView.builder(
+                  itemCount: _merchants.length,
+                  itemBuilder: (BuildContext context, int index) {
+                    final MerchantSummary m = _merchants[index];
+                    final bool alwaysAsk =
+                        m.defaultCategoryName == AppDatabase.uncategorized;
+                    final bool unset = m.defaultCategoryId == null;
+
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: unset
+                            ? theme.colorScheme.surfaceContainerHighest
+                            : theme.colorScheme.primaryContainer,
+                        foregroundColor: unset
+                            ? theme.colorScheme.onSurfaceVariant
+                            : theme.colorScheme.onPrimaryContainer,
+                        child: Icon(
+                          alwaysAsk
+                              ? Icons.help_outline
+                              : unset
+                                  ? Icons.help_outline
+                                  : categoryIcon(m.defaultCategoryName!),
+                          size: 20,
+                        ),
+                      ),
+                      title: Text(
+                        m.merchant,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(
+                        '${m.txnCount} transaction'
+                        '${m.txnCount == 1 ? '' : 's'} · '
+                        '${_money.format(m.totalSpent)}',
+                      ),
+                      trailing: Text(
+                        unset
+                            ? 'Not set'
+                            : alwaysAsk
+                                ? 'Always ask me'
+                                : m.defaultCategoryName!,
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: unset
+                              ? theme.colorScheme.onSurfaceVariant
+                              : theme.colorScheme.primary,
+                        ),
+                      ),
+                      onTap: () => _setDefault(m),
+                    );
+                  },
+                ),
+    );
+  }
+}
+
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -3139,6 +4593,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ? const Center(child: CircularProgressIndicator())
           : ListView(
               children: <Widget>[
+                _SettingsHeader('Categorization'),
+                ListTile(
+                  leading: const Icon(Icons.storefront_outlined),
+                  title: const Text('Merchants & defaults'),
+                  subtitle: const Text(
+                    'What each merchant is categorised as by default',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const MerchantDefaultsScreen(),
+                    ),
+                  ),
+                ),
+                const Divider(height: 32),
                 _SettingsHeader('Updates'),
                 SwitchListTile(
                   value: _autoCheck,
