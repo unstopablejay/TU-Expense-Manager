@@ -15,10 +15,19 @@ incoming SMS ─► SmsParser ─► merchant_mappings lookup ─► transaction
                           hit → that category                  ▼
                           miss → 'Uncategorized'          dashboard
                                                                │
-                                          tap an uncategorized row
+                                                    tap a row ─┤
                                                                ▼
-                                            save mapping + backfill history
+                                     ┌───────────────┬──────────────────┐
+                              change category      split          delete
+                              (this row; the       across
+                               merchant default    several
+                               is opt-in)          categories
 ```
+
+A merchant that always sells the same thing gets a default category and is filed
+automatically. One like Amazon, whose charges cover groceries and shopping at once, is set
+to **always ask** and split by hand into lines that sum to the charge — so the categories
+on the dashboard still add up to what was actually spent.
 
 ### The SMS templates
 
@@ -85,7 +94,7 @@ Notes on the design:
 
 ### Database
 
-Schema version 4. Five tables, created on first launch (`AppDatabase`):
+Schema version 5. Six tables, created on first launch (`AppDatabase`):
 
 ```sql
 categories           (id INTEGER PK, name TEXT UNIQUE COLLATE NOCASE)
@@ -93,10 +102,12 @@ merchant_mappings    (merchant_name TEXT PK COLLATE NOCASE, category_id INTEGER 
 transactions         (id INTEGER PK, amount REAL, payment_type TEXT,
                       merchant TEXT COLLATE NOCASE, date INTEGER, category_id INTEGER FK,
                       direction TEXT DEFAULT 'debit', reference TEXT DEFAULT '')
+transaction_splits   (id INTEGER PK, transaction_id INTEGER FK ON DELETE CASCADE,
+                      category_id INTEGER FK, amount REAL, position INTEGER DEFAULT 0)
 deleted_transactions (amount REAL, merchant TEXT COLLATE NOCASE, date INTEGER,
                       direction TEXT, reference TEXT DEFAULT '',
                       payment_type TEXT, category_id INTEGER,
-                      original_id INTEGER, deleted_at INTEGER,
+                      original_id INTEGER, deleted_at INTEGER, splits_json TEXT,
                       PRIMARY KEY (amount, merchant, date, direction, reference))
 app_meta             (key TEXT PK, value TEXT)
 ```
@@ -121,6 +132,28 @@ app_meta             (key TEXT PK, value TEXT)
   `category_id`, `original_id` and `deleted_at` are payload, carried so the Deleted
   section can display a deleted transaction and restore it exactly — same card, same
   category, same row id — without the original still being in memory.
+- `transaction_splits` holds the category/amount lines of a transaction that covers more
+  than one category — a single ₹2,000 Amazon order that was really ₹1,200 of groceries,
+  ₹500 of snacks and ₹300 of shopping. **A transaction with no rows here is unsplit**, and
+  its `category_id` speaks for the whole amount; that is why the migration needs no
+  backfill, since an empty table already says exactly that about every existing row.
+
+  **For a split transaction, `transactions.category_id` is a denormalised cache of the
+  largest line**, refreshed by `saveSplits` in the same SQL transaction. It keeps the
+  `JOIN categories` in `transactions()`, the headline chip and a tombstone restore working,
+  and it is never read for money math once lines exist. Everything that totals anything
+  reads `ExpenseTxn.effectiveSplits` instead — the real lines, or a synthesised single line
+  for an unsplit row — so no code has to ask whether a transaction is split.
+
+  `transaction_id` cascades, so deleting a transaction drops its lines. `category_id`
+  deliberately does not: it mirrors `transactions.category_id`, so deleting a category
+  still in use is refused rather than quietly removing money lines and leaving a split that
+  no longer sums to its transaction. There is no `UNIQUE (transaction_id, category_id)` —
+  two lines in one category are legal and simply add up.
+
+  The sum invariant spans rows, so SQLite cannot express it as a `CHECK`. `saveSplits`
+  enforces it within half a paisa, and the editor puts the rounding remainder on the last
+  line so what is stored sums exactly.
 - `app_meta` is key/value scratch space, currently just `last_scanned_sms_date` — the
   `date` of the newest inbox message already processed. Its absence is what makes the
   next scan a full one.
@@ -152,18 +185,75 @@ back as `Unknown` / Uncategorized under a fresh id. The branch is keyed on
 `oldVersion == 3` rather than `< 4`, since a database arriving from v2 or earlier gets
 the full v4 table from `CREATE TABLE` and must not then be altered.
 
+#### Migration v4 → v5
+
+Creates `transaction_splits` and its index, and adds `splits_json` to
+`deleted_transactions`.
+
+No backfill: an empty splits table already asserts that every existing transaction is
+unsplit, which is true. `splits_json` must be nullable — SQLite cannot
+`ADD COLUMN ... NOT NULL` without a default — and NULL is the right value anyway, since a
+tombstone written before v5 has no lines to carry. It decodes to no splits.
+
+The `ALTER` is guarded on `oldVersion >= 3`, the same shape of reasoning as the v3 branch
+and dependent on running after it: a database arriving from v2 or earlier had
+`deleted_transactions` created from the shared const moments earlier, which already carries
+`splits_json`. Only one created by the v3 or v4 text is missing the column.
+
 ### Categorization
 
 On insert, the merchant is looked up in `merchant_mappings`. A hit uses that category;
 a miss falls back to `Uncategorized`.
 
-When you pick a category for a merchant, both writes happen in a single SQL
-transaction, so a mapping can never be saved without its backfill:
+**Categorising one transaction changes that transaction and nothing else.** Making the
+pick the merchant's rule as well is a separate, opt-in checkbox in the picker. The narrow
+behaviour is the default because the wide one is far more than anyone means by correcting
+a row — and because a merchant-wide sweep would otherwise flatten a split entered by hand.
 
-1. upsert `merchant_mappings` (merchant → category)
-2. `UPDATE transactions SET category_id = ? WHERE merchant = ?`
+`merchant_mappings` therefore holds a row only where a default was set deliberately, which
+is what lets **Settings › Merchants & defaults** show three distinct states:
 
-The row count from step 2 is what the confirmation snackbar reports.
+| State | Stored as | Means |
+|---|---|---|
+| Not set | no mapping row | never configured |
+| Always ask me | mapping to `Uncategorized` | looked at, and left uncategorised on purpose |
+| A category | mapping to that category | new transactions land there |
+
+"Always ask me" is for a merchant like Amazon whose charges always cover several
+categories and always need splitting by hand. It needs no schema of its own: `insertParsed`
+reads the mapping to `Uncategorized` and applies it, which is exactly the desired outcome.
+
+Setting a real default asks before touching history — "also apply to N past transactions?"
+— and both the count and the update share one predicate, `_backfillableWhere`, so the N
+confirmed is the N changed:
+
+```sql
+merchant = ? AND category_id <> ?
+AND id NOT IN (SELECT transaction_id FROM transaction_splits)
+```
+
+`category_id <> ?` keeps the number honest; excluding split rows is what stops a
+merchant-wide default overwriting a per-transaction breakdown. A default of `Uncategorized`
+is **never** backfilled even if asked, since applying "always ask me" backwards would erase
+the very work it exists to protect.
+
+### Splitting
+
+One SMS is one amount, so an Amazon order covering groceries, snacks and shopping arrives
+as a single ₹2,000 charge. Tagging it with all three categories would count ₹2,000 three
+times over and the dashboard would stop adding up; splitting it into lines that sum to the
+charge keeps every total exact.
+
+Tapping a transaction opens its actions sheet — **Change category**, **Split**, **Delete** —
+on either tab. The split screen is rows of category and amount, and **the last row always
+carries the balance**: type 1,200 against a ₹2,000 charge and the second row becomes 800 on
+its own; add a third and type 300 in the second, and the third becomes 500. Editing the last
+row directly is allowed and can leave the split unbalanced, which shows as
+"₹500 unallocated" or "₹200 over" and blocks Save until it is resolved.
+
+Under a category filter a split contributes **only its matching lines** — the ₹2,000 Amazon
+row shows and totals ₹1,200 under Grocery. That is what keeps a filtered dashboard's totals
+equal to what was really spent.
 
 ## App icon
 
@@ -251,32 +341,46 @@ Two tabs over one ledger, on a bottom navigation bar.
 
 ### Dashboard — read-only
 
-Everything that happened, spend and received together, with two filters pinned under
-the app bar:
+Everything that happened, spend and received together, with three filters pinned under
+the app bar as chips that open a sheet:
 
-- **Category** — only categories at least one transaction actually uses, so the
-  dropdown can never offer a choice that filters to nothing. The category *picker* still
-  offers the full list; it has to, since assigning is how a category first gets used.
+- **Category** — take as many as you like. Only categories something actually falls under,
+  so a choice can never filter to nothing. The category *picker* still offers the full
+  list; it has to, since assigning is how a category first gets used.
+- **Merchant** — likewise multi-select, one entry per distinct merchant.
 - **Card / account** — one entry per distinct `payment_type`, e.g. `YES BANK Card
   X2858`, `HDFC Bank A/C *0444`.
 
-Both lists are derived from the loaded transactions rather than queried, so they stay in
-step for free — and both are derived from the *whole* ledger, not the filtered view, so
-narrowing to one card cannot empty the category dropdown underneath a selection already
-made in it. The filters are ANDed and the summary totals reflect them. When they exclude
-everything, a **Clear filters** button appears (distinct from the empty state shown when
-there are no transactions at all).
+All three lists are derived from the loaded transactions rather than queried, so they stay
+in step for free. **Category and merchant constrain each other**: pick Amazon and the
+category chip offers only Amazon's categories; pick Grocery and the merchant chip offers
+only merchants with grocery spend.
+
+Each facet computes its options with every filter applied *except its own*. That is the
+whole trick, and skipping it reintroduces an old bug: narrowing to one card must not empty
+the category list underneath a selection already made in it, and by the same token picking
+one merchant must not leave the merchant list holding only that merchant.
+
+Selections that stop being available are dropped rather than filtered on. The facets are
+ANDed and the summary totals reflect them; a split contributes only the lines that matched,
+so a Grocery-filtered view of a ₹2,000 Amazon order shows ₹1,200 and totals ₹1,200. When
+the filters exclude everything, a **Clear filters** button appears (distinct from the empty
+state shown when there are no transactions at all).
 
 Tapping a row here switches to the Expenses tab and opens an actions sheet for that
-transaction — amount, card, date, category, over **Change category** and **Delete** — so
-spotting something wrong on the Dashboard doesn't mean hunting for it by hand.
+transaction — amount, card, date, categories, over **Change category**, **Split** and
+**Delete** — so spotting something wrong on the Dashboard doesn't mean hunting for it by
+hand.
 
 ### Expenses — the working tab
 
 The same ledger, editable:
 
-- **Tap any transaction** to set its category. Uncategorized rows are flagged in the
-  error color; any row can be tapped to correct a wrong category.
+- **Tap any transaction** to open its actions sheet — the same one the Dashboard opens, so
+  a row behaves identically whichever tab it was tapped on. From there: change its
+  category, split it across several, or delete it. Uncategorized rows are flagged in the
+  error color. A split row's pill names its first category and counts the rest
+  ("Grocery +2"); the sheet lists them all with their amounts.
 - **Swipe a row left to delete it**, with an **Undo** action on the snackbar. Delete is
   permanent by design: a tombstone is recorded so the transaction is not re-imported by
   a later scan, and Undo lifts that tombstone and restores the row under its original
@@ -349,12 +453,22 @@ statement alerts and promos. Two cases specifically guard against regressions th
 looked plausible: `PZCREDIT9772829` staying a debit, and the trailing `Bal` /
 `Avl Limit:` figures never being mistaken for the amount.
 
-It also covers `applyFilters` and `categoriesInUse` — the dashboard's filter predicate
-and its category list — both pure top-level functions precisely so they can be tested
-without a database behind them. The database and widget layers have no automated
-coverage: `AppDatabase` needs the real sqflite plugin, and `sqflite_common_ffi` is
-deliberately not a dependency. Delete, restore, the migrations and the scan watermark
-are verified by hand, below.
+It also covers the dashboard and split logic — `applyFilters`, `amountIn`,
+`spendByCategory`, `categoryOptions`, `merchantOptions`, `pruneSelection`, the split
+arithmetic (`unallocated`, `isBalanced`, `withRemainderInLast`) and the tombstone payload
+(`encodeSplits`, `decodeSplits`). All are pure top-level functions precisely so they can
+be tested without a database behind them; anything worth covering is written that way.
+
+Cases specifically guarding regressions this design invites: a split found by the category
+of its *smallest* line (proving the filter reads lines rather than the cached
+`category_id`), a category offered by the facet only because it appears as a minor split
+line, a facet ignoring its own selection so it cannot empty itself, ten paise divided three
+ways staying balanced, and the last line absorbing that drift so what is stored sums
+exactly.
+
+The database and widget layers have no automated coverage: `AppDatabase` needs the real
+sqflite plugin, and `sqflite_common_ffi` is deliberately not a dependency. Delete, restore,
+splits, the migrations and the scan watermark are verified by hand, below.
 
 To exercise the live path end to end on an emulator:
 
@@ -373,12 +487,31 @@ survive `adb emu sms send`, so for the one-field-per-line transfer alerts use
 adb shell run-as com.tu.expense.manager cat databases/expense_manager.db > /tmp/e.db
 sqlite3 /tmp/e.db "SELECT t.amount, t.merchant, t.direction, t.reference, c.name FROM transactions t JOIN categories c ON c.id = t.category_id;"
 sqlite3 /tmp/e.db "PRAGMA user_version; SELECT * FROM app_meta; SELECT * FROM deleted_transactions;"
+sqlite3 /tmp/e.db "SELECT s.transaction_id, c.name, s.amount FROM transaction_splits s JOIN categories c ON c.id = s.category_id ORDER BY s.transaction_id, s.position;"
+sqlite3 /tmp/e.db "SELECT merchant_name, category_id FROM merchant_mappings;"
 ```
 
 Worth walking by hand, since none of it is covered by `flutter test`:
 
 - **Upgrade, not reinstall.** Install the previous build, scan a few alerts, then
-  install this one over the top: the rows must survive and `user_version` must read 4.
+  install this one over the top: the rows must survive and `user_version` must read 5.
+  Worth doing from a v3-created database too, since the `splits_json` `ALTER` is guarded
+  on `oldVersion >= 3` and a v2-or-earlier database must *not* take that branch.
+- **Split adds up.** Split a ₹2,000 charge: the balance must flow into the last row as the
+  ones above it are filled, Save must stay disabled while it is unbalanced or a row has no
+  category, and the stored lines must sum to the charge exactly
+  (`SELECT SUM(amount) FROM transaction_splits WHERE transaction_id = ?`).
+- **Split survives delete.** Delete a split transaction, confirm `splits_json` on its
+  tombstone holds the lines, restore it, and confirm all of them come back. Then rescan-all
+  and confirm nothing duplicates.
+- **A default never eats a split.** Split one transaction from a merchant, then set that
+  merchant's default and accept the backfill. The split row must be untouched, and the N in
+  the prompt must have excluded it.
+- **Always ask never backfills.** Set a merchant with categorised history to "Always ask
+  me". No backfill prompt appears and the existing rows keep their categories — the older
+  build would have re-tagged the lot to Uncategorized.
+- **One row at a time.** Change a transaction's category with the checkbox unticked and
+  confirm no other transaction from that merchant moved.
 - **Delete sticks.** Delete a transaction whose SMS is still in the inbox, then run
   **Rescan all messages** — the strongest test, since it ignores the watermark. It must
   not come back, and must be counted as skipped.
