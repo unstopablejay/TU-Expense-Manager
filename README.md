@@ -17,11 +17,11 @@ incoming SMS ─► SmsParser ─► merchant_mappings lookup ─► transaction
                                                                │
                                                     tap a row ─┤
                                                                ▼
-                                     ┌───────────────┬──────────────────┐
-                              change category      split          delete
-                              (this row; the       across
-                               merchant default    several
-                               is opt-in)          categories
+                             ┌──────────────┬──────┬───────┬────────┐
+                       change category    note   split       delete
+                       (this row; the    (why    across
+                        merchant default  this   several
+                        is opt-in)        one)   categories
 ```
 
 A merchant that always sells the same thing gets a default category and is filed
@@ -94,7 +94,7 @@ Notes on the design:
 
 ### Database
 
-Schema version 6. Seven tables, created on first launch (`AppDatabase`):
+Schema version 7. Seven tables, created on first launch (`AppDatabase`):
 
 ```sql
 categories           (id INTEGER PK, name TEXT UNIQUE COLLATE NOCASE)
@@ -103,13 +103,15 @@ name_aliases         (kind TEXT, alias TEXT COLLATE NOCASE, canonical TEXT,
                       PRIMARY KEY (kind, alias))
 transactions         (id INTEGER PK, amount REAL, payment_type TEXT,
                       merchant TEXT COLLATE NOCASE, date INTEGER, category_id INTEGER FK,
-                      direction TEXT DEFAULT 'debit', reference TEXT DEFAULT '')
+                      direction TEXT DEFAULT 'debit', reference TEXT DEFAULT '',
+                      note TEXT NOT NULL DEFAULT '')
 transaction_splits   (id INTEGER PK, transaction_id INTEGER FK ON DELETE CASCADE,
                       category_id INTEGER FK, amount REAL, position INTEGER DEFAULT 0)
 deleted_transactions (amount REAL, merchant TEXT COLLATE NOCASE, date INTEGER,
                       direction TEXT, reference TEXT DEFAULT '',
                       payment_type TEXT, category_id INTEGER,
                       original_id INTEGER, deleted_at INTEGER, splits_json TEXT,
+                      note TEXT,
                       PRIMARY KEY (amount, merchant, date, direction, reference))
 app_meta             (key TEXT PK, value TEXT)
 ```
@@ -117,6 +119,12 @@ app_meta             (key TEXT PK, value TEXT)
 - `date` is stored as epoch milliseconds.
 - `direction` is `'debit'` or `'credit'`, from the matched template.
 - `reference` is the UPI Ref / UTR / Refno when the message carries one, else `''`.
+- `note` is free text the user typed against the transaction — the *why* behind a charge,
+  which no bank alert carries. It is `NOT NULL DEFAULT ''`; `''` means there is no note,
+  and saving an empty field is how one is removed, so there is no delete path and no null
+  to handle. `cleanNote` trims it, collapses inner whitespace onto single spaces and caps
+  it at 140 characters on the way in, so the stored value is always the one-line string
+  the tile renders.
 - `COLLATE NOCASE` on the merchant columns means `Swiggy` and `SWIGGY` resolve to one
   mapping, while the original casing is still what gets displayed.
 - A `UNIQUE (amount, merchant, date, direction, reference)` index makes ingestion
@@ -138,9 +146,11 @@ app_meta             (key TEXT PK, value TEXT)
   imported twice — the message itself is still in the inbox, so without a tombstone any
   later rescan would faithfully bring a deleted row back. `insertParsed` checks it
   before writing. Those five columns alone are the primary key; `payment_type`,
-  `category_id`, `original_id` and `deleted_at` are payload, carried so the Deleted
+  `category_id`, `original_id`, `deleted_at` and `note` are payload, carried so the Deleted
   section can display a deleted transaction and restore it exactly — same card, same
-  category, same row id — without the original still being in memory.
+  category, same note, same row id — without the original still being in memory. `note` is
+  nullable there for the usual reason, and NULL is right: a tombstone written before v7 has
+  no note to carry.
 - `transaction_splits` holds the category/amount lines of a transaction that covers more
   than one category — a single ₹2,000 Amazon order that was really ₹1,200 of groceries,
   ₹500 of snacks and ₹300 of shopping. **A transaction with no rows here is unsplit**, and
@@ -213,6 +223,28 @@ and dependent on running after it: a database arriving from v2 or earlier had
 
 Creates `name_aliases`. No backfill and no column patching: an empty table says nothing has
 been merged, which is true of every database that predates the feature.
+
+#### Migration v6 → v7
+
+Adds `transactions.note` and `deleted_transactions.note`. No backfill: the `''` the default
+supplies is not a placeholder for missing data, it is the truth — a transaction imported
+before notes existed genuinely has none. The tombstone `ALTER` is guarded the same way the
+v5 `splits_json` one is, and for the same reason: a database arriving from v2 or earlier had
+`deleted_transactions` created from the shared const, which already carries `note`.
+
+### Notes
+
+Any transaction can carry one short note, whatever its category — added from the same
+actions sheet that categorises, splits and deletes a row. On the list it sits immediately
+to the right of the category pill, italic and behind a small icon, on the line the pill
+already occupies: a note costs the row no extra height, and a row without one is unchanged.
+Long notes ellipsise there and are shown in full in the sheet.
+
+A note belongs to the transaction, not to a split line — a split still carries one note for
+the charge as a whole. It survives categorising, splitting and merging a merchant, and it is
+carried in the tombstone so delete-and-undo does not lose the one part of a row nobody could
+reconstruct. The Deleted section shows it, which is often the only thing separating two
+identical-looking charges when choosing which to restore.
 
 ### Categorization
 
@@ -374,6 +406,25 @@ lines, so a ₹2,000 Amazon order narrowed to Grocery sorts on its ₹400 grocer
 ₹2,000 — otherwise the list would order itself by figures the user has filtered out and
 cannot see. Every order falls back to date then id, so ties come out stable.
 
+#### Searching
+
+A search box above the chips matches **notes and merchant names**, case-insensitively, on
+any part of a word. Those two fields because they are the only free text a transaction has:
+one the user wrote, one the bank sent.
+
+It ANDs with the chips rather than replacing them, and it narrows which *transactions*
+survive, never which lines do — a search term says nothing about categories, so a split it
+matches still shows its whole breakdown while a category chip may still narrow it.
+
+**The query deliberately takes no part in computing the facet options.** Were it one of
+them, typing a letter would retire options and the pruning step would then discard a
+category or merchant already picked — a keystroke silently clearing a filter, and clearing
+the search box would not bring it back.
+
+Matching runs in Dart over the loaded rows, with no debounce: the ledger is already in
+memory and is filtered on every build regardless, so a keystroke costs one pass over a local
+list.
+
 #### Filtering
 
 Three facets, as chips that open a sheet:
@@ -405,10 +456,13 @@ state shown when there are no transactions at all).
 
 The list is the working surface — there is nowhere else to go to change something:
 
-- **Tap any transaction** to open its actions sheet — amount, card, date, categories, over
-  **Change category**, **Split** and **Delete**. Uncategorized rows are flagged in the
-  error color. A split row's pill names its first category and counts the rest
-  ("Grocery +2"); the sheet lists them all with their amounts.
+- **Tap any transaction** to open its actions sheet — amount, card, date, categories and
+  any note, over **Change category**, **Add / Edit note**, **Split** and **Delete**.
+  Uncategorized rows are flagged in the error color. A split row's pill names its first
+  category and counts the rest ("Grocery +2"); the sheet lists them all with their amounts.
+- **Add a note** to record why a charge happened. It appears on the row just right of the
+  category pill, and is matched by the search box. Clearing the field and saving removes
+  it — there is no separate delete.
 - **Swipe a row left to delete it**, with an **Undo** action on the snackbar. Delete is
   permanent by design: a tombstone is recorded so the transaction is not re-imported by
   a later scan, and Undo lifts that tombstone and restores the row under its original
@@ -590,7 +644,7 @@ sqlite3 /tmp/e.db "SELECT kind, alias, canonical FROM name_aliases;"
 Worth walking by hand, since none of it is covered by `flutter test`:
 
 - **Upgrade, not reinstall.** Install the previous build, scan a few alerts, then
-  install this one over the top: the rows must survive and `user_version` must read 6.
+  install this one over the top: the rows must survive and `user_version` must read 7.
 - **Delete after a merge.** The one place merged names could do real damage. Merge a card
   or merchant, delete one of its transactions, and check the row actually went and the
   tombstone holds the **raw** label rather than the merged one — `_naturalKeyOf` uses
@@ -604,6 +658,15 @@ Worth walking by hand, since none of it is covered by `flutter test`:
 - **Split survives delete.** Delete a split transaction, confirm `splits_json` on its
   tombstone holds the lines, restore it, and confirm all of them come back. Then rescan-all
   and confirm nothing duplicates.
+- **A note outlives every edit.** Note a transaction, then categorise it, split it, and
+  merge its merchant: the note must still be there each time — the merge is the one that
+  matters, since `canonicaliseLedger` rebuilds every row through `copyWith`. Then delete it
+  and Undo, and confirm the note came back with it.
+- **A note never crowds the row out.** Type a note at the 140-character cap: the tile must
+  ellipsise it on the one line it shares with the category pill, the amount must stay put,
+  and the sheet must show the whole thing.
+- **Search does not clear a filter.** Pick a category chip, then type in the search box: the
+  chip must survive every keystroke and clearing the box must leave it still applied.
 - **A default never eats a split.** Split one transaction from a merchant, then set that
   merchant's default and accept the backfill. The split row must be untouched, and the N in
   the prompt must have excluded it.

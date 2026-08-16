@@ -435,6 +435,7 @@ void main() {
       TxnDirection direction = TxnDirection.debit,
       double amount = 100,
       String? merchant,
+      String note = '',
       List<TxnSplit> splits = const <TxnSplit>[],
     }) =>
         ExpenseTxn(
@@ -447,6 +448,7 @@ void main() {
           categoryName: categoryName,
           direction: direction,
           reference: '',
+          note: note,
           splits: splits,
         );
 
@@ -571,6 +573,106 @@ void main() {
         idsOf(applyFilters(<ExpenseTxn>[amazon], categoryIds: <int>{8})),
         <int>[5],
       );
+    });
+
+    group('search query', () {
+      final noted = <ExpenseTxn>[
+        txn(
+          id: 1,
+          paymentType: 'YES BANK Card X2858',
+          categoryId: 2,
+          categoryName: 'Food',
+          merchant: 'SWIGGY',
+          note: 'Team lunch',
+        ),
+        txn(
+          id: 2,
+          paymentType: 'HDFC Bank A/C *0444',
+          categoryId: 3,
+          categoryName: 'Fuel',
+          merchant: 'INDIAN OIL',
+          note: 'Trip to Pune',
+        ),
+        txn(
+          id: 3,
+          paymentType: 'YES BANK Card X2858',
+          categoryId: 2,
+          categoryName: 'Food',
+          merchant: 'LUNCHBOX',
+        ),
+      ];
+
+      test('matches note text', () {
+        expect(idsOf(applyFilters(noted, query: 'Team')), <int>[1]);
+      });
+
+      test('matches merchant text', () {
+        expect(idsOf(applyFilters(noted, query: 'INDIAN')), <int>[2]);
+      });
+
+      test('is case-insensitive on both', () {
+        expect(idsOf(applyFilters(noted, query: 'team LUNCH')), <int>[1]);
+        expect(idsOf(applyFilters(noted, query: 'swiggy')), <int>[1]);
+      });
+
+      // A row matching on its merchant and one matching on its note are both
+      // answers to the same question, and neither is more of one.
+      test('matches a note and a merchant in the one pass', () {
+        expect(idsOf(applyFilters(noted, query: 'lunch')), <int>[1, 3]);
+      });
+
+      test('matches on part of a word, not only on a whole one', () {
+        expect(idsOf(applyFilters(noted, query: 'unch')), <int>[1, 3]);
+      });
+
+      test('an empty or blank query matches everything', () {
+        expect(idsOf(applyFilters(noted, query: '')), <int>[1, 2, 3]);
+        expect(idsOf(applyFilters(noted, query: '   ')), <int>[1, 2, 3]);
+        expect(idsOf(applyFilters(noted)), <int>[1, 2, 3]);
+      });
+
+      test('surrounding whitespace does not stop a match', () {
+        expect(idsOf(applyFilters(noted, query: '  Pune ')), <int>[2]);
+      });
+
+      test('a query nothing matches yields an empty list', () {
+        expect(applyFilters(noted, query: 'zzz'), isEmpty);
+      });
+
+      // The query and the chips narrow together; one does not replace the
+      // other.
+      test('a query ANDs with a category filter', () {
+        expect(
+          idsOf(applyFilters(noted, query: 'lunch', categoryIds: <int>{2})),
+          <int>[1, 3],
+        );
+        expect(
+          applyFilters(noted, query: 'lunch', categoryIds: <int>{3}),
+          isEmpty,
+        );
+      });
+
+      // A search term says nothing about categories, so a split it matches
+      // still reports the whole breakdown — only a category filter may narrow
+      // which lines survive.
+      test('a matching split keeps all of its lines', () {
+        final entry = applyFilters(<ExpenseTxn>[amazon], query: 'amazon').single;
+        expect(entry.lines, hasLength(3));
+        expect(entry.amount, 2000);
+      });
+
+      test('a query still leaves a category filter to narrow a split', () {
+        final entry = applyFilters(
+          <ExpenseTxn>[amazon],
+          query: 'amazon',
+          categoryIds: <int>{6},
+        ).single;
+        expect(entry.amount, 1200);
+      });
+
+      test('a split whose merchant and note both miss drops out', () {
+        expect(applyFilters(<ExpenseTxn>[amazon], query: 'swiggy'), isEmpty);
+      });
     });
 
     group('amountIn', () {
@@ -1238,6 +1340,54 @@ void main() {
       // way out of the Deleted screen is not.
       expect(decodeSplits('not json'), isEmpty);
       expect(decodeSplits('{"not":"a list"}'), isEmpty);
+    });
+  });
+
+  group('cleanNote', () {
+    test('keeps an ordinary note as it was typed', () {
+      expect(cleanNote('Team lunch with the QA folks'),
+          'Team lunch with the QA folks');
+    });
+
+    test('trims the ends', () {
+      expect(cleanNote('  Team lunch  '), 'Team lunch');
+    });
+
+    // A note pasted out of a chat arrives with line breaks in it. The tile
+    // shows one line, so the breaks are flattened on the way in rather than
+    // left for every reader of the field to cope with.
+    test('collapses inner runs of whitespace onto single spaces', () {
+      expect(cleanNote('Team    lunch'), 'Team lunch');
+      expect(cleanNote('Team\nlunch'), 'Team lunch');
+      expect(cleanNote('Team \t\n lunch'), 'Team lunch');
+    });
+
+    test('a whitespace-only note is no note at all', () {
+      expect(cleanNote(''), '');
+      expect(cleanNote('   '), '');
+      expect(cleanNote('\n\t'), '');
+    });
+
+    test('caps a long note at 140 characters', () {
+      final String long = 'a' * 200;
+      expect(cleanNote(long), hasLength(140));
+    });
+
+    test('a note of exactly the cap is left alone', () {
+      final String exact = 'b' * 140;
+      expect(cleanNote(exact), exact);
+    });
+
+    // Cutting mid-sentence can land on a space, and a note ending in one would
+    // render with a gap before the ellipsis.
+    test('a cut that lands on a space does not leave one trailing', () {
+      final String long = '${'a' * 139} tail';
+      expect(cleanNote(long), 'a' * 139);
+    });
+
+    test('is idempotent — cleaning a stored note changes nothing', () {
+      const String raw = '  Trip   to \n Pune  ';
+      expect(cleanNote(cleanNote(raw)), cleanNote(raw));
     });
   });
 }

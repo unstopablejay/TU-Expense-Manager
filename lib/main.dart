@@ -523,6 +523,7 @@ class ExpenseTxn {
     required this.categoryName,
     required this.direction,
     required this.reference,
+    this.note = '',
     this.splits = const <TxnSplit>[],
     String? rawMerchant,
     String? rawPaymentType,
@@ -546,6 +547,7 @@ class ExpenseTxn {
             ? TxnDirection.credit
             : TxnDirection.debit,
         reference: (map['reference'] as String?) ?? '',
+        note: (map['note'] as String?) ?? '',
       );
 
   final int id;
@@ -560,6 +562,10 @@ class ExpenseTxn {
   final String categoryName;
   final TxnDirection direction;
   final String reference;
+
+  /// Whatever the user wanted to remember about this charge that the bank had
+  /// no way of saying. Empty means there is no note — never null.
+  final String note;
 
   /// What the columns actually hold. Equal to the pair above until a merge
   /// renames them.
@@ -587,12 +593,15 @@ class ExpenseTxn {
         categoryName: categoryName,
         direction: direction,
         reference: reference,
+        note: note,
         splits: splits,
         rawMerchant: rawMerchant,
         rawPaymentType: rawPaymentType,
       );
 
   bool get isUncategorized => categoryName == AppDatabase.uncategorized;
+
+  bool get hasNote => note.isNotEmpty;
 
   bool get isCredit => direction == TxnDirection.credit;
 
@@ -629,6 +638,7 @@ class DeletedTxn {
     required this.originalId,
     required this.deletedAt,
     required this.categoryName,
+    this.note = '',
     this.splits = const <TxnSplit>[],
   });
 
@@ -650,6 +660,7 @@ class DeletedTxn {
             : DateTime.fromMillisecondsSinceEpoch(map['deleted_at'] as int),
         categoryName:
             (map['category_name'] as String?) ?? AppDatabase.uncategorized,
+        note: (map['note'] as String?) ?? '',
         splits: decodeSplits(map['splits_json'] as String?),
       );
 
@@ -663,6 +674,11 @@ class DeletedTxn {
   final int? originalId;
   final DateTime? deletedAt;
   final String categoryName;
+
+  /// The note the transaction carried when it was deleted. Empty for a
+  /// tombstone written before schema v7, which is the truth: there were no
+  /// notes to lose then.
+  final String note;
 
   /// The lines this transaction was split into when it was deleted, carried in
   /// the tombstone so restoring puts them back. Empty for an unsplit
@@ -706,7 +722,7 @@ class AppDatabase {
     final path = p.join(await getDatabasesPath(), 'expense_manager.db');
     return openDatabase(
       path,
-      version: 6,
+      version: 7,
       onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
@@ -741,6 +757,7 @@ class AppDatabase {
         category_id  INTEGER NOT NULL,
         direction    TEXT NOT NULL DEFAULT 'debit',
         reference    TEXT NOT NULL DEFAULT '',
+        note         TEXT NOT NULL DEFAULT '',
         FOREIGN KEY (category_id) REFERENCES categories (id)
       )
     ''');
@@ -794,6 +811,7 @@ class AppDatabase {
         original_id  INTEGER,
         deleted_at   INTEGER,
         splits_json  TEXT,
+        note         TEXT,
         PRIMARY KEY (amount, merchant, date, direction, reference)
       )
     ''';
@@ -877,6 +895,10 @@ class AppDatabase {
   /// v6 adds `name_aliases`, which needs no backfill either — an empty table
   /// says nothing has been merged yet, which is true of every database that
   /// predates the feature.
+  /// v7 adds `transactions.note`, and the empty string its default supplies is
+  /// not a placeholder for missing data — a transaction imported before notes
+  /// existed genuinely has no note. The tombstone's copy must be nullable for
+  /// the usual reason, and NULL there says the same thing.
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await db.execute(
@@ -922,6 +944,17 @@ class AppDatabase {
     }
     if (oldVersion < 6) {
       await db.execute(_createNameAliases);
+    }
+    if (oldVersion < 7) {
+      await db.execute(
+        "ALTER TABLE transactions ADD COLUMN note TEXT NOT NULL DEFAULT ''",
+      );
+      // Same shape of reasoning as the v5 branch: a database coming from v2 or
+      // earlier had `deleted_transactions` created from the const above, which
+      // already carries `note`.
+      if (oldVersion >= 3) {
+        await db.execute('ALTER TABLE deleted_transactions ADD COLUMN note TEXT');
+      }
     }
   }
 
@@ -972,7 +1005,7 @@ class AppDatabase {
     final db = await database;
     final rows = await db.rawQuery('''
       SELECT t.id, t.amount, t.payment_type, t.merchant, t.date, t.category_id,
-             t.direction, t.reference, c.name AS category_name
+             t.direction, t.reference, t.note, c.name AS category_name
       FROM transactions t
       JOIN categories c ON c.id = t.category_id
       ORDER BY t.date DESC, t.id DESC
@@ -1232,6 +1265,26 @@ class AppDatabase {
     });
   }
 
+  /// Writes what the user typed against one transaction. One statement, so no
+  /// `db.transaction` around it — unlike [setTransactionCategory], the note
+  /// says nothing about any other column and cannot leave the row half-changed.
+  ///
+  /// An empty [note] is how a note is removed. There is no delete: the column
+  /// is NOT NULL and '' already means "nothing written here", so a second way
+  /// of saying it would only be a second thing to get wrong.
+  Future<void> setTransactionNote({
+    required int transactionId,
+    required String note,
+  }) async {
+    final db = await database;
+    await db.update(
+      'transactions',
+      <String, Object?>{'note': note},
+      where: 'id = ?',
+      whereArgs: <Object?>[transactionId],
+    );
+  }
+
   /// How many past transactions [setMerchantDefault] would re-tag, using the
   /// identical predicate so the count shown is the count changed.
   Future<int> backfillableCount({
@@ -1394,6 +1447,10 @@ class AppDatabase {
         // carried here a delete-and-undo would quietly return the transaction
         // under a single category and lose the breakdown entirely.
         'splits_json': encodeSplits(txn.splits),
+        // For the same reason as the lines above it: the note lives on the row
+        // and goes with it, so a delete-and-undo would hand back the charge
+        // with the one part of it nobody could reconstruct missing.
+        'note': txn.note,
       };
 
   /// Removes the rows and records that they were removed, all in one SQL
@@ -1429,7 +1486,7 @@ class AppDatabase {
     final rows = await db.rawQuery('''
       SELECT d.amount, d.merchant, d.date, d.direction, d.reference,
              d.payment_type, d.category_id, d.original_id, d.deleted_at,
-             d.splits_json,
+             d.splits_json, d.note,
              c.name AS category_name
       FROM deleted_transactions d
       LEFT JOIN categories c ON c.id = d.category_id
@@ -1471,6 +1528,7 @@ class AppDatabase {
             'reference': row.reference,
             'payment_type': row.paymentType,
             'category_id': row.categoryId ?? fallbackCategory,
+            'note': row.note,
           },
           conflictAlgorithm: ConflictAlgorithm.ignore,
         );
@@ -1981,9 +2039,10 @@ class LedgerEntry {
       lines.fold<double>(0, (double sum, TxnSplit l) => sum + l.amount);
 }
 
-/// The three facets the ledger can be narrowed by, as one value.
+/// Everything the ledger can be narrowed by — three facets and a search term —
+/// as one value.
 ///
-/// Together rather than as three loose fields because they travel together
+/// Together rather than as four loose fields because they travel together
 /// everywhere: the shell holds them, the chip strip reads them, and every
 /// change replaces the whole set.
 class LedgerFilters {
@@ -1991,6 +2050,7 @@ class LedgerFilters {
     this.categoryIds = const <int>{},
     this.merchants = const <String>{},
     this.paymentType,
+    this.query = '',
   });
 
   final Set<int> categoryIds;
@@ -1999,8 +2059,15 @@ class LedgerFilters {
   /// One card or account at a time, unlike the other two.
   final String? paymentType;
 
+  /// What is typed in the search box. Empty means "not searching" — and because
+  /// it is never null, it needs no companion flag the way [paymentType] does.
+  final String query;
+
   bool get isEmpty =>
-      categoryIds.isEmpty && merchants.isEmpty && paymentType == null;
+      categoryIds.isEmpty &&
+      merchants.isEmpty &&
+      paymentType == null &&
+      query.isEmpty;
 
   /// `clearPaymentType` because passing `paymentType: null` cannot say whether
   /// it means "leave it" or "drop it".
@@ -2008,6 +2075,7 @@ class LedgerFilters {
     Set<int>? categoryIds,
     Set<String>? merchants,
     String? paymentType,
+    String? query,
     bool clearPaymentType = false,
   }) =>
       LedgerFilters(
@@ -2015,12 +2083,19 @@ class LedgerFilters {
         merchants: merchants ?? this.merchants,
         paymentType:
             clearPaymentType ? null : (paymentType ?? this.paymentType),
+        query: query ?? this.query,
       );
 }
 
-/// Narrows the ledger to any combination of categories, merchants and one
-/// card/account, and projects each surviving transaction down to the split
-/// lines that matched. A null or empty filter means "everything".
+/// Narrows the ledger to any combination of categories, merchants, one
+/// card/account and a search term, and projects each surviving transaction down
+/// to the split lines that matched. A null or empty filter means "everything".
+///
+/// [query] is matched case-insensitively, as a substring, against the note and
+/// the merchant — the only free text a transaction has, one written by the user
+/// and one sent by the bank. It decides which *transactions* survive and never
+/// which lines do: a search term says nothing about categories, so a split that
+/// matches still reports its whole breakdown.
 ///
 /// Pure and top-level so it can be tested without a database behind it.
 List<LedgerEntry> applyFilters(
@@ -2028,14 +2103,21 @@ List<LedgerEntry> applyFilters(
   Set<int>? categoryIds,
   Set<String>? merchants,
   String? paymentType,
+  String? query,
 }) {
   final bool byCategory = categoryIds != null && categoryIds.isNotEmpty;
   final bool byMerchant = merchants != null && merchants.isNotEmpty;
+  final String needle = (query ?? '').trim().toLowerCase();
 
   final List<LedgerEntry> entries = <LedgerEntry>[];
   for (final ExpenseTxn t in all) {
     if (paymentType != null && t.paymentType != paymentType) continue;
     if (byMerchant && !merchants.contains(t.merchant)) continue;
+    if (needle.isNotEmpty &&
+        !t.note.toLowerCase().contains(needle) &&
+        !t.merchant.toLowerCase().contains(needle)) {
+      continue;
+    }
 
     final List<TxnSplit> lines = byCategory
         ? t.effectiveSplits
@@ -2470,6 +2552,28 @@ List<TxnSplit> decodeSplits(String? json) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// NOTES
+// ---------------------------------------------------------------------------
+
+/// The longest note that is stored. Generous for the sentence a note actually
+/// is, and short enough that no single one can dominate the tile it annotates.
+const int _noteMaxLength = 140;
+
+/// What actually gets stored for a typed note: trimmed, inner runs of
+/// whitespace collapsed onto single spaces, and capped.
+///
+/// The collapsing is what makes a pasted two-line note render as one line on
+/// the tile without the tile having to know it was ever anything else. Empty
+/// out means there is no note — a whitespace-only note is not a note, and
+/// storing one would light up the tile's indicator with nothing to show.
+String cleanNote(String raw) {
+  final String collapsed = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+  return collapsed.length <= _noteMaxLength
+      ? collapsed
+      : collapsed.substring(0, _noteMaxLength).trimRight();
+}
+
 /// What one pass over the inbox did. [skipped] counts alerts that parsed but
 /// were already recorded or had been deleted.
 class _ScanResult {
@@ -2689,6 +2793,59 @@ class _HomeShellState extends State<HomeShell> {
         : '${txn.merchant} → ${chosen.category.name}');
   }
 
+  /// Writes what the user wants to remember about one charge — the context the
+  /// bank's alert could never carry.
+  ///
+  /// Saving an empty field is how a note is removed, so there is no separate
+  /// delete: clearing the box and pressing Save is the obvious gesture, and
+  /// honouring it costs nothing.
+  Future<void> _editNote(ExpenseTxn txn) async {
+    final TextEditingController controller =
+        TextEditingController(text: txn.note);
+    // Selection parked at the end so an existing note is added to rather than
+    // typed over, which is what reopening one is nearly always for.
+    controller.selection =
+        TextSelection.collapsed(offset: controller.text.length);
+
+    final String? typed = await showDialog<String>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: Text(txn.hasNote ? 'Edit note' : 'Add note'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLines: 3,
+          maxLength: _noteMaxLength,
+          textCapitalization: TextCapitalization.sentences,
+          decoration: InputDecoration(
+            hintText: 'What was this for?',
+            helperText: '${txn.merchant} · ${_money.format(txn.amount)}',
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (!mounted || typed == null) return;
+
+    final String note = cleanNote(typed);
+    if (note == txn.note) return; // Opened, changed nothing, backed out.
+
+    await _db.setTransactionNote(transactionId: txn.id, note: note);
+    if (!mounted) return;
+    await _load();
+    _toast(note.isEmpty ? 'Note removed' : 'Note saved');
+  }
+
   /// Saves the merchant default, asking first whether history should move with
   /// it. Returns how many past transactions were re-tagged.
   Future<int> _setMerchantDefault(
@@ -2852,6 +3009,8 @@ class _HomeShellState extends State<HomeShell> {
     switch (action) {
       case _TxnAction.categorize:
         await _pickCategory(txn);
+      case _TxnAction.note:
+        await _editNote(txn);
       case _TxnAction.split:
         await _splitTransaction(txn);
       case _TxnAction.mergeMerchant:
@@ -2973,6 +3132,13 @@ class _HomeShellState extends State<HomeShell> {
     // Each facet offers what the *other* filters leave available, so the two
     // narrow each other without either being able to empty itself out from
     // under a selection already made in it.
+    //
+    // The search query is deliberately not one of those filters. It feeds the
+    // visible list below and nothing else: were it passed here it would retire
+    // facet options as the user typed, and `pruneSelection` would then throw
+    // away the category or merchant they had already picked — a keystroke
+    // silently clearing a filter, and clearing the search box would not bring
+    // it back.
     final List<ExpenseCategory> categories = categoryOptions(
       _transactions,
       _categories,
@@ -2997,6 +3163,10 @@ class _HomeShellState extends State<HomeShell> {
       paymentType: paymentTypes.contains(_filters.paymentType)
           ? _filters.paymentType
           : null,
+      // Rebuilt field by field, so the query has to be carried explicitly.
+      // Nothing prunes it: it is text the user is still typing, not a choice
+      // made from a list that the data could retire underneath them.
+      query: _filters.query,
     );
 
     return (
@@ -3010,6 +3180,7 @@ class _HomeShellState extends State<HomeShell> {
           categoryIds: filters.categoryIds,
           merchants: filters.merchants,
           paymentType: filters.paymentType,
+          query: filters.query,
         ),
         _sort,
       ),
@@ -3368,8 +3539,19 @@ class DashboardTab extends StatelessWidget {
       children: <Widget>[
         // While marking, the filters go. Rows can then only be marked from what
         // is already on screen, which is what lets "Select all" and the delete
-        // beside it mean one unambiguous thing.
-        if (!selecting) _chipStrip(context),
+        // beside it mean one unambiguous thing. The search box goes with them,
+        // for exactly the same reason.
+        if (!selecting) ...<Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: _SearchField(
+              value: filters.query,
+              onChanged: (String q) =>
+                  onFiltersChanged(filters.copyWith(query: q)),
+            ),
+          ),
+          _chipStrip(context),
+        ],
         Expanded(
           child: loading
               ? const Center(child: CircularProgressIndicator())
@@ -3379,6 +3561,7 @@ class DashboardTab extends StatelessWidget {
                       ? const _EmptyState()
                       : entries.isEmpty
                           ? _NoMatchState(
+                              searching: filters.query.trim().isNotEmpty,
                               onClear: () =>
                                   onFiltersChanged(const LedgerFilters()),
                             )
@@ -3438,6 +3621,78 @@ class DashboardTab extends StatelessWidget {
         // While marking, a tap toggles rather than opens.
         onTap: selecting ? () => onToggleSelected(txn) : () => onTap(txn),
         onLongPress: () => onToggleSelected(txn),
+      ),
+    );
+  }
+}
+
+/// The search box over the ledger, matching notes and merchant names.
+///
+/// Stateful only because the text has two owners: the shell holds the query in
+/// its filters and rebuilds this widget on every keystroke, so a controller
+/// rebuilt with it would fight the cursor. It is created once here instead, and
+/// [didUpdateWidget] copies in a value that changed somewhere else — the Clear
+/// chip is the only thing that does — while leaving ordinary typing alone.
+///
+/// No debounce: the ledger is already in memory and [applyFilters] runs on
+/// every build regardless, so a keystroke costs one pass over a local list.
+class _SearchField extends StatefulWidget {
+  const _SearchField({required this.value, required this.onChanged});
+
+  final String value;
+  final ValueChanged<String> onChanged;
+
+  @override
+  State<_SearchField> createState() => _SearchFieldState();
+}
+
+class _SearchFieldState extends State<_SearchField> {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.value);
+
+  @override
+  void didUpdateWidget(_SearchField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.value != _controller.text) {
+      _controller.value = TextEditingValue(
+        text: widget.value,
+        selection: TextSelection.collapsed(offset: widget.value.length),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: _controller,
+      textInputAction: TextInputAction.search,
+      onChanged: widget.onChanged,
+      decoration: InputDecoration(
+        isDense: true,
+        hintText: 'Search notes or merchants',
+        prefixIcon: const Icon(Icons.search),
+        // Driven by the shell's value rather than the controller's: this widget
+        // repaints when the shell rebuilds, and the shell is what knows the
+        // query changed.
+        suffixIcon: widget.value.isEmpty
+            ? null
+            : IconButton(
+                icon: const Icon(Icons.close),
+                tooltip: 'Clear search',
+                onPressed: () {
+                  _controller.clear();
+                  widget.onChanged('');
+                },
+              ),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(24),
+        ),
       ),
     );
   }
@@ -3631,7 +3886,7 @@ class _DismissBackground extends StatelessWidget {
 // TRANSACTION ACTIONS — everything one row can be told to do
 // ---------------------------------------------------------------------------
 
-enum _TxnAction { categorize, split, mergeMerchant, mergeCard, delete }
+enum _TxnAction { categorize, note, split, mergeMerchant, mergeCard, delete }
 
 class TransactionActionsSheet extends StatelessWidget {
   const TransactionActionsSheet({
@@ -3700,12 +3955,44 @@ class TransactionActionsSheet extends StatelessWidget {
                   ),
               ],
             ),
+            // The tile shows the note on one ellipsised line, so this is where
+            // a long one is actually read.
+            if (txn.hasNote) ...<Widget>[
+              const SizedBox(height: 10),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Icon(
+                    Icons.sticky_note_2_outlined,
+                    size: 18,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      txn.note,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontStyle: FontStyle.italic,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
             const Divider(height: 28),
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.label_outline),
               title: const Text('Change category'),
               onTap: () => Navigator.pop(context, _TxnAction.categorize),
+            ),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.sticky_note_2_outlined),
+              title: Text(txn.hasNote ? 'Edit note' : 'Add note'),
+              subtitle: const Text('Why this one happened'),
+              onTap: () => Navigator.pop(context, _TxnAction.note),
             ),
             ListTile(
               contentPadding: EdgeInsets.zero,
@@ -3946,6 +4233,22 @@ class _DeletedScreenState extends State<DeletedScreen> {
                                         overflow: TextOverflow.ellipsis,
                                         style: theme.textTheme.bodySmall,
                                       ),
+                                      // Two charges of the same amount at the
+                                      // same shop are told apart by the note or
+                                      // not at all — and this is the screen
+                                      // where one of them is chosen to restore.
+                                      if (row.note.isNotEmpty)
+                                        Text(
+                                          row.note,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: theme.textTheme.bodySmall
+                                              ?.copyWith(
+                                            fontStyle: FontStyle.italic,
+                                            color: theme
+                                                .colorScheme.onSurfaceVariant,
+                                          ),
+                                        ),
                                     ],
                                   ),
                                 ),
@@ -4025,9 +4328,14 @@ class _DeletedEmptyState extends StatelessWidget {
 /// Shown when there are transactions but the current filters exclude all of
 /// them — distinct from [_EmptyState], which means the ledger itself is empty.
 class _NoMatchState extends StatelessWidget {
-  const _NoMatchState({required this.onClear});
+  const _NoMatchState({required this.onClear, this.searching = false});
 
   final VoidCallback onClear;
+
+  /// Whether a search term is part of why nothing matched. The button clears
+  /// everything either way; this only decides what the screen says the reason
+  /// was, so it does not blame the chips for a typo in the search box.
+  final bool searching;
 
   @override
   Widget build(BuildContext context) {
@@ -4036,11 +4344,13 @@ class _NoMatchState extends StatelessWidget {
       padding: const EdgeInsets.all(32),
       children: <Widget>[
         const SizedBox(height: 100),
-        Icon(Icons.filter_alt_off_outlined,
+        Icon(searching ? Icons.search_off : Icons.filter_alt_off_outlined,
             size: 64, color: Theme.of(context).colorScheme.outline),
         const SizedBox(height: 16),
         Text(
-          'No transactions match these filters',
+          searching
+              ? 'No transactions match this search'
+              : 'No transactions match these filters',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.titleMedium,
         ),
@@ -4049,7 +4359,7 @@ class _NoMatchState extends StatelessWidget {
           child: FilledButton.tonalIcon(
             onPressed: onClear,
             icon: const Icon(Icons.clear),
-            label: const Text('Clear filters'),
+            label: Text(searching ? 'Clear search' : 'Clear filters'),
           ),
         ),
       ],
@@ -4285,6 +4595,31 @@ class _TransactionTile extends StatelessWidget {
                     ),
                   ),
                 ),
+                // Sits beside the category rather than on a line of its own, so
+                // a note costs the row no height and an unnoted row looks
+                // exactly as it did. `Flexible`, not `Expanded`, because this
+                // Row is `MainAxisSize.min` — and it is what keeps a long note
+                // ellipsising instead of shouldering the amount off the tile.
+                if (txn.hasNote) ...<Widget>[
+                  const SizedBox(width: 6),
+                  Icon(
+                    Icons.sticky_note_2_outlined,
+                    size: 14,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 3),
+                  Flexible(
+                    child: Text(
+                      txn.note,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        fontStyle: FontStyle.italic,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ],
