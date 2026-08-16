@@ -41,6 +41,7 @@ dependencies:
   shared_preferences: ^2.5.5  # To remember the toggle and the last-checked time
   path_provider: ^2.1.6       # To pick the directory the APK downloads into
   open_filex: ^4.7.0          # To hand the APK to Android's package installer
+  fl_chart: ^1.2.0
 
 dev_dependencies:
   flutter_test:

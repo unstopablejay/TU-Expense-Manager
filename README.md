@@ -13,7 +13,7 @@ Everything stays on the device. There is no backend and no network call.
 incoming SMS ─► SmsParser ─► merchant_mappings lookup ─► transactions row
                                     │                          │
                           hit → that category                  ▼
-                          miss → 'Uncategorized'          dashboard
+                          miss → 'Uncategorized'      transactions
                                                                │
                                                     tap a row ─┤
                                                                ▼
@@ -27,7 +27,7 @@ incoming SMS ─► SmsParser ─► merchant_mappings lookup ─► transaction
 A merchant that always sells the same thing gets a default category and is filed
 automatically. One like Amazon, whose charges cover groceries and shopping at once, is set
 to **always ask** and split by hand into lines that sum to the charge — so the categories
-on the dashboard still add up to what was actually spent.
+on the Dashboard still add up to what was actually spent.
 
 ### The SMS templates
 
@@ -287,7 +287,7 @@ the very work it exists to protect.
 
 One SMS is one amount, so an Amazon order covering groceries, snacks and shopping arrives
 as a single ₹2,000 charge. Tagging it with all three categories would count ₹2,000 three
-times over and the dashboard would stop adding up; splitting it into lines that sum to the
+times over and the totals would stop adding up; splitting it into lines that sum to the
 charge keeps every total exact.
 
 Tapping a transaction opens its actions sheet — **Change category**, **Split**, **Delete** —
@@ -298,7 +298,7 @@ row directly is allowed and can leave the split unbalanced, which shows as
 "₹500 unallocated" or "₹200 over" and blocks Save until it is resolved.
 
 Under a category filter a split contributes **only its matching lines** — the ₹2,000 Amazon
-row shows and totals ₹1,200 under Grocery. That is what keeps a filtered dashboard's totals
+row shows and totals ₹1,200 under Grocery. That is what keeps a filtered view's totals
 equal to what was really spent.
 
 ## App icon
@@ -383,12 +383,46 @@ AGP 8+. The fork is API-identical; only the import differs.
 
 ## Usage
 
-One screen over the ledger, with **Settings** alongside it on a bottom navigation bar.
+Three destinations on a bottom navigation bar: **Dashboard**, **Transactions** and
+**Settings**. The app opens on the Dashboard.
+
+**Both screens are scoped to a month, and open on the current one.** The ledger used to be
+unbounded, which made its headline total mean "everything since I installed the app" — a
+number nobody acts on. A period row sits at the top of each, naming the months on show,
+with `‹` `›` steppers to move one month at a time and a sheet to tick several. The two
+screens keep **separate** month selections: comparing three months on the Dashboard should
+not dump three months of rows into the working list, and scrubbing back through the list
+should not silently repoint the charts.
 
 ### Dashboard
 
+Where the money went over the chosen period. It reads the whole ledger and narrows it by
+month **and nothing else** — deliberately not inheriting the Transactions tab's category,
+merchant, card or search filters, because a report steered by a working list's filter
+state is not a report, and a pie of a single category is not a chart.
+
+- A **hero figure**: total spent, with received and net beneath it.
+- **One month → a donut**, capped at the five largest categories plus an "Other" holding
+  the tail, with a ranked list of exact amounts and shares beside it. The cap and the list
+  are both deliberate: a donut is honest about part-to-whole at a glance and useless for
+  comparing two close values, so the figures have to be readable somewhere — and that list
+  is also what keeps the chart usable for anyone who cannot separate two of the hues.
+- **Two or more months → grouped bars**, one group per category and one bar per month,
+  coloured by month with a legend naming them. Two pies cannot be compared by eye; bars
+  can. Capped at six months, past which the bars are thinner than the gaps between them.
+
+**Category colours are assigned from the category's name, never from its rank.** Were
+slots handed out by position in the sorted-by-spend list, Food would be blue in a month it
+led and orange in one it did not, and the eye would read a colour change as a change in
+the data. Credits are excluded from every chart — a refund is not spending. "Other" and
+Uncategorized are grey on purpose: neither is something money was spent *on*, and giving
+them a hue would let the tail of the breakdown compete with the real answers.
+
+### Transactions
+
 Everything that happened, spend and received together, filtered, sorted and edited in
-place. Pinned under the app bar is a scrolling row of chips, each opening a sheet.
+place. Under the period row and the search box is a scrolling row of chips, each opening a
+sheet.
 
 #### Sorting
 
@@ -597,11 +631,14 @@ statement alerts and promos. Two cases specifically guard against regressions th
 looked plausible: `PZCREDIT9772829` staying a debit, and the trailing `Bal` /
 `Avl Limit:` figures never being mistaken for the amount.
 
-It also covers the dashboard, merge and split logic — `applyFilters`, `amountIn`,
-`spendByCategory`, `categoryOptions`, `merchantOptions`, `pruneSelection`, `sortEntries`,
-the merge rules (`NameAliases`, `mergePlan`, `canonicaliseLedger`, `suggestGroups`), the
-split arithmetic (`unallocated`, `isBalanced`, `withRemainderInLast`) and the tombstone
-payload (`encodeSplits`, `decodeSplits`). All are pure top-level functions precisely so
+It also covers the ledger, chart, merge and split logic — `applyFilters`, `amountIn`,
+`spendByCategory`, `categoryOptions`, `merchantOptions`, `monthOptions`, `pruneSelection`,
+`sortEntries`, the period model (`YearMonth`, `periodLabel`, `comparedMonths`), the chart
+aggregation (`spendByCategoryPerMonth`, `periodTotals`, `topCategories`), the empty-list
+reasoning (`emptyReason`), notes (`cleanNote`), the merge rules (`NameAliases`,
+`mergePlan`, `canonicaliseLedger`, `suggestGroups`), the split arithmetic (`unallocated`,
+`isBalanced`, `withRemainderInLast`) and the tombstone payload (`encodeSplits`,
+`decodeSplits`). All are pure top-level functions precisely so
 they can be tested without a database behind them; anything worth covering is written that
 way.
 
@@ -628,7 +665,9 @@ adb emu sms send BANKSMS "Spent Rs.122.02 On BANK Card 6824 At INNOVATIVE RETAIL
 adb emu sms send BANKSMS "INR 160.00 spent using BANK Card XX8008 on 11-Aug-26 on AMAZON PAY IN G. Avl Limit: INR 3,99,614.00."
 ```
 
-The transaction should appear on the dashboard within a second or two. Newlines don't
+The transaction should appear on the Transactions tab within a second or two — provided it
+is dated in the month on show; if it is not, the toast names the month it landed in.
+Newlines don't
 survive `adb emu sms send`, so for the one-field-per-line transfer alerts use
 the **Paste an SMS** button instead. To inspect what was actually stored:
 
@@ -658,6 +697,18 @@ Worth walking by hand, since none of it is covered by `flutter test`:
 - **Split survives delete.** Delete a split transaction, confirm `splits_json` on its
   tombstone holds the lines, restore it, and confirm all of them come back. Then rescan-all
   and confirm nothing duplicates.
+- **An empty month shows an empty month.** Step back to a month with nothing in it. It must
+  say "Nothing in <month> yet" and offer **Show all months** — *not* fall back to showing
+  the whole ledger. This is the trap the whole month design is built around: an empty month
+  set means "every month", so pruning a selection that matches nothing would invert the
+  feature. Worth checking on the 1st of a month specifically, which is when the *default*
+  selection is the empty one.
+- **A category keeps its colour.** Note Food's colour on the Dashboard in a month it leads,
+  then switch to a month where it does not. It must be unchanged — colours are assigned by
+  name, and assigning by rank would make a colour change look like a data change.
+- **An import you cannot see says so.** With the list on this month, paste an alert dated
+  last month. The row correctly does not appear, and the toast must name the month it went
+  to. Same for **Rescan all messages**, which imports mostly out-of-month rows.
 - **A note outlives every edit.** Note a transaction, then categorise it, split it, and
   merge its merchant: the note must still be there each time — the merge is the one that
   matters, since `canonicaliseLedger` rebuilds every row through `copyWith`. Then delete it
