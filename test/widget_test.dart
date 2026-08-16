@@ -426,6 +426,86 @@ void main() {
     });
   });
 
+  group('YearMonth', () {
+    // These two are first for a reason. If == or hashCode is wrong, the month
+    // filter's `contains` misses every time and the ledger renders empty with
+    // nothing thrown — the one failure in this feature that looks like no
+    // failure at all.
+    test('two readings of the same month are the same value', () {
+      expect(YearMonth.fromDate(DateTime(2026, 8, 1)),
+          YearMonth.fromDate(DateTime(2026, 8, 31, 23, 59)));
+      expect(const YearMonth(2026, 8), YearMonth.fromDate(DateTime(2026, 8, 16)));
+    });
+
+    test('works as a Set member, which is how the filter uses it', () {
+      final set = <YearMonth>{const YearMonth(2026, 8), const YearMonth(2026, 7)};
+      expect(set.contains(YearMonth.fromDate(DateTime(2026, 8, 16, 4, 30))), isTrue);
+      expect(set.contains(const YearMonth(2026, 9)), isFalse);
+      // A duplicate must collapse, or the "3 months" label would lie.
+      expect(<YearMonth>{...set, const YearMonth(2026, 8)}, hasLength(2));
+    });
+
+    test('orders by year then month', () {
+      expect(const YearMonth(2026, 8).compareTo(const YearMonth(2026, 9)),
+          lessThan(0));
+      expect(const YearMonth(2026, 1).compareTo(const YearMonth(2025, 12)),
+          greaterThan(0));
+      final months = <YearMonth>[
+        const YearMonth(2026, 1),
+        const YearMonth(2025, 12),
+        const YearMonth(2026, 8),
+      ]..sort();
+      expect(months.map((YearMonth m) => m.month), <int>[12, 1, 8]);
+    });
+
+    test('stepping crosses the year boundary in both directions', () {
+      expect(const YearMonth(2026, 12).plus(1), const YearMonth(2027, 1));
+      expect(const YearMonth(2026, 1).plus(-1), const YearMonth(2025, 12));
+      expect(const YearMonth(2026, 8).plus(0), const YearMonth(2026, 8));
+      expect(const YearMonth(2026, 6).plus(12), const YearMonth(2027, 6));
+      expect(const YearMonth(2026, 6).plus(-12), const YearMonth(2025, 6));
+    });
+
+    test('monthsUntil counts the gap, signed', () {
+      expect(const YearMonth(2026, 6).monthsUntil(const YearMonth(2026, 8)), 2);
+      expect(const YearMonth(2026, 1).monthsUntil(const YearMonth(2025, 12)), -1);
+      expect(const YearMonth(2026, 8).monthsUntil(const YearMonth(2026, 8)), 0);
+    });
+
+    test('contains is inclusive of the whole month and nothing either side', () {
+      const august = YearMonth(2026, 8);
+      expect(august.contains(DateTime(2026, 8, 1)), isTrue);
+      expect(august.contains(DateTime(2026, 8, 31, 23, 59, 59)), isTrue);
+      expect(august.contains(DateTime(2026, 7, 31, 23, 59, 59)), isFalse);
+      expect(august.contains(DateTime(2026, 9, 1)), isFalse);
+    });
+
+    test('current reads the month off an injected clock', () {
+      expect(YearMonth.current(DateTime(2026, 8, 16)), const YearMonth(2026, 8));
+    });
+  });
+
+  group('periodLabel', () {
+    test('no months means every month', () {
+      expect(periodLabel(const <YearMonth>{}), 'All time');
+    });
+
+    test('one month is named', () {
+      expect(periodLabel(<YearMonth>{const YearMonth(2026, 8)}), 'Aug 2026');
+    });
+
+    test('several are counted rather than listed', () {
+      expect(
+        periodLabel(<YearMonth>{
+          const YearMonth(2026, 8),
+          const YearMonth(2026, 7),
+          const YearMonth(2026, 6),
+        }),
+        '3 months',
+      );
+    });
+  });
+
   group('applyFilters', () {
     ExpenseTxn txn({
       required int id,
@@ -436,6 +516,7 @@ void main() {
       double amount = 100,
       String? merchant,
       String note = '',
+      DateTime? date,
       List<TxnSplit> splits = const <TxnSplit>[],
     }) =>
         ExpenseTxn(
@@ -443,7 +524,7 @@ void main() {
           amount: amount,
           paymentType: paymentType,
           merchant: merchant ?? 'MERCHANT $id',
-          date: DateTime(2026, 8, id),
+          date: date ?? DateTime(2026, 8, id),
           categoryId: categoryId,
           categoryName: categoryName,
           direction: direction,
@@ -573,6 +654,114 @@ void main() {
         idsOf(applyFilters(<ExpenseTxn>[amazon], categoryIds: <int>{8})),
         <int>[5],
       );
+    });
+
+    group('months', () {
+      const august = YearMonth(2026, 8);
+      const july = YearMonth(2026, 7);
+      const june = YearMonth(2026, 6);
+
+      // Every row in `ledger` is already August 2026 (the builder dates them
+      // `DateTime(2026, 8, id)`), so only the older rows need spelling out.
+      final spread = <ExpenseTxn>[
+        ...ledger,
+        txn(
+          id: 10,
+          paymentType: 'HDFC Bank A/C *0444',
+          categoryId: 2,
+          categoryName: 'Food',
+          date: DateTime(2026, 7, 4),
+        ),
+        txn(
+          id: 11,
+          paymentType: 'YES BANK Card X2858',
+          categoryId: 3,
+          categoryName: 'Fuel',
+          date: DateTime(2026, 6, 9),
+        ),
+      ];
+
+      test('no month filter is every month', () {
+        expect(idsOf(applyFilters(spread)), <int>[1, 2, 3, 4, 10, 11]);
+        expect(idsOf(applyFilters(spread, months: const <YearMonth>{})),
+            <int>[1, 2, 3, 4, 10, 11]);
+      });
+
+      test('one month keeps only that month', () {
+        expect(idsOf(applyFilters(spread, months: <YearMonth>{july})), <int>[10]);
+      });
+
+      test('several months are an OR within the facet', () {
+        expect(
+          idsOf(applyFilters(spread, months: <YearMonth>{july, june})),
+          <int>[10, 11],
+        );
+      });
+
+      test('a month nothing falls in yields an empty list, not everything', () {
+        // The heart of the feature: an empty month must read as "nothing here",
+        // never as "no filter".
+        expect(
+          applyFilters(spread, months: <YearMonth>{const YearMonth(2026, 1)}),
+          isEmpty,
+        );
+      });
+
+      test('the boundary days of a month are inside it', () {
+        final edges = <ExpenseTxn>[
+          txn(id: 20, paymentType: 'X', categoryId: 2, categoryName: 'Food',
+              date: DateTime(2026, 8, 1)),
+          txn(id: 21, paymentType: 'X', categoryId: 2, categoryName: 'Food',
+              date: DateTime(2026, 8, 31, 23, 59, 59)),
+          txn(id: 22, paymentType: 'X', categoryId: 2, categoryName: 'Food',
+              date: DateTime(2026, 7, 31, 23, 59, 59)),
+        ];
+        expect(idsOf(applyFilters(edges, months: <YearMonth>{august})),
+            <int>[20, 21]);
+      });
+
+      test('a month ANDs with a category filter', () {
+        expect(
+          idsOf(applyFilters(spread,
+              months: <YearMonth>{july}, categoryIds: <int>{2})),
+          <int>[10],
+        );
+        expect(
+          applyFilters(spread, months: <YearMonth>{july}, categoryIds: <int>{3}),
+          isEmpty,
+        );
+      });
+
+      test('a month ANDs with the search query', () {
+        expect(
+          idsOf(applyFilters(spread,
+              months: <YearMonth>{july}, query: 'MERCHANT 10')),
+          <int>[10],
+        );
+        expect(
+          applyFilters(spread,
+              months: <YearMonth>{august}, query: 'MERCHANT 10'),
+          isEmpty,
+        );
+      });
+
+      // The month says nothing about categories, so it must not narrow lines.
+      test('a matching split keeps its whole breakdown', () {
+        final entry =
+            applyFilters(<ExpenseTxn>[amazon], months: <YearMonth>{august})
+                .single;
+        expect(entry.lines, hasLength(3));
+        expect(entry.amount, 2000);
+      });
+
+      test('a category filter still narrows a split within a month', () {
+        final entry = applyFilters(
+          <ExpenseTxn>[amazon],
+          months: <YearMonth>{august},
+          categoryIds: <int>{6},
+        ).single;
+        expect(entry.amount, 1200);
+      });
     });
 
     group('search query', () {
@@ -718,6 +907,120 @@ void main() {
 
       test('adds up rows sharing a category', () {
         expect(spendByCategory(applyFilters(ledger))['Food'], 200);
+      });
+    });
+
+    group('monthOptions', () {
+      const august = YearMonth(2026, 8);
+
+      // This is the regression the whole design turns on. On the 1st of a
+      // month nothing has landed in it yet; drop it from the options and the
+      // selection gets pruned to empty, and empty means EVERY month — so
+      // asking for one quiet month would show years.
+      test('the current month is offered even when nothing is in it', () {
+        expect(monthOptions(const <ExpenseTxn>[], current: august),
+            <YearMonth>[august]);
+        expect(
+          monthOptions(ledger, current: const YearMonth(2027, 3)),
+          <YearMonth>[const YearMonth(2027, 3), august],
+        );
+      });
+
+      test('whatever is selected stays on offer, however stale', () {
+        // Without this a user who navigated to a month that has since been
+        // emptied could not navigate back out of it.
+        expect(
+          monthOptions(ledger,
+              current: august, keep: <YearMonth>{const YearMonth(2024, 1)}),
+          <YearMonth>[august, const YearMonth(2024, 1)],
+        );
+      });
+
+      test('newest first, de-duplicated', () {
+        final spread = <ExpenseTxn>[
+          ...ledger, // four rows, all August 2026
+          txn(id: 10, paymentType: 'X', categoryId: 2, categoryName: 'Food',
+              date: DateTime(2026, 6, 4)),
+          txn(id: 11, paymentType: 'X', categoryId: 2, categoryName: 'Food',
+              date: DateTime(2026, 7, 4)),
+        ];
+        expect(
+          monthOptions(spread, current: august),
+          <YearMonth>[august, const YearMonth(2026, 7), const YearMonth(2026, 6)],
+        );
+      });
+
+      test('applies the other facets, so it cannot offer a dead end', () {
+        final spread = <ExpenseTxn>[
+          ...ledger,
+          txn(id: 10, paymentType: 'X', categoryId: 3, categoryName: 'Fuel',
+              date: DateTime(2026, 6, 4)),
+        ];
+        // Only the June row is Fuel-and-card-X; August survives only because it
+        // is the current month.
+        expect(
+          monthOptions(spread, current: august, categoryIds: <int>{3},
+              paymentType: 'X'),
+          <YearMonth>[august, const YearMonth(2026, 6)],
+        );
+      });
+    });
+
+    group('spendByCategoryPerMonth', () {
+      test('buckets by month and keeps the category rules', () {
+        final spread = <ExpenseTxn>[
+          ...ledger, // Food 100 + Food 100 + Fuel 100 + a Salary credit
+          txn(id: 10, paymentType: 'X', categoryId: 2, categoryName: 'Food',
+              amount: 250, date: DateTime(2026, 7, 4)),
+        ];
+        final byMonth = spendByCategoryPerMonth(applyFilters(spread));
+        expect(byMonth[const YearMonth(2026, 8)],
+            <String, double>{'Food': 200, 'Fuel': 100});
+        expect(byMonth[const YearMonth(2026, 7)], <String, double>{'Food': 250});
+      });
+
+      test('credits are left out, so a month of refunds is absent', () {
+        final credits = <ExpenseTxn>[
+          txn(id: 4, paymentType: 'X', categoryId: 4, categoryName: 'Salary',
+              direction: TxnDirection.credit, date: DateTime(2026, 7, 1)),
+        ];
+        expect(spendByCategoryPerMonth(applyFilters(credits)),
+            <YearMonth, Map<String, double>>{const YearMonth(2026, 7): <String, double>{}});
+      });
+
+      test('a split is attributed across its lines in its own month', () {
+        expect(
+          spendByCategoryPerMonth(applyFilters(<ExpenseTxn>[amazon])),
+          <YearMonth, Map<String, double>>{
+            const YearMonth(2026, 8): <String, double>{
+              'Grocery': 1200,
+              'Snacks': 500,
+              'Shopping': 300,
+            },
+          },
+        );
+      });
+    });
+
+    group('periodTotals', () {
+      test('separates spend from money in, and counts the rows', () {
+        final totals = periodTotals(applyFilters(ledger));
+        expect(totals.spent, 300); // Food 100 + Food 100 + Fuel 100
+        expect(totals.received, 100); // the Salary credit
+        expect(totals.count, 4);
+      });
+
+      test('an empty period is all zeroes, not a crash', () {
+        final totals = periodTotals(const <LedgerEntry>[]);
+        expect(totals.spent, 0);
+        expect(totals.received, 0);
+        expect(totals.count, 0);
+      });
+
+      test('under a category filter it totals only what matched', () {
+        final totals =
+            periodTotals(applyFilters(<ExpenseTxn>[amazon], categoryIds: <int>{6}));
+        expect(totals.spent, 1200);
       });
     });
 
@@ -1340,6 +1643,144 @@ void main() {
       // way out of the Deleted screen is not.
       expect(decodeSplits('not json'), isEmpty);
       expect(decodeSplits('{"not":"a list"}'), isEmpty);
+    });
+  });
+
+  group('comparedMonths', () {
+    test('runs oldest first, whatever order they were picked in', () {
+      expect(
+        comparedMonths(
+            <YearMonth>{const YearMonth(2026, 8), const YearMonth(2026, 7)}),
+        <YearMonth>[const YearMonth(2026, 7), const YearMonth(2026, 8)],
+      );
+    });
+
+    test('sorts across a year boundary', () {
+      expect(
+        comparedMonths(
+            <YearMonth>{const YearMonth(2026, 2), const YearMonth(2025, 12)}),
+        <YearMonth>[const YearMonth(2025, 12), const YearMonth(2026, 2)],
+      );
+    });
+
+    // An unpicked month between two picked ones is not a zero — it is a month
+    // nobody asked about, and a zero bar would claim no spend.
+    test('does not invent the months between the ones picked', () {
+      expect(
+        comparedMonths(
+            <YearMonth>{const YearMonth(2026, 3), const YearMonth(2026, 6)}),
+        <YearMonth>[const YearMonth(2026, 3), const YearMonth(2026, 6)],
+      );
+    });
+
+    test('no selection is no series', () {
+      expect(comparedMonths(const <YearMonth>{}), isEmpty);
+    });
+  });
+
+  group('topCategories', () {
+    test('ranks descending with shares that sum to one', () {
+      final slices = topCategories(<String, double>{
+        'Food': 300,
+        'Fuel': 100,
+        'Grocery': 600,
+      });
+      expect(slices.map((CategorySlice s) => s.name), <String>['Grocery', 'Food', 'Fuel']);
+      expect(slices.first.share, closeTo(0.6, 0.0001));
+      expect(
+        slices.fold<double>(0, (double sum, CategorySlice s) => sum + s.share),
+        closeTo(1, 0.0001),
+      );
+    });
+
+    test('a breakdown within the cap invents no Other', () {
+      final slices = topCategories(<String, double>{'Food': 300, 'Fuel': 100});
+      expect(slices, hasLength(2));
+      expect(slices.map((CategorySlice s) => s.name), isNot(contains('Other')));
+    });
+
+    test('the tail folds into one Other, and the total stays honest', () {
+      final slices = topCategories(<String, double>{
+        'A': 100, 'B': 90, 'C': 80, 'D': 70, 'E': 60, 'F': 50, 'G': 40, 'H': 30,
+      });
+      expect(slices, hasLength(6));
+      expect(slices.last.name, 'Other');
+      expect(slices.last.amount, 120); // F + G + H
+      expect(
+        slices.fold<double>(0, (double sum, CategorySlice s) => sum + s.amount),
+        520, // the whole of it — nothing dropped
+      );
+    });
+
+    test('respects a different limit', () {
+      final slices = topCategories(
+        <String, double>{'A': 100, 'B': 90, 'C': 80, 'D': 70},
+        limit: 3,
+      );
+      expect(slices, hasLength(3));
+      expect(slices.last.name, 'Other');
+      expect(slices.last.amount, 150); // C + D
+    });
+
+    test('nothing spent is no slices, not a division by zero', () {
+      expect(topCategories(const <String, double>{}), isEmpty);
+      expect(topCategories(<String, double>{'Food': 0}), isEmpty);
+    });
+  });
+
+  group('emptyReason', () {
+    const august = YearMonth(2026, 8);
+
+    test('an empty ledger outranks every filter', () {
+      expect(
+        emptyReason(
+          LedgerFilters(months: <YearMonth>{august}, query: 'swiggy'),
+          ledgerIsEmpty: true,
+        ),
+        EmptyReason.ledgerEmpty,
+      );
+    });
+
+    // The month is always in force, so blaming it first would blame it for
+    // everything — and send the user off to change the wrong thing.
+    test('a search term is blamed before the month', () {
+      expect(
+        emptyReason(
+          LedgerFilters(months: <YearMonth>{august}, query: 'zzz'),
+          ledgerIsEmpty: false,
+        ),
+        EmptyReason.search,
+      );
+    });
+
+    test('a chip is blamed before the month', () {
+      expect(
+        emptyReason(
+          LedgerFilters(months: <YearMonth>{august}, categoryIds: const <int>{2}),
+          ledgerIsEmpty: false,
+        ),
+        EmptyReason.facets,
+      );
+    });
+
+    test('the month is blamed only when nothing else narrows anything', () {
+      expect(
+        emptyReason(
+          LedgerFilters(months: <YearMonth>{august}),
+          ledgerIsEmpty: false,
+        ),
+        EmptyReason.month,
+      );
+    });
+
+    test('whitespace in the search box is not a search', () {
+      expect(
+        emptyReason(
+          LedgerFilters(months: <YearMonth>{august}, query: '   '),
+          ledgerIsEmpty: false,
+        ),
+        EmptyReason.month,
+      );
     });
   });
 

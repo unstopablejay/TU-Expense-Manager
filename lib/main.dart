@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -2021,11 +2022,89 @@ class TuExpenseTrackerApp extends StatelessWidget {
   }
 }
 
+// ---------------------------------------------------------------------------
+// PERIODS — the unit both the ledger and the charts are narrowed by
+// ---------------------------------------------------------------------------
+
+/// A calendar month, as a value.
+///
+/// A month is not a point in time and not a range: it is a (year, month) pair.
+/// Holding it as a `DateTime` would drag along ten fields that must be promised
+/// to be zero and an `isUtc` flag that takes part in equality — so a set built
+/// from one source and probed from another would silently match nothing — and
+/// would turn "is this in August" into range arithmetic with two boundaries to
+/// get wrong. This is two ints and a comparison.
+///
+/// [==] and [hashCode] are load-bearing beyond the usual: the filter holds a
+/// `Set<YearMonth>` and asks it `contains` once per transaction, so getting
+/// them wrong does not throw — it renders an empty ledger. Same reason
+/// [AppVersion] carries them.
+class YearMonth implements Comparable<YearMonth> {
+  const YearMonth(this.year, this.month);
+
+  /// The month [date] falls in, read in local time — the same reading the tile
+  /// prints, so a charge at half past midnight on the 1st is filed under the
+  /// month its own row says it is. Never `toUtc()`: that would move some
+  /// transactions a month for no reason the user can see.
+  factory YearMonth.fromDate(DateTime date) => YearMonth(date.year, date.month);
+
+  /// [now] is injectable so "the current month" can be tested without waiting
+  /// for one.
+  factory YearMonth.current([DateTime? now]) =>
+      YearMonth.fromDate(now ?? DateTime.now());
+
+  final int year;
+
+  /// 1–12, as `DateTime` numbers them.
+  final int month;
+
+  /// Months since year zero. One number to compare and step by, which is what
+  /// keeps December → January from needing a special case anywhere else.
+  int get _ordinal => year * 12 + (month - 1);
+
+  /// [count] months later, or earlier when negative.
+  YearMonth plus(int count) {
+    final int n = _ordinal + count;
+    return YearMonth(n ~/ 12, n % 12 + 1);
+  }
+
+  /// How many months [other] is after this one. Negative when it is before.
+  int monthsUntil(YearMonth other) => other._ordinal - _ordinal;
+
+  bool contains(DateTime date) => date.year == year && date.month == month;
+
+  static final DateFormat _labelFormat = DateFormat('MMM yyyy');
+
+  /// What a chip, a sheet row and a chart axis all call this month.
+  String get label => _labelFormat.format(DateTime(year, month));
+
+  @override
+  int compareTo(YearMonth other) => _ordinal.compareTo(other._ordinal);
+
+  @override
+  bool operator ==(Object other) =>
+      other is YearMonth && other.year == year && other.month == month;
+
+  @override
+  int get hashCode => Object.hash(year, month);
+
+  @override
+  String toString() => label;
+}
+
+/// What a period is called in a heading. Empty means the filter is off, which
+/// is every month there has ever been.
+String periodLabel(Set<YearMonth> months) {
+  if (months.isEmpty) return 'All time';
+  if (months.length == 1) return months.first.label;
+  return '${months.length} months';
+}
+
 /// One row of the ledger as a filtered view sees it: a transaction, plus only
 /// the split lines that survived the filter.
 ///
 /// [amount] is the sum of *those* lines, not the transaction's total, which is
-/// what keeps a filtered dashboard honest. Narrow to Grocery and a ₹2,000
+/// what keeps a filtered ledger honest. Narrow to Grocery and a ₹2,000
 /// Amazon order split three ways contributes its ₹1,200 grocery line and
 /// nothing else — so the category totals still add up to what was really spent
 /// instead of counting the same ₹2,000 under all three of its categories.
@@ -2039,19 +2118,34 @@ class LedgerEntry {
       lines.fold<double>(0, (double sum, TxnSplit l) => sum + l.amount);
 }
 
-/// Everything the ledger can be narrowed by — three facets and a search term —
-/// as one value.
+/// Everything the ledger can be narrowed by — a period, three facets and a
+/// search term — as one value.
 ///
-/// Together rather than as four loose fields because they travel together
+/// Together rather than as five loose fields because they travel together
 /// everywhere: the shell holds them, the chip strip reads them, and every
 /// change replaces the whole set.
 class LedgerFilters {
   const LedgerFilters({
+    this.months = const <YearMonth>{},
     this.categoryIds = const <int>{},
     this.merchants = const <String>{},
     this.paymentType,
     this.query = '',
   });
+
+  /// Where the ledger opens, and what Clear goes back to.
+  ///
+  /// The default month lives here rather than inside [applyFilters] on purpose:
+  /// the function keeps "no filter means everything", which is what lets every
+  /// test of it stay written as it was, and what makes "all months" expressible
+  /// at all.
+  factory LedgerFilters.defaults(YearMonth current) =>
+      LedgerFilters(months: <YearMonth>{current});
+
+  /// Which months are on show. Empty means every month, consistent with
+  /// [categoryIds] and [merchants] — but unlike them, empty is *not* where the
+  /// app starts. See [isDefaultFor].
+  final Set<YearMonth> months;
 
   final Set<int> categoryIds;
   final Set<String> merchants;
@@ -2064,14 +2158,33 @@ class LedgerFilters {
   final String query;
 
   bool get isEmpty =>
+      months.isEmpty &&
       categoryIds.isEmpty &&
       merchants.isEmpty &&
       paymentType == null &&
       query.isEmpty;
 
+  /// Whether this is the resting state — this month and nothing else — which is
+  /// what decides whether there is a Clear worth offering.
+  ///
+  /// Deliberately not [isEmpty], and the difference matters at both ends. A user
+  /// who has widened to *all* months has an empty set and so is `isEmpty`, yet
+  /// has very much changed something and must be able to get back. A user
+  /// sitting on the current month has a non-empty set and nothing worth
+  /// clearing.
+  bool isDefaultFor(YearMonth current) =>
+      categoryIds.isEmpty &&
+      merchants.isEmpty &&
+      paymentType == null &&
+      query.isEmpty &&
+      months.length == 1 &&
+      months.contains(current);
+
   /// `clearPaymentType` because passing `paymentType: null` cannot say whether
-  /// it means "leave it" or "drop it".
+  /// it means "leave it" or "drop it". [months] needs no such flag: a set says
+  /// "none" with `{}`.
   LedgerFilters copyWith({
+    Set<YearMonth>? months,
     Set<int>? categoryIds,
     Set<String>? merchants,
     String? paymentType,
@@ -2079,6 +2192,7 @@ class LedgerFilters {
     bool clearPaymentType = false,
   }) =>
       LedgerFilters(
+        months: months ?? this.months,
         categoryIds: categoryIds ?? this.categoryIds,
         merchants: merchants ?? this.merchants,
         paymentType:
@@ -2087,30 +2201,38 @@ class LedgerFilters {
       );
 }
 
-/// Narrows the ledger to any combination of categories, merchants, one
+/// Narrows the ledger to any combination of months, categories, merchants, one
 /// card/account and a search term, and projects each surviving transaction down
 /// to the split lines that matched. A null or empty filter means "everything".
 ///
 /// [query] is matched case-insensitively, as a substring, against the note and
 /// the merchant — the only free text a transaction has, one written by the user
-/// and one sent by the bank. It decides which *transactions* survive and never
-/// which lines do: a search term says nothing about categories, so a split that
-/// matches still reports its whole breakdown.
+/// and one sent by the bank.
+///
+/// [months] and [query] and the two name facets all decide which *transactions*
+/// survive and never which lines do. Only the category filter narrows lines,
+/// because it is the only one that says anything about a category: a split that
+/// matches on its month still reports its whole breakdown.
 ///
 /// Pure and top-level so it can be tested without a database behind it.
 List<LedgerEntry> applyFilters(
   List<ExpenseTxn> all, {
+  Set<YearMonth>? months,
   Set<int>? categoryIds,
   Set<String>? merchants,
   String? paymentType,
   String? query,
 }) {
+  final bool byMonth = months != null && months.isNotEmpty;
   final bool byCategory = categoryIds != null && categoryIds.isNotEmpty;
   final bool byMerchant = merchants != null && merchants.isNotEmpty;
   final String needle = (query ?? '').trim().toLowerCase();
 
   final List<LedgerEntry> entries = <LedgerEntry>[];
   for (final ExpenseTxn t in all) {
+    // First because a month is now nearly always in force, and it is both the
+    // cheapest test and by far the most selective one.
+    if (byMonth && !months.contains(YearMonth.fromDate(t.date))) continue;
     if (paymentType != null && t.paymentType != paymentType) continue;
     if (byMerchant && !merchants.contains(t.merchant)) continue;
     if (needle.isNotEmpty &&
@@ -2161,6 +2283,120 @@ Map<String, double> spendByCategory(List<LedgerEntry> entries) {
   return byCategory;
 }
 
+/// Spend by category, per month — what the comparison chart plots.
+///
+/// Same two rules as [spendByCategory], which it defers to per bucket: credits
+/// are left out, and a split is attributed to every category it touches, in the
+/// month it happened.
+Map<YearMonth, Map<String, double>> spendByCategoryPerMonth(
+  List<LedgerEntry> entries,
+) {
+  final Map<YearMonth, List<LedgerEntry>> byMonth =
+      <YearMonth, List<LedgerEntry>>{};
+  for (final LedgerEntry entry in entries) {
+    (byMonth[YearMonth.fromDate(entry.txn.date)] ??= <LedgerEntry>[])
+        .add(entry);
+  }
+  return byMonth.map((YearMonth m, List<LedgerEntry> rows) =>
+      MapEntry<YearMonth, Map<String, double>>(m, spendByCategory(rows)));
+}
+
+/// Spent, received and the row count in one pass, so the header card and the
+/// charts on the same screen cannot disagree about the totals.
+///
+/// Adds the *entry* amount, which under a category filter is only the part that
+/// matched — the same rule the summary header has always followed.
+({double spent, double received, int count}) periodTotals(
+  List<LedgerEntry> entries,
+) {
+  var spent = 0.0;
+  var received = 0.0;
+  for (final LedgerEntry entry in entries) {
+    if (entry.txn.isCredit) {
+      received += entry.amount;
+    } else {
+      spent += entry.amount;
+    }
+  }
+  return (spent: spent, received: received, count: entries.length);
+}
+
+/// The selected months in time order — the series of the comparison chart.
+///
+/// Deliberately *not* gap-filled. The months here are the ones the user picked
+/// to compare, so a month between two of them is not a zero: it is a month they
+/// did not ask about, and drawing it as an empty bar would claim no spend where
+/// there may well have been plenty.
+List<YearMonth> comparedMonths(Set<YearMonth> selected) =>
+    selected.toList()..sort();
+
+/// One slice of the breakdown: a category, what went to it, and its share of
+/// the whole.
+class CategorySlice {
+  const CategorySlice({
+    required this.name,
+    required this.amount,
+    required this.share,
+  });
+
+  final String name;
+  final double amount;
+
+  /// 0–1 of the period's spend. Zero when nothing was spent at all, rather
+  /// than a division by zero.
+  final double share;
+}
+
+/// The name the tail of the breakdown is folded under.
+const String kOtherCategory = 'Other';
+
+/// The breakdown as at most [limit] slices, descending: the largest
+/// `limit - 1` categories and one "Other" holding everything else.
+///
+/// A donut with a thirtieth 0.2% sliver is unreadable, which is the whole
+/// reason for the cap — but the remainder is shown rather than dropped, so the
+/// slices still sum to what was spent and the chart cannot quietly disagree
+/// with the total printed above it.
+///
+/// Nothing is invented: a breakdown already within the cap comes back as it is,
+/// with no empty "Other" appended.
+List<CategorySlice> topCategories(
+  Map<String, double> byCategory, {
+  int limit = 6,
+}) {
+  final List<MapEntry<String, double>> ranked = byCategory.entries
+      .where((MapEntry<String, double> e) => e.value > 0)
+      .toList()
+    ..sort((MapEntry<String, double> a, MapEntry<String, double> b) =>
+        b.value.compareTo(a.value));
+  if (ranked.isEmpty) return const <CategorySlice>[];
+
+  final double total =
+      ranked.fold<double>(0, (double sum, MapEntry<String, double> e) => sum + e.value);
+  double shareOf(double amount) => total == 0 ? 0 : amount / total;
+
+  if (ranked.length <= limit) {
+    return <CategorySlice>[
+      for (final MapEntry<String, double> e in ranked)
+        CategorySlice(name: e.key, amount: e.value, share: shareOf(e.value)),
+    ];
+  }
+
+  final List<MapEntry<String, double>> head = ranked.take(limit - 1).toList();
+  final double tail = ranked
+      .skip(limit - 1)
+      .fold<double>(0, (double sum, MapEntry<String, double> e) => sum + e.value);
+  return <CategorySlice>[
+    for (final MapEntry<String, double> e in head)
+      CategorySlice(name: e.key, amount: e.value, share: shareOf(e.value)),
+    CategorySlice(
+      name: kOtherCategory,
+      amount: tail,
+      share: shareOf(tail),
+    ),
+  ];
+}
+
 /// Every merchant the ledger has seen that survives *the other* filters,
 /// alphabetically.
 ///
@@ -2168,11 +2404,13 @@ Map<String, double> spendByCategory(List<LedgerEntry> entries) {
 /// not — see [categoryOptions] for why.
 List<String> merchantOptions(
   List<ExpenseTxn> all, {
+  Set<YearMonth>? months,
   Set<int>? categoryIds,
   String? paymentType,
 }) {
   final List<String> merchants = applyFilters(
     all,
+    months: months,
     categoryIds: categoryIds,
     paymentType: paymentType,
   ).map((LedgerEntry e) => e.txn.merchant).toSet().toList()
@@ -2196,12 +2434,14 @@ List<String> merchantOptions(
 List<ExpenseCategory> categoryOptions(
   List<ExpenseTxn> all,
   List<ExpenseCategory> categories, {
+  Set<YearMonth>? months,
   Set<String>? merchants,
   String? paymentType,
 }) {
   final Set<int> used = <int>{};
   for (final LedgerEntry entry in applyFilters(
     all,
+    months: months,
     merchants: merchants,
     paymentType: paymentType,
   )) {
@@ -2212,14 +2452,76 @@ List<ExpenseCategory> categoryOptions(
   return categories.where((ExpenseCategory c) => used.contains(c.id)).toList();
 }
 
+/// The months on offer, newest first — every month the ledger touches under
+/// *the other* filters, plus [current] and everything in [keep] whether or not
+/// anything falls in them.
+///
+/// Those two extras are what stop the month filter from eating itself, and they
+/// are not a nicety. A month with nothing in it is a legitimate answer —
+/// "nothing yet this month" — and on the 1st it is the *default* answer. Derive
+/// the list from the data alone and the default option would not exist; the
+/// selection would then be pruned away, and an empty month set means *every*
+/// month, so asking for one empty month would show the user three years.
+///
+/// [keep] holds whatever is currently selected, so a user who has navigated
+/// back to March can always get to August again.
+///
+/// Newest first because recent months are the ones anyone wants.
+List<YearMonth> monthOptions(
+  List<ExpenseTxn> all, {
+  required YearMonth current,
+  Set<YearMonth> keep = const <YearMonth>{},
+  Set<int>? categoryIds,
+  Set<String>? merchants,
+  String? paymentType,
+}) {
+  final Set<YearMonth> months = <YearMonth>{
+    current,
+    ...keep,
+    ...applyFilters(
+      all,
+      categoryIds: categoryIds,
+      merchants: merchants,
+      paymentType: paymentType,
+    ).map((LedgerEntry e) => YearMonth.fromDate(e.txn.date)),
+  };
+  return months.toList()..sort((YearMonth a, YearMonth b) => b.compareTo(a));
+}
+
 /// Drops selections that no longer exist among [available].
 ///
 /// A selection can outlive its data — delete the last transaction on a card and
 /// that card is gone from the list — and narrowing one facet can retire options
 /// in another.
+///
+/// Months are deliberately never put through this — see [monthOptions].
 Set<T> pruneSelection<T>(Set<T> selected, Iterable<T> available) {
   final Set<T> keep = available.toSet();
   return selected.where(keep.contains).toSet();
+}
+
+/// Why the list has nothing in it — the only thing that decides what the screen
+/// says and what it offers to do about it.
+enum EmptyReason { ledgerEmpty, search, facets, month }
+
+/// Which of the four to blame.
+///
+/// The order is the point. A month is always in force now, so it would "explain"
+/// every empty list if asked first — and sending someone off to change the month
+/// when the real cause is a typo in the search box is worse than saying nothing.
+/// So the month is blamed last, only once nothing else is narrowing anything.
+EmptyReason emptyReason(
+  LedgerFilters filters, {
+  required bool ledgerIsEmpty,
+}) {
+  if (ledgerIsEmpty) return EmptyReason.ledgerEmpty;
+  if (filters.query.trim().isNotEmpty) return EmptyReason.search;
+  if (filters.categoryIds.isNotEmpty ||
+      filters.merchants.isNotEmpty ||
+      filters.paymentType != null) {
+    return EmptyReason.facets;
+  }
+  return EmptyReason.month;
 }
 
 /// The orders the ledger can be read in. [newest] is what the database already
@@ -2577,16 +2879,41 @@ String cleanNote(String raw) {
 /// What one pass over the inbox did. [skipped] counts alerts that parsed but
 /// were already recorded or had been deleted.
 class _ScanResult {
-  const _ScanResult({required this.added, required this.skipped});
+  const _ScanResult({
+    required this.added,
+    required this.skipped,
+    required this.addedInView,
+  });
 
   final int added;
   final int skipped;
+
+  /// How many of [added] fall in the months the ledger is currently showing.
+  /// Less than [added] means rows landed somewhere the user cannot see.
+  final int addedInView;
 }
 
-/// One ledger, one screen: filter it, sort it, categorise, split and delete
-/// from it. Settings sits alongside as the only other destination. This shell
-/// owns the data and the view over it; the tabs only render what they are
-/// handed.
+/// The three destinations, **in bar order — which is also `IndexedStack` order**.
+///
+/// An enum rather than bare indices because four separate places used to
+/// hardcode `0` and `1`, and inserting a tab between them is exactly the change
+/// that makes such a number mean something else without saying so. Same move
+/// [LedgerSort] and [NameKind] already make.
+enum HomeTab {
+  dashboard('Dashboard', Icons.pie_chart_outline, Icons.pie_chart),
+  transactions('Transactions', Icons.receipt_long_outlined, Icons.receipt_long),
+  settings('Settings', Icons.settings_outlined, Icons.settings);
+
+  const HomeTab(this.label, this.icon, this.selectedIcon);
+
+  final String label;
+  final IconData icon;
+  final IconData selectedIcon;
+}
+
+/// One ledger, three screens: the charts over it, the list itself — filter,
+/// sort, categorise, split and delete — and Settings. This shell owns the data
+/// and the view over it; the tabs only render what they are handed.
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -2606,13 +2933,32 @@ class _HomeShellState extends State<HomeShell> {
   List<ExpenseCategory> _categories = <ExpenseCategory>[];
   bool _loading = true;
   bool _scanning = false;
-  int _tab = 0;
+  HomeTab _tab = HomeTab.dashboard;
+
+  /// The month the app considers "now". Refreshed on every load rather than
+  /// read in `build`: it decides where Clear goes back to and which month is
+  /// always on offer, and a `DateTime.now()` per build would roll those answers
+  /// over mid-frame at midnight and be unpinnable in a test.
+  YearMonth _currentMonth = YearMonth.current();
 
   /// How the ledger is narrowed and ordered. Held here rather than in the tab
   /// because the selection app bar — built here — has to know which rows are on
   /// screen before it can offer to select or delete "all" of them.
-  LedgerFilters _filters = const LedgerFilters();
+  ///
+  /// Assigned in [initState] so it and [_currentMonth] cannot disagree — a
+  /// field initialiser cannot refer to another field.
+  late LedgerFilters _filters;
   LedgerSort _sort = LedgerSort.newest;
+
+  /// The Dashboard's own period, deliberately not the ledger's.
+  ///
+  /// The charts exist to compare several months; the list opens on one and is
+  /// scrubbed around in. Sharing one field would mean building a three-month
+  /// comparison silently dumped three months of rows into the list, and a
+  /// scrubbing session silently repointed the charts — and because the two tabs
+  /// live in an `IndexedStack` and stay alive, neither would be noticed until
+  /// the user switched back.
+  late Set<YearMonth> _dashboardMonths;
 
   /// Ids marked for deletion. Lives here rather than in the tab because the app
   /// bar it takes over is built here.
@@ -2621,6 +2967,15 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void initState() {
     super.initState();
+    // The `IndexedStack` in `build` is written out by hand while the
+    // `NavigationBar` is generated from the enum, so a destination added
+    // without a child would silently show the wrong screen. Fail loudly here
+    // instead.
+    assert(HomeTab.values.length == 3, 'HomeTab and IndexedStack are out of step');
+    // One reading of the clock for all three, so they cannot disagree.
+    _currentMonth = YearMonth.current();
+    _filters = LedgerFilters.defaults(_currentMonth);
+    _dashboardMonths = <YearMonth>{_currentMonth};
     _load();
     _startSms();
     _checkForUpdates();
@@ -2635,6 +2990,10 @@ class _HomeShellState extends State<HomeShell> {
     setState(() {
       _transactions = results[0] as List<ExpenseTxn>;
       _categories = results[1] as List<ExpenseCategory>;
+      // An app left open across midnight on the last of the month rolls over
+      // here, on the next refresh, scan or return from Settings — deterministic
+      // and never mid-build.
+      _currentMonth = YearMonth.current();
       _loading = false;
     });
   }
@@ -2677,6 +3036,10 @@ class _HomeShellState extends State<HomeShell> {
       DateTime? newest;
       var added = 0;
       var skipped = 0;
+      // Counted so the toast can say how many of them the list will actually
+      // show. A full rescan mostly imports older months, and "Imported 214"
+      // over an unchanged list is alarming rather than informative.
+      var addedInView = 0;
       for (final sms in messages) {
         final at = sms.receivedAt;
         if (at != null && (newest == null || at.isAfter(newest))) newest = at;
@@ -2684,7 +3047,15 @@ class _HomeShellState extends State<HomeShell> {
         final parsed = SmsParser.parse(sms.body, receivedAt: at);
         if (parsed == null) continue; // OTP, promo, statement alert
         final id = await _db.insertParsed(parsed);
-        id == 0 ? skipped++ : added++;
+        if (id == 0) {
+          skipped++;
+          continue;
+        }
+        added++;
+        if (_filters.months.isEmpty ||
+            _filters.months.contains(YearMonth.fromDate(parsed.date))) {
+          addedInView++;
+        }
       }
 
       // Advance from the newest message actually seen rather than from the
@@ -2700,7 +3071,8 @@ class _HomeShellState extends State<HomeShell> {
       }
 
       await _load();
-      return _ScanResult(added: added, skipped: skipped);
+      return _ScanResult(
+          added: added, skipped: skipped, addedInView: addedInView);
     } finally {
       if (mounted) setState(() => _scanning = false);
     }
@@ -2725,10 +3097,16 @@ class _HomeShellState extends State<HomeShell> {
     final result = await _scan(since: since);
     if (result == null) return; // a scan was already running
 
-    _toast(result.added == 0 && result.skipped == 0
-        ? 'No new bank messages found.'
-        : 'Imported ${result.added} new transaction(s), skipped '
-            '${result.skipped} already recorded or deleted.');
+    if (result.added == 0 && result.skipped == 0) {
+      _toast('No new bank messages found.');
+      return;
+    }
+    // Only worth saying when the two numbers differ — otherwise it is noise.
+    final String elsewhere = result.added > result.addedInView
+        ? ' · ${result.addedInView} in ${periodLabel(_filters.months)}'
+        : '';
+    _toast('Imported ${result.added} new transaction(s), skipped '
+        '${result.skipped} already recorded or deleted.$elsewhere');
   }
 
   // -------------------------------------------------------------------------
@@ -2747,7 +3125,21 @@ class _HomeShellState extends State<HomeShell> {
     final verb = parsed.isCredit ? 'Received' : 'Added';
     _toast(id == 0
         ? 'Already recorded or deleted: ${parsed.merchant}'
-        : '$verb ${_money.format(parsed.amount)} · ${parsed.merchant}');
+        : '$verb ${_money.format(parsed.amount)} · ${parsed.merchant}'
+            '${_outOfViewSuffix(parsed.date)}');
+  }
+
+  /// Names the month when a row has just been imported into one the list is not
+  /// showing.
+  ///
+  /// Without it, adding a transaction dated last month says "Added ₹450 ·
+  /// SWIGGY" over a list where nothing appeared — which reads as the app having
+  /// lost it. Saying where it went is better than silently widening the
+  /// selection the user chose.
+  String _outOfViewSuffix(DateTime date) {
+    final YearMonth month = YearMonth.fromDate(date);
+    if (_filters.months.isEmpty || _filters.months.contains(month)) return '';
+    return ' · in ${month.label}';
   }
 
   /// Step 5: persist the merchant -> category mapping and backfill history.
@@ -3029,8 +3421,8 @@ class _HomeShellState extends State<HomeShell> {
       builder: (_) => MergeNamesScreen(
         kind: kind,
         preselect: preselect,
-        // Unlike the Settings route, this one comes off the Dashboard, which is
-        // still underneath and holding the old names.
+        // Unlike the Settings route, this one comes off the transaction list,
+        // which is still underneath and holding the old names.
         onChanged: _load,
       ),
     ));
@@ -3115,39 +3507,51 @@ class _HomeShellState extends State<HomeShell> {
   /// build: what each facet can still offer, the filters with anything stale
   /// dropped, and the rows that survive them in the chosen order.
   ({
+    List<YearMonth> months,
     List<ExpenseCategory> categories,
     List<String> merchants,
     List<String> paymentTypes,
     LedgerFilters filters,
     List<LedgerEntry> visible,
   }) _derive() {
-    // Every card and account the ledger has seen. Derived from the loaded rows
-    // rather than queried, so it stays in step with the list for free.
-    final List<String> paymentTypes = _transactions
-        .map((ExpenseTxn t) => t.paymentType)
-        .toSet()
-        .toList()
+    // Every card and account within the chosen months. Derived from the loaded
+    // rows rather than queried, so it stays in step with the list for free.
+    final List<String> paymentTypes = applyFilters(
+      _transactions,
+      months: _filters.months,
+    ).map((LedgerEntry e) => e.txn.paymentType).toSet().toList()
       ..sort();
 
-    // Each facet offers what the *other* filters leave available, so the two
-    // narrow each other without either being able to empty itself out from
+    // Each facet offers what the *other* filters leave available, so they
+    // narrow each other without any one being able to empty itself out from
     // under a selection already made in it.
     //
-    // The search query is deliberately not one of those filters. It feeds the
-    // visible list below and nothing else: were it passed here it would retire
-    // facet options as the user typed, and `pruneSelection` would then throw
-    // away the category or merchant they had already picked — a keystroke
-    // silently clearing a filter, and clearing the search box would not bring
-    // it back.
+    // The month is one of those filters, unlike the search query. The reason
+    // the query is excluded is a mechanism, not a rule about filters: it is
+    // free text changing on every keystroke, so pruning driven by it would
+    // destroy a deliberate chip choice with no way back. A month is a discrete,
+    // sticky choice from a list — structurally the card facet. And excluding it
+    // would break this function's own promise, since in August the category
+    // chip would go on offering every category the ledger has ever seen.
     final List<ExpenseCategory> categories = categoryOptions(
       _transactions,
       _categories,
+      months: _filters.months,
       merchants: _filters.merchants,
       paymentType: _filters.paymentType,
     );
     final List<String> merchants = merchantOptions(
       _transactions,
+      months: _filters.months,
       categoryIds: _filters.categoryIds,
+      paymentType: _filters.paymentType,
+    );
+    final List<YearMonth> months = monthOptions(
+      _transactions,
+      current: _currentMonth,
+      keep: _filters.months,
+      categoryIds: _filters.categoryIds,
+      merchants: _filters.merchants,
       paymentType: _filters.paymentType,
     );
 
@@ -3163,13 +3567,19 @@ class _HomeShellState extends State<HomeShell> {
       paymentType: paymentTypes.contains(_filters.paymentType)
           ? _filters.paymentType
           : null,
-      // Rebuilt field by field, so the query has to be carried explicitly.
-      // Nothing prunes it: it is text the user is still typing, not a choice
-      // made from a list that the data could retire underneath them.
+      // Carried, never pruned — and this is the load-bearing line of the whole
+      // month feature. For the other facets a stale selection means filtering
+      // on a value nothing carries. A month matching nothing is not stale:
+      // "nothing yet this month" is true, useful, and the right answer on the
+      // 1st of every month. Prune it and the set goes empty, and an empty set
+      // means *every* month — so asking for one quiet month would show years.
+      months: _filters.months,
+      // Rebuilt field by field, so the query has to be carried explicitly too.
       query: _filters.query,
     );
 
     return (
+      months: months,
       categories: categories,
       merchants: merchants,
       paymentTypes: paymentTypes,
@@ -3177,6 +3587,7 @@ class _HomeShellState extends State<HomeShell> {
       visible: sortEntries(
         applyFilters(
           _transactions,
+          months: filters.months,
           categoryIds: filters.categoryIds,
           merchants: filters.merchants,
           paymentType: filters.paymentType,
@@ -3217,7 +3628,7 @@ class _HomeShellState extends State<HomeShell> {
 
   AppBar _normalAppBar() {
     return AppBar(
-      title: const Text('Dashboard'),
+      title: const Text('Transactions'),
       actions: <Widget>[
         if (_scanning)
           const Center(
@@ -3263,10 +3674,11 @@ class _HomeShellState extends State<HomeShell> {
   /// Settings can change what the ledger says — Merchants & defaults backfills
   /// a category over history — so coming back from it reloads rather than
   /// showing rows still carrying the categories they had on the way in.
-  void _selectTab(int index) {
-    final bool leavingSettings = _tab == 1 && index != 1;
+  void _selectTab(HomeTab tab) {
+    final bool leavingSettings =
+        _tab == HomeTab.settings && tab != HomeTab.settings;
     setState(() {
-      _tab = index;
+      _tab = tab;
       // Marks are about rows on the ledger; leaving it drops them.
       _selected.clear();
     });
@@ -3275,7 +3687,7 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   Widget build(BuildContext context) {
-    final bool onLedger = _tab == 0;
+    final bool onLedger = _tab == HomeTab.transactions;
     final bool selecting = _selected.isNotEmpty;
     final view = _derive();
 
@@ -3286,20 +3698,46 @@ class _HomeShellState extends State<HomeShell> {
         if (!didPop) _clearSelection();
       },
       child: Scaffold(
+        // Selection only ever happens on the ledger, so it outranks the tab.
         appBar: selecting
             ? _selectionAppBar(view.visible)
-            : onLedger
-                ? _normalAppBar()
-                : AppBar(title: const Text('Settings')),
+            : switch (_tab) {
+                HomeTab.dashboard => AppBar(title: const Text('Dashboard')),
+                // The scan and Deleted actions live here and only here. Two
+                // entry points to a mutating action on two screens is a footgun.
+                HomeTab.transactions => _normalAppBar(),
+                HomeTab.settings => AppBar(title: const Text('Settings')),
+              },
         // IndexedStack rather than a swap, so switching tabs keeps the ledger's
         // scroll position and Settings' loaded state.
+        //
+        // These children MUST stay in `HomeTab.values` order — position is the
+        // index, and nothing in the type system says so. The assert in
+        // `initState` catches a destination added without a child.
         body: IndexedStack(
-          index: _tab,
+          index: _tab.index,
           children: <Widget>[
             DashboardTab(
+              transactions: _transactions,
+              months: _dashboardMonths,
+              monthChoices: monthOptions(
+                _transactions,
+                current: _currentMonth,
+                keep: _dashboardMonths,
+              ),
+              currentMonth: _currentMonth,
+              money: _money,
+              loading: _loading,
+              onMonthsChanged: (Set<YearMonth> m) =>
+                  setState(() => _dashboardMonths = m),
+              onRefresh: _load,
+            ),
+            TransactionsTab(
               entries: view.visible,
               filters: view.filters,
               sort: _sort,
+              monthChoices: view.months,
+              currentMonth: _currentMonth,
               categoryChoices: view.categories,
               merchantChoices: view.merchants,
               paymentTypeChoices: view.paymentTypes,
@@ -3329,18 +3767,602 @@ class _HomeShellState extends State<HomeShell> {
               )
             : null,
         bottomNavigationBar: NavigationBar(
-          selectedIndex: _tab,
-          onDestinationSelected: _selectTab,
-          destinations: const <NavigationDestination>[
-            NavigationDestination(
-              icon: Icon(Icons.dashboard_outlined),
-              selectedIcon: Icon(Icons.dashboard),
-              label: 'Dashboard',
+          selectedIndex: _tab.index,
+          onDestinationSelected: (int i) => _selectTab(HomeTab.values[i]),
+          destinations: <NavigationDestination>[
+            for (final HomeTab tab in HomeTab.values)
+              NavigationDestination(
+                icon: Icon(tab.icon),
+                selectedIcon: Icon(tab.selectedIcon),
+                label: tab.label,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SHARED CONTROLS — used by both the ledger and the charts
+// ---------------------------------------------------------------------------
+
+/// Lets the user tick several of [options] at once, returning the new selection
+/// or null if they backed out.
+///
+/// Top-level rather than a method on one tab, because both tabs ask this same
+/// question and a second copy would be a second thing to keep in step.
+Future<Set<T>?> chooseMany<T>(
+  BuildContext context, {
+  required String title,
+  required List<T> options,
+  required Set<T> selected,
+  required String Function(T) label,
+  Widget Function(T)? leading,
+}) =>
+    showModalBottomSheet<Set<T>>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (BuildContext context) => _MultiSelectSheet<T>(
+        title: title,
+        options: options,
+        selected: selected,
+        label: label,
+        leading: leading,
+      ),
+    );
+
+/// How many months may be compared at once. Past this the bars are too thin to
+/// read, and the legend longer than the chart.
+const int kMaxComparedMonths = 6;
+
+/// The period control: which months a screen is showing, and the two ways to
+/// change it.
+///
+/// Not a chip in the filter strip, for two reasons. The strip scrolls
+/// horizontally and its first chip can read "Amount: high to low", so a fifth
+/// item would sit past the fold — for the control that answers the very first
+/// question anyone has about the screen, and on which every total now depends.
+/// And a filter chip with nothing selected reads as "not filtering", which a
+/// month never is: there is always one in force.
+///
+/// The steppers are here because moving one month at a time is the common
+/// gesture and a modal sheet is a heavy way to do it. They are hidden rather
+/// than disabled in a multi-selection, where "the previous month" means nothing.
+class _PeriodBar extends StatelessWidget {
+  const _PeriodBar({
+    required this.months,
+    required this.options,
+    required this.currentMonth,
+    required this.onChanged,
+  });
+
+  final Set<YearMonth> months;
+  final List<YearMonth> options;
+  final YearMonth currentMonth;
+  final ValueChanged<Set<YearMonth>> onChanged;
+
+  bool get _single => months.length == 1;
+
+  Future<void> _pick(BuildContext context) async {
+    final Set<YearMonth>? picked = await chooseMany<YearMonth>(
+      context,
+      title: 'Months',
+      options: options,
+      selected: months,
+      label: (YearMonth m) => m.label,
+    );
+    if (picked == null) return;
+    // Nothing ticked reads as "show me everything", which is what an empty set
+    // already means everywhere else.
+    onChanged(picked.length <= kMaxComparedMonths
+        ? picked
+        // Keep the most recent, since that is what anyone comparing wants.
+        : (picked.toList()
+              ..sort((YearMonth a, YearMonth b) => b.compareTo(a)))
+            .take(kMaxComparedMonths)
+            .toSet());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final YearMonth? only = _single ? months.first : null;
+    // Offering the future is offering the empty.
+    final bool canGoForward = only != null && only.compareTo(currentMonth) < 0;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      child: Row(
+        children: <Widget>[
+          if (only != null)
+            IconButton(
+              tooltip: 'Previous month',
+              icon: const Icon(Icons.chevron_left),
+              onPressed: () => onChanged(<YearMonth>{only.plus(-1)}),
             ),
-            NavigationDestination(
-              icon: Icon(Icons.settings_outlined),
-              selectedIcon: Icon(Icons.settings),
-              label: 'Settings',
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: () => _pick(context),
+              icon: const Icon(Icons.calendar_month_outlined, size: 18),
+              label: Text(
+                periodLabel(months),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.labelLarge,
+              ),
+            ),
+          ),
+          if (only != null)
+            IconButton(
+              tooltip: 'Next month',
+              icon: const Icon(Icons.chevron_right),
+              onPressed:
+                  canGoForward ? () => onChanged(<YearMonth>{only.plus(1)}) : null,
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DASHBOARD TAB — the same ledger as charts: where the money went, per month
+// ---------------------------------------------------------------------------
+
+/// Where the money went over a chosen period.
+///
+/// Reads the whole ledger and narrows it by month **and nothing else**. It
+/// deliberately does not inherit the transaction list's category, merchant,
+/// card or search filters: a breakdown steered by a working list's filter state
+/// is not a report, and a pie chart of a single category is not a chart.
+class DashboardTab extends StatelessWidget {
+  const DashboardTab({
+    super.key,
+    required this.transactions,
+    required this.months,
+    required this.monthChoices,
+    required this.currentMonth,
+    required this.money,
+    required this.loading,
+    required this.onMonthsChanged,
+    required this.onRefresh,
+  });
+
+  final List<ExpenseTxn> transactions;
+  final Set<YearMonth> months;
+  final List<YearMonth> monthChoices;
+  final YearMonth currentMonth;
+  final NumberFormat money;
+  final bool loading;
+  final ValueChanged<Set<YearMonth>> onMonthsChanged;
+  final Future<void> Function() onRefresh;
+
+  @override
+  Widget build(BuildContext context) {
+    final List<LedgerEntry> entries =
+        applyFilters(transactions, months: months);
+    final totals = periodTotals(entries);
+    final Map<String, double> byCategory = spendByCategory(entries);
+
+    return Column(
+      children: <Widget>[
+        _PeriodBar(
+          months: months,
+          options: monthChoices,
+          currentMonth: currentMonth,
+          onChanged: onMonthsChanged,
+        ),
+        Expanded(
+          child: loading
+              ? const Center(child: CircularProgressIndicator())
+              : RefreshIndicator(
+                  onRefresh: onRefresh,
+                  child: ListView(
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+                    children: <Widget>[
+                      _SpendHeadline(
+                        spent: totals.spent,
+                        received: totals.received,
+                        count: totals.count,
+                        period: periodLabel(months),
+                        money: money,
+                      ),
+                      if (byCategory.isEmpty)
+                        _NothingToChart(period: periodLabel(months))
+                      // One month is a part-to-whole question and a donut
+                      // answers it at a glance. Several months is a comparison,
+                      // which a donut cannot answer at all — nobody can compare
+                      // angles across two circles — so the shape changes.
+                      else if (months.length <= 1)
+                        _CategoryDonutCard(
+                          byCategory: byCategory,
+                          total: totals.spent,
+                          money: money,
+                        )
+                      else
+                        _MonthComparisonCard(
+                          entries: entries,
+                          months: months,
+                          money: money,
+                        ),
+                    ],
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+/// The one number the screen leads with.
+class _SpendHeadline extends StatelessWidget {
+  const _SpendHeadline({
+    required this.spent,
+    required this.received,
+    required this.count,
+    required this.period,
+    required this.money,
+  });
+
+  final double spent;
+  final double received;
+  final int count;
+  final String period;
+  final NumberFormat money;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('$period · Total spent', style: theme.textTheme.labelLarge),
+            const SizedBox(height: 4),
+            Text(
+              money.format(spent),
+              style: theme.textTheme.headlineLarge?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: theme.colorScheme.primary,
+              ),
+            ),
+            if (received > 0) ...<Widget>[
+              const SizedBox(height: 8),
+              Row(
+                children: <Widget>[
+                  Text('Received ', style: theme.textTheme.bodyMedium),
+                  Text(
+                    money.format(received),
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      fontWeight: FontWeight.bold,
+                      color: creditColor(theme),
+                    ),
+                  ),
+                  Text('  ·  Net ', style: theme.textTheme.bodyMedium),
+                  Text(
+                    money.format(spent - received),
+                    style: theme.textTheme.bodyMedium
+                        ?.copyWith(fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 4),
+            Text(
+              '$count transaction${count == 1 ? '' : 's'}',
+              style: theme.textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A donut over the period's categories, with the ranked amounts beside it.
+///
+/// The list is not decoration and not merely a legend. A donut is honest about
+/// part-to-whole at a glance and useless for comparing two close values, so the
+/// exact figures have to be readable somewhere — and that is also what keeps
+/// the chart legible for anyone who cannot separate two of the hues.
+class _CategoryDonutCard extends StatelessWidget {
+  const _CategoryDonutCard({
+    required this.byCategory,
+    required this.total,
+    required this.money,
+  });
+
+  final Map<String, double> byCategory;
+  final double total;
+  final NumberFormat money;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final Brightness brightness = theme.brightness;
+    final List<CategorySlice> slices = topCategories(byCategory);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('Where it went', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 180,
+              child: PieChart(
+                PieChartData(
+                  sectionsSpace: 2, // a surface gap, so adjacent arcs separate
+                  centerSpaceRadius: 52,
+                  sections: <PieChartSectionData>[
+                    for (final CategorySlice slice in slices)
+                      PieChartSectionData(
+                        value: slice.amount,
+                        color: categoryColor(slice.name, brightness),
+                        radius: 34,
+                        showTitle: false,
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            for (final CategorySlice slice in slices)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: <Widget>[
+                    Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: categoryColor(slice.name, brightness),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Icon(categoryIcon(slice.name),
+                        size: 16, color: theme.colorScheme.onSurfaceVariant),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        slice.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodyMedium,
+                      ),
+                    ),
+                    Text(
+                      '${(slice.share * 100).round()}%',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      money.format(slice.amount),
+                      style: theme.textTheme.bodyMedium
+                          ?.copyWith(fontWeight: FontWeight.w600),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The same spend, several months at a time: one group per category, one bar
+/// per month within it.
+///
+/// Months are the series here, not categories — the question this chart answers
+/// is "did this go up or down", so it is the months that have to be told apart.
+class _MonthComparisonCard extends StatelessWidget {
+  const _MonthComparisonCard({
+    required this.entries,
+    required this.months,
+    required this.money,
+  });
+
+  final List<LedgerEntry> entries;
+  final Set<YearMonth> months;
+  final NumberFormat money;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final Brightness brightness = theme.brightness;
+
+    final Map<YearMonth, Map<String, double>> perMonth =
+        spendByCategoryPerMonth(entries);
+    final List<YearMonth> axis = comparedMonths(months);
+    // The categories worth drawing, ranked over the whole period so the groups
+    // are in a stable, meaningful order rather than one month's order.
+    final List<CategorySlice> ranked = topCategories(
+      spendByCategory(entries),
+      limit: 6,
+    );
+    final List<Color> monthColors = brightness == Brightness.dark
+        ? _chartHuesDark
+        : _chartHuesLight;
+
+    double amountFor(YearMonth m, String category) =>
+        perMonth[m]?[category] ?? 0;
+
+    // "Other" is a bucket, not a category, so it cannot be looked up per month.
+    final List<CategorySlice> groups = ranked
+        .where((CategorySlice s) => s.name != kOtherCategory)
+        .toList();
+
+    final double maxY = <double>[
+      for (final CategorySlice s in groups)
+        for (final YearMonth m in axis) amountFor(m, s.name),
+      1,
+    ].reduce((double a, double b) => a > b ? a : b);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('Month by month', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text(
+              'Spend per category, one bar per month.',
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 16),
+            // A legend is not optional with more than one series: it is the
+            // only thing naming which bar is which month.
+            Wrap(
+              spacing: 12,
+              runSpacing: 6,
+              children: <Widget>[
+                for (int i = 0; i < axis.length; i++)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Container(
+                        width: 12,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: monthColors[i % monthColors.length],
+                          borderRadius: BorderRadius.circular(3),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(axis[i].label, style: theme.textTheme.bodySmall),
+                    ],
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              height: 240,
+              child: BarChart(
+                BarChartData(
+                  maxY: maxY * 1.15,
+                  alignment: BarChartAlignment.spaceAround,
+                  // Hairline horizontal grid only; vertical rules would just be
+                  // noise between groups that are already separated by space.
+                  gridData: FlGridData(
+                    show: true,
+                    drawVerticalLine: false,
+                    getDrawingHorizontalLine: (double v) => FlLine(
+                      color: theme.colorScheme.outlineVariant,
+                      strokeWidth: 1,
+                    ),
+                  ),
+                  borderData: FlBorderData(show: false),
+                  titlesData: FlTitlesData(
+                    topTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false)),
+                    rightTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false)),
+                    leftTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false)),
+                    bottomTitles: AxisTitles(
+                      sideTitles: SideTitles(
+                        showTitles: true,
+                        reservedSize: 42,
+                        getTitlesWidget: (double value, TitleMeta meta) {
+                          final int i = value.toInt();
+                          if (i < 0 || i >= groups.length) {
+                            return const SizedBox.shrink();
+                          }
+                          return Padding(
+                            padding: const EdgeInsets.only(top: 6),
+                            child: Text(
+                              groups[i].name,
+                              maxLines: 2,
+                              textAlign: TextAlign.center,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.labelSmall,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                  barTouchData: BarTouchData(
+                    touchTooltipData: BarTouchTooltipData(
+                      getTooltipItem: (BarChartGroupData group, int groupIndex,
+                          BarChartRodData rod, int rodIndex) {
+                        return BarTooltipItem(
+                          '${axis[rodIndex].label}\n'
+                          '${groups[groupIndex].name} ${money.format(rod.toY)}',
+                          theme.textTheme.bodySmall ?? const TextStyle(),
+                        );
+                      },
+                    ),
+                  ),
+                  barGroups: <BarChartGroupData>[
+                    for (int g = 0; g < groups.length; g++)
+                      BarChartGroupData(
+                        x: g,
+                        barsSpace: 2,
+                        barRods: <BarChartRodData>[
+                          for (int i = 0; i < axis.length; i++)
+                            BarChartRodData(
+                              toY: amountFor(axis[i], groups[g].name),
+                              width: 10,
+                              color: monthColors[i % monthColors.length],
+                              borderRadius: const BorderRadius.vertical(
+                                top: Radius.circular(4),
+                              ),
+                            ),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A period with no spend in it. Says so plainly rather than drawing an empty
+/// circle, which would read as a rendering failure.
+class _NothingToChart extends StatelessWidget {
+  const _NothingToChart({required this.period});
+
+  final String period;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          children: <Widget>[
+            Icon(Icons.pie_chart_outline,
+                size: 56, color: theme.colorScheme.outline),
+            const SizedBox(height: 16),
+            Text(
+              'Nothing spent in $period',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Pick another month, or add a transaction from the '
+              'Transactions tab.',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodySmall,
             ),
           ],
         ),
@@ -3350,21 +4372,24 @@ class _HomeShellState extends State<HomeShell> {
 }
 
 // ---------------------------------------------------------------------------
-// DASHBOARD TAB — the whole ledger: filtered, sorted, and editable in place
+// TRANSACTIONS TAB — the whole ledger: filtered, sorted, and editable in place
 // ---------------------------------------------------------------------------
 
-/// The one screen over the ledger.
+/// The screen over the ledger itself. (The Dashboard tab is the same rows as
+/// charts; this is the rows.)
 ///
 /// It renders and nothing more: the shell works out which rows survive the
 /// filters and in what order, and owns the marks, so that the app bar — which
 /// the shell builds — and this list can never disagree about what "all of them"
 /// means.
-class DashboardTab extends StatelessWidget {
-  const DashboardTab({
+class TransactionsTab extends StatelessWidget {
+  const TransactionsTab({
     super.key,
     required this.entries,
     required this.filters,
     required this.sort,
+    required this.monthChoices,
+    required this.currentMonth,
     required this.categoryChoices,
     required this.merchantChoices,
     required this.paymentTypeChoices,
@@ -3387,10 +4412,15 @@ class DashboardTab extends StatelessWidget {
   final LedgerFilters filters;
   final LedgerSort sort;
 
-  /// What each facet can still offer under the other two.
+  /// What each facet can still offer under the others.
+  final List<YearMonth> monthChoices;
   final List<ExpenseCategory> categoryChoices;
   final List<String> merchantChoices;
   final List<String> paymentTypeChoices;
+
+  /// The month the app considers "now" — where Clear goes back to, and the
+  /// furthest the period stepper will go forward.
+  final YearMonth currentMonth;
 
   final NumberFormat money;
   final DateFormat dateFormat;
@@ -3409,29 +4439,6 @@ class DashboardTab extends StatelessWidget {
   final void Function(ExpenseTxn) onTap;
   final void Function(ExpenseTxn) onToggleSelected;
   final void Function(ExpenseTxn) onDelete;
-
-  /// Lets the user tick several of [options] at once, returning the new
-  /// selection or null if they backed out.
-  Future<Set<T>?> _chooseMany<T>(
-    BuildContext context, {
-    required String title,
-    required List<T> options,
-    required Set<T> selected,
-    required String Function(T) label,
-    Widget Function(T)? leading,
-  }) =>
-      showModalBottomSheet<Set<T>>(
-        context: context,
-        isScrollControlled: true,
-        showDragHandle: true,
-        builder: (BuildContext context) => _MultiSelectSheet<T>(
-          title: title,
-          options: options,
-          selected: selected,
-          label: label,
-          leading: leading,
-        ),
-      );
 
   /// Three filters and an order, two of which take several values at once, do
   /// not fit as dropdowns side by side — and Material has no multi-select one.
@@ -3463,7 +4470,7 @@ class DashboardTab extends StatelessWidget {
             label: 'Category',
             count: filters.categoryIds.length,
             onPressed: () async {
-              final Set<int>? picked = await _chooseMany<int>(
+              final Set<int>? picked = await chooseMany<int>(
                 context,
                 title: 'Categories',
                 options:
@@ -3488,7 +4495,7 @@ class DashboardTab extends StatelessWidget {
             label: 'Merchant',
             count: filters.merchants.length,
             onPressed: () async {
-              final Set<String>? picked = await _chooseMany<String>(
+              final Set<String>? picked = await chooseMany<String>(
                 context,
                 title: 'Merchants',
                 options: merchantChoices,
@@ -3505,7 +4512,7 @@ class DashboardTab extends StatelessWidget {
             label: filters.paymentType ?? 'Card / account',
             count: filters.paymentType == null ? 0 : 1,
             onPressed: () async {
-              final Set<String>? picked = await _chooseMany<String>(
+              final Set<String>? picked = await chooseMany<String>(
                 context,
                 title: 'Card / account',
                 options: paymentTypeChoices,
@@ -3518,12 +4525,16 @@ class DashboardTab extends StatelessWidget {
                   : filters.copyWith(paymentType: picked.first));
             },
           ),
-          if (!filters.isEmpty) ...<Widget>[
+          // Offered against the resting state rather than against `isEmpty`:
+          // a user who widened to all months has an empty filter set and very
+          // much wants a way back to this month.
+          if (!filters.isDefaultFor(currentMonth)) ...<Widget>[
             const SizedBox(width: 8),
             ActionChip(
               avatar: const Icon(Icons.close, size: 18),
               label: const Text('Clear'),
-              onPressed: () => onFiltersChanged(const LedgerFilters()),
+              onPressed: () =>
+                  onFiltersChanged(LedgerFilters.defaults(currentMonth)),
             ),
           ],
         ],
@@ -3542,6 +4553,13 @@ class DashboardTab extends StatelessWidget {
         // beside it mean one unambiguous thing. The search box goes with them,
         // for exactly the same reason.
         if (!selecting) ...<Widget>[
+          _PeriodBar(
+            months: filters.months,
+            options: monthChoices,
+            currentMonth: currentMonth,
+            onChanged: (Set<YearMonth> m) =>
+                onFiltersChanged(filters.copyWith(months: m)),
+          ),
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
             child: _SearchField(
@@ -3557,15 +4575,17 @@ class DashboardTab extends StatelessWidget {
               ? const Center(child: CircularProgressIndicator())
               : RefreshIndicator(
                   onRefresh: onRefresh,
-                  child: ledgerIsEmpty
-                      ? const _EmptyState()
-                      : entries.isEmpty
-                          ? _NoMatchState(
-                              searching: filters.query.trim().isNotEmpty,
-                              onClear: () =>
-                                  onFiltersChanged(const LedgerFilters()),
-                            )
-                          : ListView.builder(
+                  child: entries.isEmpty
+                      ? _EmptyLedgerState(
+                          reason: emptyReason(filters,
+                              ledgerIsEmpty: ledgerIsEmpty),
+                          months: filters.months,
+                          onClear: () =>
+                              onFiltersChanged(LedgerFilters.defaults(currentMonth)),
+                          onShowAllMonths: () => onFiltersChanged(
+                              filters.copyWith(months: const <YearMonth>{})),
+                        )
+                      : ListView.builder(
                               // Bottom padding clears the FAB.
                               padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
                               itemCount: entries.length + 1,
@@ -3573,6 +4593,7 @@ class DashboardTab extends StatelessWidget {
                                 if (index == 0) {
                                   return _SummaryHeader(
                                     entries: entries,
+                                    period: periodLabel(filters.months),
                                     uncategorizedCount: entries
                                         .where((LedgerEntry e) =>
                                             e.txn.isUncategorized)
@@ -3907,9 +4928,14 @@ class TransactionActionsSheet extends StatelessWidget {
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+        // A scrolling list rather than a `Column`, because the sheet has
+        // outgrown a short screen: a header, any note, a chip per split line
+        // and six actions is more than a default bottom sheet's height, and a
+        // `Column` that does not fit simply clips — silently taking Delete off
+        // the bottom rather than saying anything. `shrinkWrap` keeps it as
+        // short as its contents whenever they do fit.
+        child: ListView(
+          shrinkWrap: true,
           children: <Widget>[
             Row(
               children: <Widget>[
@@ -4325,43 +5351,94 @@ class _DeletedEmptyState extends StatelessWidget {
   }
 }
 
-/// Shown when there are transactions but the current filters exclude all of
-/// them — distinct from [_EmptyState], which means the ledger itself is empty.
-class _NoMatchState extends StatelessWidget {
-  const _NoMatchState({required this.onClear, this.searching = false});
+/// The one empty list, saying whichever of the four true things applies.
+///
+/// One widget rather than several because the four cases differ only in their
+/// words and their buttons, and because the choice between them is [emptyReason]
+/// — a pure function that can be tested, unlike a nest of ternaries in a build
+/// method.
+class _EmptyLedgerState extends StatelessWidget {
+  const _EmptyLedgerState({
+    required this.reason,
+    required this.months,
+    required this.onClear,
+    required this.onShowAllMonths,
+  });
 
+  final EmptyReason reason;
+  final Set<YearMonth> months;
   final VoidCallback onClear;
-
-  /// Whether a search term is part of why nothing matched. The button clears
-  /// everything either way; this only decides what the screen says the reason
-  /// was, so it does not blame the chips for a typo in the search box.
-  final bool searching;
+  final VoidCallback onShowAllMonths;
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    final (IconData icon, String title, String? detail) = switch (reason) {
+      EmptyReason.ledgerEmpty => (
+          Icons.receipt_long_outlined,
+          'No transactions yet',
+          'Scan your SMS inbox, or paste a bank alert to test the parser.',
+        ),
+      EmptyReason.search => (
+          Icons.search_off,
+          'No transactions match this search',
+          null,
+        ),
+      EmptyReason.facets => (
+          Icons.filter_alt_off_outlined,
+          'No transactions match these filters',
+          null,
+        ),
+      EmptyReason.month => (
+          Icons.calendar_month_outlined,
+          'Nothing in ${periodLabel(months)} yet',
+          'Transactions appear here as your bank texts arrive.',
+        ),
+    };
+
     return ListView(
-      // A scrollable child keeps pull-to-refresh working.
+      // A scrollable child keeps pull-to-refresh working on an empty list.
       padding: const EdgeInsets.all(32),
       children: <Widget>[
-        const SizedBox(height: 100),
-        Icon(searching ? Icons.search_off : Icons.filter_alt_off_outlined,
-            size: 64, color: Theme.of(context).colorScheme.outline),
+        SizedBox(height: reason == EmptyReason.ledgerEmpty ? 120 : 100),
+        Icon(icon, size: 64, color: theme.colorScheme.outline),
         const SizedBox(height: 16),
         Text(
-          searching
-              ? 'No transactions match this search'
-              : 'No transactions match these filters',
+          title,
           textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.titleMedium,
+          style: theme.textTheme.titleMedium,
         ),
-        const SizedBox(height: 20),
-        Center(
-          child: FilledButton.tonalIcon(
-            onPressed: onClear,
-            icon: const Icon(Icons.clear),
-            label: Text(searching ? 'Clear search' : 'Clear filters'),
+        if (detail != null) ...<Widget>[
+          const SizedBox(height: 8),
+          Text(
+            detail,
+            textAlign: TextAlign.center,
+            style: theme.textTheme.bodySmall,
           ),
-        ),
+        ],
+        const SizedBox(height: 20),
+        // An empty ledger gets no button: the "Paste an SMS" FAB is already on
+        // screen and the toolbar offers the inbox scan. An empty *month* gets
+        // "Show all months" rather than "Clear filters", because clearing would
+        // reset to the very month that is empty — a button that visibly does
+        // nothing reads as a bug.
+        if (reason == EmptyReason.month)
+          Center(
+            child: FilledButton.tonalIcon(
+              onPressed: onShowAllMonths,
+              icon: const Icon(Icons.event_repeat_outlined),
+              label: const Text('Show all months'),
+            ),
+          )
+        else if (reason != EmptyReason.ledgerEmpty)
+          Center(
+            child: FilledButton.tonalIcon(
+              onPressed: onClear,
+              icon: const Icon(Icons.clear),
+              label: const Text('Clear filters'),
+            ),
+          ),
       ],
     );
   }
@@ -4370,11 +5447,17 @@ class _NoMatchState extends StatelessWidget {
 class _SummaryHeader extends StatelessWidget {
   const _SummaryHeader({
     required this.entries,
+    required this.period,
     required this.uncategorizedCount,
     required this.money,
   });
 
   final List<LedgerEntry> entries;
+
+  /// What the totals below are the totals *of*. Named on the card rather than
+  /// only in the period bar, so a screenshot of it is self-describing.
+  final String period;
+
   final int uncategorizedCount;
   final NumberFormat money;
 
@@ -4382,18 +5465,13 @@ class _SummaryHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    var spent = 0.0;
-    var received = 0.0;
-    for (final entry in entries) {
-      // The headline totals add the *entry* amount, which under a category
-      // filter is only the part that matched — and which for an unfiltered
-      // split is the whole charge, since its lines sum to it by construction.
-      if (entry.txn.isCredit) {
-        received += entry.amount;
-      } else {
-        spent += entry.amount;
-      }
-    }
+    // The headline totals add the *entry* amount, which under a category filter
+    // is only the part that matched — and which for an unfiltered split is the
+    // whole charge, since its lines sum to it by construction.
+    final totals = periodTotals(entries);
+    final double spent = totals.spent;
+    final double received = totals.received;
+
     // Only debits are broken down by category — a refund is not spending.
     final breakdown = spendByCategory(entries).entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
@@ -4405,7 +5483,7 @@ class _SummaryHeader extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Text('Total spent', style: theme.textTheme.labelLarge),
+            Text('$period · Total spent', style: theme.textTheme.labelLarge),
             const SizedBox(height: 4),
             Text(
               money.format(spent),
@@ -4634,37 +5712,6 @@ class _TransactionTile extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// No transactions at all. Carries no button of its own: the "Paste an SMS"
-/// FAB is already on screen, and the toolbar offers the inbox scan.
-class _EmptyState extends StatelessWidget {
-  const _EmptyState();
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      // A scrollable child keeps pull-to-refresh working on an empty list.
-      padding: const EdgeInsets.all(32),
-      children: <Widget>[
-        const SizedBox(height: 120),
-        Icon(Icons.receipt_long_outlined,
-            size: 72, color: Theme.of(context).colorScheme.outline),
-        const SizedBox(height: 16),
-        Text(
-          'No transactions yet',
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.titleMedium,
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Scan your SMS inbox, or paste a bank alert to test the parser.',
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-      ],
     );
   }
 }
@@ -5191,6 +6238,79 @@ IconData categoryIcon(String category) {
     default:
       return Icons.label_outline;
   }
+}
+
+/// The eight categorical chart colours, light and dark.
+///
+/// A validated set rather than a pretty one: the order is the colour-blind
+/// safety mechanism, and the dark row is the same eight hues *re-stepped* for a
+/// dark surface — not the light row lightened programmatically, which is how
+/// palettes lose their separation.
+const List<Color> _chartHuesLight = <Color>[
+  Color(0xFF2A78D6), // blue
+  Color(0xFFEB6834), // orange
+  Color(0xFF1BAF7A), // aqua
+  Color(0xFFEDA100), // yellow
+  Color(0xFFE87BA4), // magenta
+  Color(0xFF008300), // green
+  Color(0xFF4A3AA7), // violet
+  Color(0xFFE34948), // red
+];
+
+const List<Color> _chartHuesDark = <Color>[
+  Color(0xFF3987E5),
+  Color(0xFFD95926),
+  Color(0xFF199E70),
+  Color(0xFFC98500),
+  Color(0xFFD55181),
+  Color(0xFF008300),
+  Color(0xFF9085E9),
+  Color(0xFFE66767),
+];
+
+/// The seeded categories' fixed slots. Everything else hashes its name.
+const Map<String, int> _seededCategorySlots = <String, int>{
+  'grocery': 0,
+  'food': 1,
+  'fuel': 2,
+  'shopping': 3,
+  'bills & utilities': 4,
+  'travel': 5,
+  'entertainment': 6,
+  'health': 7,
+};
+
+/// A stable colour for [category], in the given [brightness].
+///
+/// **Assigned from the name, never from the rank.** This is the whole point:
+/// were slots handed out by position in the sorted-by-spend list, Food would be
+/// blue in a month it led and orange in a month it did not, and the eye would
+/// read a colour change as a change in the data. A category keeps its colour
+/// across every month and every chart on the screen.
+///
+/// [kOtherCategory] and Uncategorized are deliberately grey — they are not a
+/// category anyone spent money "on", and giving them a hue would let the tail
+/// of the breakdown compete with the real answers.
+Color categoryColor(String category, Brightness brightness) {
+  final List<Color> hues =
+      brightness == Brightness.dark ? _chartHuesDark : _chartHuesLight;
+  final String key = category.toLowerCase();
+  if (key == kOtherCategory.toLowerCase() ||
+      key == AppDatabase.uncategorized.toLowerCase()) {
+    return brightness == Brightness.dark
+        ? const Color(0xFF898781)
+        : const Color(0xFFC3C2B7);
+  }
+  final int? seeded = _seededCategorySlots[key];
+  if (seeded != null) return hues[seeded];
+  // `hashCode` on a String is stable within a run but not guaranteed across
+  // them, so spell the hash out — a category must not change colour when the
+  // app restarts.
+  var hash = 0;
+  for (final int unit in key.codeUnits) {
+    hash = (hash * 31 + unit) & 0x7fffffff;
+  }
+  return hues[hash % hues.length];
 }
 
 // ---------------------------------------------------------------------------
