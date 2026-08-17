@@ -1,5 +1,21 @@
+import 'package:flutter/material.dart';
 import 'package:tu_expense_tracker/main.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+/// A button that asks [confirmDeleteTransactions] about [count] rows and hands
+/// the answer to [onAnswer] — the dialog needs a route to sit in and a context to
+/// be shown from, and this is the smallest thing that provides both.
+Widget deleteAsker(int count, void Function(bool) onAnswer) => MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (BuildContext context) => TextButton(
+            onPressed: () async =>
+                onAnswer(await confirmDeleteTransactions(context, count)),
+            child: const Text('ask'),
+          ),
+        ),
+      ),
+    );
 
 void main() {
   group('SmsParser', () {
@@ -1829,6 +1845,173 @@ void main() {
     test('is idempotent — cleaning a stored note changes nothing', () {
       const String raw = '  Trip   to \n Pune  ';
       expect(cleanNote(cleanNote(raw)), cleanNote(raw));
+    });
+  });
+
+  group('CategoryUsage', () {
+    CategoryUsage usage({
+      int unsplit = 0,
+      int split = 0,
+      int defaults = 0,
+    }) =>
+        CategoryUsage.fromMap(<String, Object?>{
+          'id': 4,
+          'name': 'Food',
+          'unsplit_count': unsplit,
+          'split_count': split,
+          'merchant_default_count': defaults,
+        });
+
+    test('reads the row the usage query returns', () {
+      final CategoryUsage food = usage(unsplit: 7, split: 2, defaults: 1);
+      expect(food.category.id, 4);
+      expect(food.category.name, 'Food');
+      expect(food.unsplitCount, 7);
+      expect(food.splitCount, 2);
+      expect(food.merchantDefaultCount, 1);
+    });
+
+    // The two counts come from queries that cannot both see the same row — one
+    // takes transactions with no split lines, the other only ones with them —
+    // so the total a delete quotes is their sum and not a guess at an overlap.
+    test('the transaction count is the unsplit and the split ones together', () {
+      expect(usage(unsplit: 7, split: 2).txnCount, 9);
+      expect(usage(unsplit: 7).txnCount, 7);
+      expect(usage(split: 2).txnCount, 2);
+      expect(usage().txnCount, 0);
+    });
+
+    test('a category nothing points at is not in use', () {
+      expect(usage().inUse, isFalse);
+    });
+
+    // Each of the three on its own is enough to make a delete a move rather
+    // than a plain removal. A merchant default especially: it names no
+    // transaction, so counting only those would drop it silently.
+    test('any one thing pointing at it counts as in use', () {
+      expect(usage(unsplit: 1).inUse, isTrue);
+      expect(usage(split: 1).inUse, isTrue);
+      expect(usage(defaults: 1).inUse, isTrue);
+    });
+  });
+
+  // What decides whether the ledger's "Clear all" chip is live or dead, and
+  // what it hands back when pressed.
+  group('LedgerFilters.isDefaultFor', () {
+    const YearMonth august = YearMonth(2026, 8);
+    const YearMonth july = YearMonth(2026, 7);
+
+    test('this month and nothing else is the resting state', () {
+      expect(LedgerFilters.defaults(august).isDefaultFor(august), isTrue);
+    });
+
+    // The asymmetry the chip depends on: an empty month set means *every* month,
+    // which is `isEmpty` but is the opposite of resting — and is precisely the
+    // state a user most needs a way back from.
+    test('widened to all months is not resting, though it is empty', () {
+      const LedgerFilters all = LedgerFilters();
+      expect(all.isEmpty, isTrue);
+      expect(all.isDefaultFor(august), isFalse);
+    });
+
+    test('some other month is not resting', () {
+      expect(LedgerFilters.defaults(july).isDefaultFor(august), isFalse);
+      expect(
+        LedgerFilters(months: <YearMonth>{august, july}).isDefaultFor(august),
+        isFalse,
+      );
+    });
+
+    test('any one facet narrowing anything is not resting', () {
+      for (final LedgerFilters filters in <LedgerFilters>[
+        LedgerFilters(months: <YearMonth>{august}, categoryIds: <int>{3}),
+        LedgerFilters(months: <YearMonth>{august}, merchants: <String>{'Amazon'}),
+        LedgerFilters(months: <YearMonth>{august}, paymentType: 'HDFC'),
+        LedgerFilters(months: <YearMonth>{august}, query: 'fuel'),
+      ]) {
+        expect(filters.isDefaultFor(august), isFalse);
+      }
+    });
+
+    test('clearing drops every facet, the search box included', () {
+      final LedgerFilters busy = LedgerFilters(
+        months: <YearMonth>{july},
+        categoryIds: <int>{3, 4},
+        merchants: <String>{'Amazon'},
+        paymentType: 'HDFC Bank A/c *0444',
+        query: 'fuel',
+      );
+      expect(busy.isDefaultFor(august), isFalse);
+
+      final LedgerFilters cleared = LedgerFilters.defaults(august);
+      expect(cleared.isDefaultFor(august), isTrue);
+      expect(cleared.categoryIds, isEmpty);
+      expect(cleared.merchants, isEmpty);
+      expect(cleared.paymentType, isNull);
+      expect(cleared.query, isEmpty);
+      expect(cleared.months, <YearMonth>{august});
+    });
+  });
+
+  group('confirmDeleteTransactions', () {
+    /// Opens the dialog and leaves it open, with [answers] waiting for whatever
+    /// it eventually returns.
+    Future<void> open(
+      WidgetTester tester,
+      int count,
+      List<bool> answers,
+    ) async {
+      await tester.pumpWidget(deleteAsker(count, answers.add));
+      await tester.tap(find.text('ask'));
+      await tester.pumpAndSettle();
+      expect(answers, isEmpty, reason: 'nothing is answered until it is asked');
+    }
+
+    testWidgets('asks about one row in the singular', (tester) async {
+      await open(tester, 1, <bool>[]);
+      expect(find.text('Delete this transaction?'), findsOneWidget);
+      expect(
+        find.textContaining('It stays out of future inbox scans'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('counts them when there are several', (tester) async {
+      await open(tester, 4, <bool>[]);
+      expect(find.text('Delete 4 transactions?'), findsOneWidget);
+      expect(
+        find.textContaining('They stay out of future inbox scans'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('Delete is a yes', (tester) async {
+      final List<bool> answers = <bool>[];
+      await open(tester, 1, answers);
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+      expect(answers, <bool>[true]);
+    });
+
+    testWidgets('Cancel is a no', (tester) async {
+      final List<bool> answers = <bool>[];
+      await open(tester, 1, answers);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(answers, <bool>[false]);
+    });
+
+    // The swipe hands this straight to `Dismissible.confirmDismiss`, where a
+    // null would be read as neither yes nor no. Everything that is not the
+    // Delete button has to come back false, or a dialog waved away would take
+    // the row with it.
+    testWidgets('a tap outside is a no, not an unanswered question',
+        (tester) async {
+      final List<bool> answers = <bool>[];
+      await open(tester, 1, answers);
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+      expect(answers, <bool>[false]);
     });
   });
 }
