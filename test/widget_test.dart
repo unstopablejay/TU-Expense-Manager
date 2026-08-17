@@ -1,3 +1,4 @@
+import 'package:excel/excel.dart' hide Border, BorderStyle, TextSpan;
 import 'package:flutter/material.dart';
 import 'package:tu_expense_tracker/main.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -11,6 +12,29 @@ Widget deleteAsker(int count, void Function(bool) onAnswer) => MaterialApp(
           builder: (BuildContext context) => TextButton(
             onPressed: () async =>
                 onAnswer(await confirmDeleteTransactions(context, count)),
+            child: const Text('ask'),
+          ),
+        ),
+      ),
+    );
+
+/// The same idea as [deleteAsker], for the restore confirmation.
+Widget restoreAsker(
+  int replacing,
+  int incoming,
+  void Function(bool) onAnswer,
+) =>
+    MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (BuildContext context) => TextButton(
+            onPressed: () async => onAnswer(
+              await confirmRestore(
+                context,
+                replacing: replacing,
+                incoming: incoming,
+              ),
+            ),
             child: const Text('ask'),
           ),
         ),
@@ -1950,6 +1974,799 @@ void main() {
       expect(cleared.paymentType, isNull);
       expect(cleared.query, isEmpty);
       expect(cleared.months, <YearMonth>{august});
+    });
+  });
+
+  group('backup workbook', () {
+    /// A database with one of everything awkward in it: a split transaction, a
+    /// credit, a null card, an empty note and an empty reference, a merchant
+    /// that has been merged, a tombstone carrying splits, and a tombstone from
+    /// before schema v4 with nulls in every optional column.
+    BackupData sample() => BackupData(
+          meta: <String, String>{
+            'format': kBackupFormat,
+            'format_version': '$kBackupFormatVersion',
+            'schema_version': '7',
+            'app_version': '1.1.0',
+            'exported_at': '2026-08-17T14:32:10+05:30',
+          },
+          appMeta: <Map<String, Object?>>[
+            <String, Object?>{
+              'key': 'last_scanned_sms_date',
+              'value': '1755417600000',
+            },
+          ],
+          categories: <Map<String, Object?>>[
+            <String, Object?>{'id': 1, 'name': 'Uncategorized'},
+            <String, Object?>{'id': 2, 'name': 'Grocery'},
+            <String, Object?>{'id': 3, 'name': 'Food'},
+          ],
+          merchantMappings: <Map<String, Object?>>[
+            <String, Object?>{'merchant_name': 'SWIGGY', 'category_id': 3},
+          ],
+          transactions: <Map<String, Object?>>[
+            // A whole-rupee amount, which the excel package writes as "204.0"
+            // and reads back as an int. The one that would break quietly.
+            <String, Object?>{
+              'id': 1,
+              'amount': 204.0,
+              'payment_type': 'YES BANK Card X2858',
+              'merchant': 'UPI_GEORGE EGG CENTRE',
+              'date': 1755070895000,
+              'category_id': 2,
+              'direction': 'debit',
+              'reference': '',
+              'note': '',
+            },
+            // Split across two categories, and a credit, and no card at all.
+            <String, Object?>{
+              'id': 2,
+              'amount': 2000.0,
+              'payment_type': null,
+              'merchant': 'Big Bazaar',
+              'date': 1755157295000,
+              'category_id': 2,
+              'direction': 'credit',
+              'reference': 'UPI/123456789',
+              'note': 'Split with Ravi',
+            },
+          ],
+          splits: <Map<String, Object?>>[
+            <String, Object?>{
+              'id': 1,
+              'transaction_id': 2,
+              'category_id': 2,
+              'amount': 1200.0,
+              'position': 0,
+            },
+            <String, Object?>{
+              'id': 2,
+              'transaction_id': 2,
+              'category_id': 3,
+              'amount': 800.0,
+              'position': 1,
+            },
+          ],
+          deleted: <Map<String, Object?>>[
+            <String, Object?>{
+              'amount': 99.5,
+              'merchant': 'Zomato',
+              'date': 1754000000000,
+              'direction': 'debit',
+              'reference': 'UPI/999',
+              'payment_type': 'HDFC Bank A/c *0444',
+              'category_id': 3,
+              'original_id': 17,
+              'deleted_at': 1755200000000,
+              'splits_json':
+                  '[{"category_id":3,"name":"Food","amount":99.5}]',
+              'note': 'ordered twice',
+            },
+            // Written by schema v3: everything optional is genuinely absent.
+            <String, Object?>{
+              'amount': 12.0,
+              'merchant': 'Unknown Shop',
+              'date': 1753000000000,
+              'direction': 'debit',
+              'reference': '',
+              'payment_type': null,
+              'category_id': null,
+              'original_id': null,
+              'deleted_at': null,
+              'splits_json': null,
+              'note': null,
+            },
+          ],
+          aliases: <Map<String, Object?>>[
+            <String, Object?>{
+              'kind': 'merchant',
+              'alias': 'swiggy ltd',
+              'canonical': 'Swiggy',
+            },
+            <String, Object?>{
+              'kind': 'payment_type',
+              'alias': 'hdfc bank a/c *0444',
+              'canonical': 'HDFC *0444',
+            },
+          ],
+        );
+
+    BackupData roundTrip(BackupData data) =>
+        decodeBackupWorkbook(encodeBackupWorkbook(data));
+
+    test('every row survives a round trip unchanged', () {
+      final BackupData before = sample();
+      final BackupData after = roundTrip(before);
+
+      expect(after.categories, before.categories);
+      expect(after.merchantMappings, before.merchantMappings);
+      expect(after.transactions, before.transactions);
+      expect(after.splits, before.splits);
+      expect(after.deleted, before.deleted);
+      expect(after.aliases, before.aliases);
+      expect(after.appMeta, before.appMeta);
+      expect(after.meta['format'], kBackupFormat);
+      expect(after.schemaVersion, 7);
+    });
+
+    // The one that would fail silently. `transactions.amount` is a REAL that
+    // sits inside a UNIQUE index, and `deleted_transactions` repeats it as part
+    // of its PRIMARY KEY. An amount that comes back as a different double stops
+    // a tombstone matching its transaction, and a rescan quietly resurrects a
+    // row the user deleted.
+    test('an awkward amount keeps every bit of its precision', () {
+      const double awkward = 1234.5678901234567;
+      final BackupData before = sample();
+      final BackupData data = BackupData(
+        meta: before.meta,
+        appMeta: before.appMeta,
+        categories: before.categories,
+        merchantMappings: before.merchantMappings,
+        splits: const <Map<String, Object?>>[],
+        aliases: before.aliases,
+        transactions: <Map<String, Object?>>[
+          <String, Object?>{
+            'id': 1,
+            'amount': awkward,
+            'payment_type': 'Card',
+            'merchant': 'Odd Shop',
+            'date': 1755070895000,
+            'category_id': 1,
+            'direction': 'debit',
+            'reference': 'R1',
+            'note': '',
+          },
+        ],
+        deleted: <Map<String, Object?>>[
+          <String, Object?>{
+            'amount': awkward,
+            'merchant': 'Odd Shop',
+            'date': 1755070895000,
+            'direction': 'debit',
+            'reference': 'R1',
+            'payment_type': 'Card',
+            'category_id': 1,
+            'original_id': 1,
+            'deleted_at': 1755200000000,
+            'splits_json': null,
+            'note': null,
+          },
+        ],
+      );
+
+      final BackupData after = roundTrip(data);
+      expect(after.transactions.single['amount'], awkward);
+      expect(after.deleted.single['amount'], awkward);
+      // And the two still agree, which is the thing that actually matters.
+      expect(
+        after.transactions.single['amount'] == after.deleted.single['amount'],
+        isTrue,
+      );
+    });
+
+    test('a whole-rupee amount comes back as a double, not an int', () {
+      final BackupData after = roundTrip(sample());
+      expect(after.transactions.first['amount'], isA<double>());
+      expect(after.transactions.first['amount'], 204.0);
+      expect(after.splits.first['amount'], isA<double>());
+    });
+
+    test('case is preserved exactly on merchants, aliases and categories', () {
+      final BackupData after = roundTrip(sample());
+      expect(after.transactions.first['merchant'], 'UPI_GEORGE EGG CENTRE');
+      expect(after.merchantMappings.single['merchant_name'], 'SWIGGY');
+      // Aliases are stored already-lowercased; export must not "tidy" them.
+      expect(after.aliases.first['alias'], 'swiggy ltd');
+      expect(after.aliases.first['canonical'], 'Swiggy');
+    });
+
+    test('an empty database round trips', () {
+      final BackupData empty = BackupData(
+        meta: <String, String>{
+          'format': kBackupFormat,
+          'format_version': '$kBackupFormatVersion',
+          'schema_version': '7',
+        },
+        appMeta: const <Map<String, Object?>>[],
+        categories: <Map<String, Object?>>[
+          <String, Object?>{'id': 1, 'name': 'Uncategorized'},
+        ],
+        merchantMappings: const <Map<String, Object?>>[],
+        transactions: const <Map<String, Object?>>[],
+        splits: const <Map<String, Object?>>[],
+        deleted: const <Map<String, Object?>>[],
+        aliases: const <Map<String, Object?>>[],
+      );
+      final BackupData after = roundTrip(empty);
+      expect(after.transactions, isEmpty);
+      expect(after.categories, hasLength(1));
+      expect(validateBackup(after, appSchemaVersion: 7), isEmpty);
+    });
+
+    test('exporting what was imported changes nothing', () {
+      final BackupData once = roundTrip(sample());
+      final BackupData twice = roundTrip(once);
+      expect(twice.transactions, once.transactions);
+      expect(twice.deleted, once.deleted);
+      expect(twice.appMeta, once.appMeta);
+    });
+
+    /// Rewrites the sample workbook, passing every row of [sheetName] — header
+    /// row included, at index 0 — through [transform], and appending [extra]
+    /// rows to the end.
+    ///
+    /// Sheets are rebuilt rather than edited in place because the excel
+    /// package's `insertColumn` and `removeColumn` silently empty a sheet that
+    /// came from `decodeBytes`, which is every sheet here. Rebuilding produces
+    /// the same file a spreadsheet app would have written and tests our reader
+    /// rather than their bug.
+    List<int> rewritten(
+      String sheetName,
+      List<CellValue?> Function(List<CellValue?> row, int index) transform, {
+      List<List<CellValue?>> extra = const <List<CellValue?>>[],
+    }) {
+      final Excel from = Excel.decodeBytes(encodeBackupWorkbook(sample()));
+      final Excel to = Excel.createExcel();
+      for (final MapEntry<String, Sheet> entry in from.tables.entries) {
+        final Sheet target = to[entry.key];
+        final List<List<Data?>> rows = entry.value.rows;
+        for (int i = 0; i < rows.length; i++) {
+          final List<CellValue?> values =
+              rows[i].map((Data? cell) => cell?.value).toList();
+          target.appendRow(
+            entry.key == sheetName ? transform(values, i) : values,
+          );
+        }
+        if (entry.key == sheetName) {
+          for (final List<CellValue?> row in extra) {
+            target.appendRow(row);
+          }
+        }
+      }
+      to.delete('Sheet1');
+      return to.encode()!;
+    }
+
+    // The importer reads columns by header name, never by position. This is
+    // what lets someone sort, hide or annotate the sheet in Google Sheets and
+    // still restore the file afterwards — which they will, because the whole
+    // point of the format is that it is a spreadsheet you actually use.
+    test('columns in a different order still import', () {
+      final BackupData after = decodeBackupWorkbook(
+        rewritten(
+          kSheetTransactions,
+          (List<CellValue?> row, int _) => row.reversed.toList(),
+        ),
+      );
+      expect(after.transactions, sample().transactions);
+    });
+
+    test('a column the user added of their own is ignored', () {
+      final BackupData after = decodeBackupWorkbook(
+        rewritten(
+          kSheetTransactions,
+          (List<CellValue?> row, int index) => <CellValue?>[
+            TextCellValue(index == 0 ? 'Claimed?' : 'yes'),
+            ...row,
+          ],
+        ),
+      );
+      expect(after.transactions, sample().transactions);
+    });
+
+    test('a display column the user typed over is ignored', () {
+      // 'Merchant' at index 3 is the merged, display-only column. The
+      // '(as stored)' one beside it is what a restore actually reads.
+      final BackupData after = decodeBackupWorkbook(
+        rewritten(kSheetTransactions, (List<CellValue?> row, int index) {
+          if (index == 0) return row;
+          return <CellValue?>[
+            ...row.take(3),
+            TextCellValue('TYPED OVER'),
+            ...row.skip(4),
+          ];
+        }),
+      );
+      expect(after.transactions, sample().transactions);
+    });
+
+    // Sheets pads a table out with blank rows the moment anyone scrolls in it.
+    test('trailing blank rows are skipped, not imported', () {
+      final BackupData after = decodeBackupWorkbook(
+        rewritten(
+          kSheetTransactions,
+          (List<CellValue?> row, int _) => row,
+          extra: <List<CellValue?>>[
+            <CellValue?>[null, null, null],
+            <CellValue?>[TextCellValue(''), null],
+          ],
+        ),
+      );
+      expect(after.transactions, hasLength(2));
+    });
+
+    test('a sheet that has lost a required column says which one', () {
+      expect(
+        () => decodeBackupWorkbook(
+          rewritten(
+            kSheetTransactions,
+            // Index 10 is 'Timestamp (ms)', the authoritative date.
+            (List<CellValue?> row, int _) => <CellValue?>[
+              ...row.take(10),
+              ...row.skip(11),
+            ],
+          ),
+        ),
+        throwsA(
+          isA<BackupFormatException>().having(
+            (BackupFormatException e) => e.message,
+            'message',
+            allOf(contains('Timestamp (ms)'), contains('Transactions')),
+          ),
+        ),
+      );
+    });
+
+    test('a file that is not a workbook is refused, not guessed at', () {
+      expect(
+        () => decodeBackupWorkbook(<int>[1, 2, 3, 4]),
+        throwsA(isA<BackupFormatException>()),
+      );
+    });
+
+    test('somebody else\'s spreadsheet is refused', () {
+      final BackupData data = sample();
+      final BackupData stripped = BackupData(
+        meta: const <String, String>{'something': 'else'},
+        appMeta: data.appMeta,
+        categories: data.categories,
+        merchantMappings: data.merchantMappings,
+        transactions: data.transactions,
+        splits: data.splits,
+        deleted: data.deleted,
+        aliases: data.aliases,
+      );
+      expect(
+        () => roundTrip(stripped),
+        throwsA(
+          isA<BackupFormatException>().having(
+            (BackupFormatException e) => e.message,
+            'message',
+            contains('not written by this app'),
+          ),
+        ),
+      );
+    });
+  });
+
+  group('validateBackup', () {
+    /// The smallest valid backup, which each test then breaks in one way.
+    BackupData valid({
+      List<Map<String, Object?>>? categories,
+      List<Map<String, Object?>>? transactions,
+      List<Map<String, Object?>>? splits,
+      List<Map<String, Object?>>? merchantMappings,
+      List<Map<String, Object?>>? aliases,
+      List<Map<String, Object?>>? deleted,
+      Map<String, String>? meta,
+    }) =>
+        BackupData(
+          meta: meta ??
+              <String, String>{
+                'format': kBackupFormat,
+                'format_version': '$kBackupFormatVersion',
+                'schema_version': '7',
+              },
+          appMeta: const <Map<String, Object?>>[],
+          categories: categories ??
+              <Map<String, Object?>>[
+                <String, Object?>{'id': 1, 'name': 'Uncategorized'},
+                <String, Object?>{'id': 2, 'name': 'Grocery'},
+              ],
+          merchantMappings: merchantMappings ?? const <Map<String, Object?>>[],
+          transactions: transactions ??
+              <Map<String, Object?>>[
+                <String, Object?>{
+                  'id': 1,
+                  'amount': 100.0,
+                  'payment_type': 'Card',
+                  'merchant': 'Shop',
+                  'date': 1755070895000,
+                  'category_id': 2,
+                  'direction': 'debit',
+                  'reference': '',
+                  'note': '',
+                },
+              ],
+          splits: splits ?? const <Map<String, Object?>>[],
+          deleted: deleted ?? const <Map<String, Object?>>[],
+          aliases: aliases ?? const <Map<String, Object?>>[],
+        );
+
+    test('a clean backup has nothing to say about itself', () {
+      expect(validateBackup(valid(), appSchemaVersion: 7), isEmpty);
+    });
+
+    // A newer schema may have columns this build has never heard of. Importing
+    // it hopefully would drop them, which turns a backup into a lossy one at
+    // exactly the moment it is being relied on.
+    test('a backup from a newer app is refused outright', () {
+      final List<String> problems = validateBackup(
+        valid(
+          meta: <String, String>{
+            'format': kBackupFormat,
+            'format_version': '$kBackupFormatVersion',
+            'schema_version': '9',
+          },
+        ),
+        appSchemaVersion: 7,
+      );
+      expect(problems, hasLength(1));
+      expect(problems.single, contains('newer version of the app'));
+    });
+
+    test('an older backup is fine — that is what migrations are for', () {
+      expect(
+        validateBackup(
+          valid(
+            meta: <String, String>{
+              'format': kBackupFormat,
+              'format_version': '$kBackupFormatVersion',
+              'schema_version': '5',
+            },
+          ),
+          appSchemaVersion: 7,
+        ),
+        isEmpty,
+      );
+    });
+
+    test('a transaction in a category that is not there is caught', () {
+      final List<String> problems = validateBackup(
+        valid(
+          transactions: <Map<String, Object?>>[
+            <String, Object?>{
+              'id': 1,
+              'amount': 100.0,
+              'payment_type': null,
+              'merchant': 'Shop',
+              'date': 1755070895000,
+              'category_id': 99,
+              'direction': 'debit',
+              'reference': '',
+              'note': '',
+            },
+          ],
+        ),
+        appSchemaVersion: 7,
+      );
+      expect(problems.single, contains('category 99'));
+    });
+
+    test('a duplicate transaction id is caught', () {
+      Map<String, Object?> txn(int id, double amount) => <String, Object?>{
+            'id': id,
+            'amount': amount,
+            'payment_type': null,
+            'merchant': 'Shop',
+            'date': 1755070895000,
+            'category_id': 2,
+            'direction': 'debit',
+            'reference': '',
+            'note': '',
+          };
+      final List<String> problems = validateBackup(
+        valid(transactions: <Map<String, Object?>>[txn(1, 100), txn(1, 200)]),
+        appSchemaVersion: 7,
+      );
+      expect(problems.single, contains('share the id 1'));
+    });
+
+    // The unique natural-key index is what stops a rescan piling up duplicates.
+    // Two rows that collide on it would fail halfway through the insert.
+    test('two transactions with the same natural key are caught', () {
+      Map<String, Object?> txn(int id) => <String, Object?>{
+            'id': id,
+            'amount': 100.0,
+            'payment_type': null,
+            'merchant': 'Shop',
+            'date': 1755070895000,
+            'category_id': 2,
+            'direction': 'debit',
+            'reference': '',
+            'note': '',
+          };
+      final List<String> problems = validateBackup(
+        valid(transactions: <Map<String, Object?>>[txn(1), txn(2)]),
+        appSchemaVersion: 7,
+      );
+      expect(problems.single, contains('same amount, merchant, timestamp'));
+    });
+
+    test('the natural key compares merchants case-insensitively', () {
+      Map<String, Object?> txn(int id, String merchant) => <String, Object?>{
+            'id': id,
+            'amount': 100.0,
+            'payment_type': null,
+            'merchant': merchant,
+            'date': 1755070895000,
+            'category_id': 2,
+            'direction': 'debit',
+            'reference': '',
+            'note': '',
+          };
+      final List<String> problems = validateBackup(
+        valid(
+          transactions: <Map<String, Object?>>[txn(1, 'Shop'), txn(2, 'SHOP')],
+        ),
+        appSchemaVersion: 7,
+      );
+      expect(problems.single, contains('same amount, merchant, timestamp'));
+    });
+
+    test('split lines that do not add up are caught', () {
+      final List<String> problems = validateBackup(
+        valid(
+          splits: <Map<String, Object?>>[
+            <String, Object?>{
+              'id': 1,
+              'transaction_id': 1,
+              'category_id': 2,
+              'amount': 60.0,
+              'position': 0,
+            },
+            <String, Object?>{
+              'id': 2,
+              'transaction_id': 1,
+              'category_id': 1,
+              'amount': 20.0,
+              'position': 1,
+            },
+          ],
+        ),
+        appSchemaVersion: 7,
+      );
+      expect(problems.single, contains('add up to 80.00'));
+    });
+
+    test('split lines within the rounding tolerance are accepted', () {
+      expect(
+        validateBackup(
+          valid(
+            splits: <Map<String, Object?>>[
+              <String, Object?>{
+                'id': 1,
+                'transaction_id': 1,
+                'category_id': 2,
+                'amount': 33.33,
+                'position': 0,
+              },
+              <String, Object?>{
+                'id': 2,
+                'transaction_id': 1,
+                'category_id': 1,
+                'amount': 66.67,
+                'position': 1,
+              },
+            ],
+          ),
+          appSchemaVersion: 7,
+        ),
+        isEmpty,
+      );
+    });
+
+    test('a missing Uncategorized is caught', () {
+      final List<String> problems = validateBackup(
+        valid(
+          categories: <Map<String, Object?>>[
+            <String, Object?>{'id': 2, 'name': 'Grocery'},
+          ],
+        ),
+        appSchemaVersion: 7,
+      );
+      expect(problems.single, contains('Uncategorized'));
+    });
+
+    test('a direction that is neither debit nor credit is caught', () {
+      final List<String> problems = validateBackup(
+        valid(
+          transactions: <Map<String, Object?>>[
+            <String, Object?>{
+              'id': 1,
+              'amount': 100.0,
+              'payment_type': null,
+              'merchant': 'Shop',
+              'date': 1755070895000,
+              'category_id': 2,
+              'direction': 'sideways',
+              'reference': '',
+              'note': '',
+            },
+          ],
+        ),
+        appSchemaVersion: 7,
+      );
+      expect(problems.single, contains('must be debit or credit'));
+    });
+
+    test('a merchant default pointing nowhere is caught', () {
+      final List<String> problems = validateBackup(
+        valid(
+          merchantMappings: <Map<String, Object?>>[
+            <String, Object?>{'merchant_name': 'Swiggy', 'category_id': 99},
+          ],
+        ),
+        appSchemaVersion: 7,
+      );
+      expect(problems.single, contains('category 99'));
+    });
+
+    // Nullable by design: a tombstone written before schema v4 has no category
+    // and restores into Uncategorized. That must not read as corruption.
+    test('a pre-v4 tombstone with nulls throughout is accepted', () {
+      expect(
+        validateBackup(
+          valid(
+            deleted: <Map<String, Object?>>[
+              <String, Object?>{
+                'amount': 12.0,
+                'merchant': 'Old Shop',
+                'date': 1753000000000,
+                'direction': 'debit',
+                'reference': '',
+                'payment_type': null,
+                'category_id': null,
+                'original_id': null,
+                'deleted_at': null,
+                'splits_json': null,
+                'note': null,
+              },
+            ],
+          ),
+          appSchemaVersion: 7,
+        ),
+        isEmpty,
+      );
+    });
+  });
+
+  group('backupFileName', () {
+    test('an export is named for the day it was taken', () {
+      expect(
+        backupFileName(DateTime(2026, 8, 17, 14, 32)),
+        'tu-expense-2026-08-17.xlsx',
+      );
+    });
+
+    // A restore that went wrong is usually followed by another attempt within
+    // the minute. Two safety copies from one afternoon must not collide.
+    test('a pre-restore copy carries the time too', () {
+      expect(
+        backupFileName(DateTime(2026, 8, 17, 14, 32), beforeRestore: true),
+        'tu-expense-before-restore-2026-08-17-1432.xlsx',
+      );
+      expect(
+        backupFileName(DateTime(2026, 8, 17, 14, 33), beforeRestore: true),
+        isNot(backupFileName(
+          DateTime(2026, 8, 17, 14, 32),
+          beforeRestore: true,
+        )),
+      );
+    });
+  });
+
+  group('confirmRestore', () {
+    Future<void> open(
+      WidgetTester tester,
+      int replacing,
+      int incoming,
+      List<bool> answers,
+    ) async {
+      await tester.pumpWidget(
+        restoreAsker(replacing, incoming, answers.add),
+      );
+      await tester.tap(find.text('ask'));
+      await tester.pumpAndSettle();
+    }
+
+    // The counts are the whole question. Restoring 1,190 rows over 1,284 is a
+    // different decision from restoring them over nothing.
+    testWidgets('names both counts', (tester) async {
+      await open(tester, 1284, 1190, <bool>[]);
+      expect(find.textContaining('all 1284 transactions'), findsOneWidget);
+      expect(find.textContaining('the 1190 in this file'), findsOneWidget);
+    });
+
+    testWidgets('says so when there is nothing to replace', (tester) async {
+      await open(tester, 0, 1190, <bool>[]);
+      expect(find.textContaining('nothing in the app to replace'),
+          findsOneWidget);
+    });
+
+    testWidgets('Replace is a yes', (tester) async {
+      final List<bool> answers = <bool>[];
+      await open(tester, 10, 20, answers);
+      await tester.tap(find.text('Replace'));
+      await tester.pumpAndSettle();
+      expect(answers, <bool>[true]);
+    });
+
+    testWidgets('Cancel is a no', (tester) async {
+      final List<bool> answers = <bool>[];
+      await open(tester, 10, 20, answers);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(answers, <bool>[false]);
+    });
+
+    // Nothing about a restore should be reachable by accident, least of all by
+    // a stray tap landing outside the dialog.
+    testWidgets('a tap outside is a no', (tester) async {
+      final List<bool> answers = <bool>[];
+      await open(tester, 10, 20, answers);
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+      expect(answers, <bool>[false]);
+    });
+  });
+
+  group('showBackupProblems', () {
+    Future<void> open(WidgetTester tester, List<String> problems) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (BuildContext context) => TextButton(
+                onPressed: () => showBackupProblems(context, problems),
+                child: const Text('show'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('show'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('promises that nothing was changed', (tester) async {
+      await open(tester, <String>['Something is wrong.']);
+      expect(find.textContaining('Nothing in the app has been changed'),
+          findsOneWidget);
+      expect(find.textContaining('Something is wrong.'), findsOneWidget);
+    });
+
+    // A workbook broken in one place is usually broken in a hundred, and a
+    // dialog listing all hundred says less than one listing five and a count.
+    testWidgets('truncates a long list rather than filling the screen',
+        (tester) async {
+      await open(
+        tester,
+        List<String>.generate(12, (int i) => 'Problem number $i.'),
+      );
+      expect(find.textContaining('Problem number 4.'), findsOneWidget);
+      expect(find.textContaining('Problem number 5.'), findsNothing);
+      expect(find.textContaining('and 7 more.'), findsOneWidget);
     });
   });
 

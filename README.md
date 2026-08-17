@@ -617,6 +617,58 @@ Alerts arriving while the app is open are still picked up live by the foreground
 listener. It does not touch the watermark; a message it already inserted may be re-read
 by the next scan, where the natural key drops it.
 
+### Export, backup and restore
+
+**Settings → Data** holds both halves of one idea. **Export data** writes the whole
+database to an `.xlsx` workbook and hands it to the Android share sheet, which is how it
+reaches Drive — and from Drive, Google Sheets, which opens `.xlsx` natively with filters
+and pivots intact. **Restore from backup** reads one of those workbooks back over the
+top of everything.
+
+It is deliberately *one* file rather than a pretty spreadsheet plus an opaque `.db`
+alongside it. A backup you can open, read and sanity-check is worth more than one you
+have to trust, and keeping the two in one file means there is no way to end up holding
+the wrong half of a pair.
+
+Seven sheets: **Transactions**, **Splits**, **Categories**, **Merchant defaults**,
+**Name aliases**, **Deleted** and **Meta**. The readable columns are on the left of each
+sheet and the machinery on the right, so opening the file lands you on dates, amounts and
+merchant names rather than on ids.
+
+Two things about the Transactions sheet are load-bearing:
+
+- It carries **both** `Merchant` and `Merchant (as stored)` (and the same pair for the
+  card). The first is resolved through any merge, which is what you want to filter on;
+  the second is the string the column actually holds, and it is the one a restore reads.
+  It has to be, because the merchant is part of the natural key — export the merged
+  spelling and the backup's tombstones would no longer match its transactions, which
+  shows up only as deleted rows quietly returning after the next rescan.
+- It carries both a `Date` cell and a `Timestamp (ms)` cell. The date is there so Sheets
+  sorts and filters it as a date; the millis are what a restore reads, because an Excel
+  serial date has no timezone and this value sits inside a unique index.
+
+Columns are matched **by header name, not by position**, so sorting, hiding, or adding a
+column of your own in Sheets does not stop the file restoring. Display-only columns are
+recomputed on the next export, so typing over the merged `Merchant` column changes
+nothing.
+
+Restore **replaces everything**, in one SQL transaction. Before anything is deleted, the
+file is decoded, validated in full, and confirmed by a dialog naming both counts; then a
+copy of the current data is written as `tu-expense-before-restore-<date>-<time>.xlsx`
+beside it. So every way a restore can fail is a way that leaves the ledger alone, and the
+one way it can succeed is still reversible. Validation refuses a backup from a *newer*
+schema outright rather than importing it hopefully — a newer version may have columns
+this build has never heard of, and dropping them silently would make a backup lossy at
+exactly the moment it is being relied on.
+
+Ids are preserved exactly, including the `AUTOINCREMENT` counters, because
+`deleted_transactions.original_id` points at `transactions.id` and a tombstone restores
+its row under that id. Renumbering on import would break undo for every deleted row in
+the backup.
+
+Not included: the update-checker's `SharedPreferences` settings, which are preferences
+rather than data.
+
 ## Testing
 
 ```bash
@@ -652,9 +704,22 @@ earlier members so they cannot resurface, a case-only merge keeping the spelling
 chosen rather than dropping the row as redundant, ten paise divided three ways staying
 balanced, and the last line absorbing that drift so what is stored sums exactly.
 
+The backup workbook is covered the same way, `encodeBackupWorkbook` /
+`decodeBackupWorkbook` / `validateBackup` being pure functions over raw row maps for
+exactly that reason. A full round trip is asserted row by row over a fixture holding one
+of everything awkward — a split, a credit, a null card, empty notes and references, a
+merged merchant, a tombstone carrying splits and a pre-v4 tombstone that is null
+throughout. The two that would otherwise fail silently have their own cases: an amount of
+`1234.5678901234567` surviving as the identical `double` and still matching its
+tombstone's natural key, and a whole-rupee `204.0` coming back as a double rather than the
+int the excel package's reader turns `"204.0"` into. Around those sit the robustness
+claims — columns reordered, a column the user added, a display column typed over, trailing
+blank rows — and one refusal case per validation rule.
+
 The database and widget layers have no automated coverage: `AppDatabase` needs the real
 sqflite plugin, and `sqflite_common_ffi` is deliberately not a dependency. Delete, restore,
-splits, the migrations and the scan watermark are verified by hand, below.
+splits, the migrations, the scan watermark and the two backup methods (`exportAll`,
+`replaceAll`) are verified by hand, below.
 
 To exercise the live path end to end on an emulator:
 
@@ -744,6 +809,38 @@ Worth walking by hand, since none of it is covered by `flutter test`:
 - **Incremental scanning.** Relaunch with no new SMS: nothing imported, watermark
   unchanged. Then `adb emu sms send` one alert and relaunch: only that one is processed
   and `last_scanned_sms_date` advances.
+- **Export/restore round trip.** The one worth doing whenever any of it is touched, since
+  `exportAll` and `replaceAll` are the two methods `flutter test` cannot reach. With a
+  ledger that has at least one split, one merge, one merchant default and one deleted row
+  in it, dump the tables, export, damage the database, then restore and dump again — the
+  two dumps must be identical, ids included:
+
+  ```bash
+  dump() { sqlite3 "$1" "SELECT 'T',* FROM transactions ORDER BY id;
+    SELECT 'S',* FROM transaction_splits ORDER BY id;
+    SELECT 'D',* FROM deleted_transactions ORDER BY merchant;
+    SELECT 'A',* FROM name_aliases ORDER BY kind,alias;
+    SELECT 'M',* FROM merchant_mappings ORDER BY merchant_name;
+    SELECT 'K',* FROM app_meta ORDER BY key;"; }
+  adb shell run-as com.tu.expense.manager cat databases/expense_manager.db > /tmp/before.db
+  # …export from Settings → Data, damage the ledger, restore from the workbook…
+  adb shell run-as com.tu.expense.manager cat databases/expense_manager.db > /tmp/after.db
+  diff <(dump /tmp/before.db) <(dump /tmp/after.db) && echo identical
+  sqlite3 /tmp/after.db "PRAGMA user_version; PRAGMA foreign_key_check;
+    SELECT * FROM sqlite_sequence;"
+  ```
+
+  `user_version` must read 7, `foreign_key_check` must say nothing, and `sqlite_sequence`
+  must match the source — a counter left high would keep issuing ids from wherever the
+  replaced database had got to.
+- **A rescan after a restore duplicates nothing.** The natural-key index and the
+  tombstones both have to have come back for this to hold, so it is the real test that
+  the merchant was exported as *stored* rather than as merged.
+- **A bad workbook changes nothing.** Open an export in Sheets, break a `Category id`,
+  and restore it: the dialog must name the offending transaction and the ledger must be
+  untouched. Worth also trying a workbook whose `schema_version` you have edited upwards,
+  which must be refused outright.
+- **Wipe and recover.** Uninstall, reinstall, restore. The whole ledger comes back.
 
 The database filename is still `expense_manager.db` — it predates the rename and is left
 alone deliberately, since `getDatabasesPath()` resolves it under whatever the current

@@ -1,9 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
+// `Border`, `BorderStyle` and `TextSpan` all collide with Material's.
+import 'package:excel/excel.dart' hide Border, BorderStyle, TextSpan;
+import 'package:file_picker/file_picker.dart';
 import 'package:fl_chart/fl_chart.dart';
-import 'package:flutter/foundation.dart' show defaultTargetPlatform;
+import 'package:flutter/foundation.dart' show compute, defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
@@ -12,6 +16,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 // Maintained fork of `telephony` (identical API). The original 0.2.0 has no
@@ -766,6 +771,11 @@ class AppDatabase {
 
   static final AppDatabase instance = AppDatabase._();
 
+  /// The schema this build understands. A backup stamps this into its Meta
+  /// sheet, and one stamped with a *higher* number is refused rather than
+  /// imported — it may hold columns this build has never heard of.
+  static const int schemaVersion = 7;
+
   static const String uncategorized = 'Uncategorized';
   static const List<String> _defaultCategories = <String>[
     uncategorized, // inserted first so it always lands on id = 1
@@ -790,7 +800,7 @@ class AppDatabase {
     final path = p.join(await getDatabasesPath(), 'expense_manager.db');
     return openDatabase(
       path,
-      version: 7,
+      version: schemaVersion,
       onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
@@ -1940,6 +1950,141 @@ class AppDatabase {
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // 2f. BACKUP
+  // -------------------------------------------------------------------------
+
+  /// Every table, verbatim.
+  ///
+  /// Pointedly *not* built on [transactions]: that one resolves merged names on
+  /// the way out, and the merchant it would hand back is not the string the
+  /// column holds. Since the merchant is part of the natural key that finds a
+  /// row again, exporting the merged spelling would produce a backup whose
+  /// tombstones no longer match their transactions — a fault that shows up only
+  /// on the rescan after a restore, as deleted rows quietly coming back.
+  Future<BackupData> exportAll() async {
+    final db = await database;
+    final PackageInfo info = await PackageInfo.fromPlatform();
+
+    final List<Map<String, Object?>> categories =
+        await db.query('categories', orderBy: 'id');
+    final List<Map<String, Object?>> merchantMappings =
+        await db.query('merchant_mappings', orderBy: 'merchant_name');
+    final List<Map<String, Object?>> transactions =
+        await db.query('transactions', orderBy: 'date DESC, id DESC');
+    final List<Map<String, Object?>> splits = await db.query(
+      'transaction_splits',
+      orderBy: 'transaction_id, position, id',
+    );
+    final List<Map<String, Object?>> deleted =
+        await db.query('deleted_transactions', orderBy: 'deleted_at DESC');
+    final List<Map<String, Object?>> aliases =
+        await db.query('name_aliases', orderBy: 'kind, alias');
+    final List<Map<String, Object?>> appMeta =
+        await db.query('app_meta', orderBy: 'key');
+
+    return BackupData(
+      categories: categories,
+      merchantMappings: merchantMappings,
+      transactions: transactions,
+      splits: splits,
+      deleted: deleted,
+      aliases: aliases,
+      appMeta: appMeta,
+      meta: <String, String>{
+        'format': kBackupFormat,
+        'format_version': '$kBackupFormatVersion',
+        'schema_version': '$schemaVersion',
+        'app_version': info.version,
+        'app_build': info.buildNumber,
+        'exported_at': DateTime.now().toIso8601String(),
+        // Counts are a cheap sanity check for a human reading the file, and
+        // give the confirmation dialog something to say before it commits.
+        'transactions': '${transactions.length}',
+        'splits': '${splits.length}',
+        'categories': '${categories.length}',
+        'merchant_defaults': '${merchantMappings.length}',
+        'name_aliases': '${aliases.length}',
+        'deleted': '${deleted.length}',
+      },
+    );
+  }
+
+  /// Throws away everything and writes [data] in its place.
+  ///
+  /// One `db.transaction`, so a failure anywhere leaves the database exactly as
+  /// it was rather than half replaced. Validate with [validateBackup] first:
+  /// the foreign keys would catch most corruption too, but only part-way
+  /// through, and a rolled-back transaction cannot say which row was at fault.
+  ///
+  /// Order matters in both halves, because `PRAGMA foreign_keys` is on and
+  /// cannot be turned off inside a transaction — deletes run children-first and
+  /// inserts parents-first.
+  ///
+  /// Ids are written explicitly. `deleted_transactions.original_id` points at
+  /// `transactions.id`, and a tombstone restores its row under that id, so
+  /// renumbering on the way in would break undo for every deleted transaction
+  /// in the backup.
+  Future<void> replaceAll(BackupData data) async {
+    final db = await database;
+    await db.transaction((Transaction txn) async {
+      for (final String table in const <String>[
+        'transaction_splits',
+        'transactions',
+        'merchant_mappings',
+        'deleted_transactions',
+        'name_aliases',
+        'app_meta',
+        'categories',
+      ]) {
+        await txn.delete(table);
+      }
+
+      // AUTOINCREMENT counters only ever climb, so without this a restored
+      // database would keep issuing ids from wherever the old one had got to.
+      // Clearing them makes the result identical to the database that was
+      // exported, rather than merely equivalent.
+      await txn.delete(
+        'sqlite_sequence',
+        where: 'name IN (?, ?, ?)',
+        whereArgs: const <Object?>[
+          'categories',
+          'transactions',
+          'transaction_splits',
+        ],
+      );
+
+      final Batch batch = txn.batch();
+      for (final Map<String, Object?> row in data.categories) {
+        batch.insert('categories', row);
+      }
+      for (final Map<String, Object?> row in data.merchantMappings) {
+        batch.insert('merchant_mappings', row);
+      }
+      for (final Map<String, Object?> row in data.transactions) {
+        batch.insert('transactions', row);
+      }
+      for (final Map<String, Object?> row in data.splits) {
+        batch.insert('transaction_splits', row);
+      }
+      for (final Map<String, Object?> row in data.deleted) {
+        batch.insert('deleted_transactions', row);
+      }
+      for (final Map<String, Object?> row in data.aliases) {
+        batch.insert('name_aliases', row);
+      }
+      for (final Map<String, Object?> row in data.appMeta) {
+        batch.insert('app_meta', row);
+      }
+      await batch.commit(noResult: true);
+    });
+
+    // The id was cached from the categories table that has just been thrown
+    // away. Left stale, every later categorisation would point at whatever row
+    // now happens to hold that id.
+    _uncategorizedId = null;
   }
 }
 
@@ -3215,6 +3360,1002 @@ String cleanNote(String raw) {
   return collapsed.length <= _noteMaxLength
       ? collapsed
       : collapsed.substring(0, _noteMaxLength).trimRight();
+}
+
+// ---------------------------------------------------------------------------
+// 4b. BACKUP WORKBOOK
+// ---------------------------------------------------------------------------
+
+/// The marker that says an `.xlsx` is one of ours. Any workbook without it in
+/// its Meta sheet is somebody else's spreadsheet and is refused rather than
+/// guessed at.
+const String kBackupFormat = 'tu-expense-tracker-backup';
+
+/// The layout of the workbook, which moves independently of the database
+/// schema. Bumped only if a sheet is renamed or a column changes meaning —
+/// *adding* a column needs no bump, because the importer reads by header name.
+const int kBackupFormatVersion = 1;
+
+/// Sheet names. Constants because both the writer and the reader need them to
+/// agree exactly, and a typo in one of the two would only show up at restore.
+const String kSheetTransactions = 'Transactions';
+const String kSheetSplits = 'Splits';
+const String kSheetCategories = 'Categories';
+const String kSheetMerchantDefaults = 'Merchant defaults';
+const String kSheetAliases = 'Name aliases';
+const String kSheetDeleted = 'Deleted';
+const String kSheetMeta = 'Meta';
+
+/// The columns a restore actually reads, per sheet. Everything else in a sheet
+/// is there for the human — a merged name, a joined category, a formatted date
+/// — and is regenerated on the next export rather than imported.
+///
+/// The importer looks these up **by header name, not by position**. That is
+/// what lets someone reorder or hide columns in Sheets, or insert a column of
+/// their own notes, and still restore the file afterwards.
+const Map<String, List<String>> kRequiredHeaders = <String, List<String>>{
+  kSheetTransactions: <String>[
+    'id',
+    'Timestamp (ms)',
+    'Amount',
+    'Direction',
+    'Merchant (as stored)',
+    'Card (as stored)',
+    'Category id',
+    'Note',
+    'Reference',
+  ],
+  kSheetSplits: <String>[
+    'id',
+    'transaction_id',
+    'Category id',
+    'Amount',
+    'position',
+  ],
+  kSheetCategories: <String>['id', 'Name'],
+  kSheetMerchantDefaults: <String>['Merchant', 'Category id'],
+  kSheetAliases: <String>['Kind', 'Alias', 'Canonical'],
+  kSheetDeleted: <String>[
+    'Amount',
+    'Merchant',
+    'Timestamp (ms)',
+    'Direction',
+    'Reference',
+    'Card / account',
+    'Category id',
+    'Original id',
+    'Deleted at (ms)',
+    'Note',
+    'Splits (JSON)',
+  ],
+  kSheetMeta: <String>['Key', 'Value'],
+};
+
+/// A backup that cannot be read at all — not the wrong contents, but the wrong
+/// shape: not a workbook, a sheet missing, a required column absent, a number
+/// where text was promised. Carries a sentence fit to show the user.
+class BackupFormatException implements Exception {
+  const BackupFormatException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+/// Every table, as the raw rows the database holds — not the domain models.
+///
+/// [ExpenseTxn] deliberately reports *merged* names and synthesises a split line
+/// for unsplit transactions, both of which are exactly wrong for a backup: the
+/// merchant is part of the natural key that finds a row again, and a synthesised
+/// line would restore as a real one. So this carries what `db.query` returned
+/// and nothing else.
+class BackupData {
+  const BackupData({
+    required this.categories,
+    required this.merchantMappings,
+    required this.transactions,
+    required this.splits,
+    required this.deleted,
+    required this.aliases,
+    required this.appMeta,
+    required this.meta,
+  });
+
+  final List<Map<String, Object?>> categories;
+  final List<Map<String, Object?>> merchantMappings;
+  final List<Map<String, Object?>> transactions;
+  final List<Map<String, Object?>> splits;
+  final List<Map<String, Object?>> deleted;
+  final List<Map<String, Object?>> aliases;
+  final List<Map<String, Object?>> appMeta;
+
+  /// The Meta sheet, already keyed. Holds the format marker, the schema version
+  /// the file was written at, and the row counts.
+  final Map<String, String> meta;
+
+  int? get formatVersion => int.tryParse(meta['format_version'] ?? '');
+  int? get schemaVersion => int.tryParse(meta['schema_version'] ?? '');
+}
+
+// --- cell helpers ----------------------------------------------------------
+//
+// Reading is deliberately forgiving about *which* numeric cell type turned up,
+// because the excel package is not consistent about it in one specific and
+// entirely silent way: it writes a double via `toString()`, so a whole-rupee
+// 1200.0 goes out as "1200.0" — and then reads it back as an `IntCellValue`,
+// because its parser treats a fractional part of all zeroes as an integer.
+// An amount column therefore has to accept both, or every round amount in the
+// ledger would fail to restore.
+
+String? _cellText(CellValue? cell) => switch (cell) {
+      null => null,
+      TextCellValue() => cell.value.toString(),
+      IntCellValue() => cell.value.toString(),
+      DoubleCellValue() => cell.value.toString(),
+      BoolCellValue() => cell.value.toString(),
+      _ => cell.toString(),
+    };
+
+/// Blank means blank. Used for the nullable text columns, where the database
+/// genuinely holds NULL — a tombstone written before v7 has no note at all.
+String? _cellTextOrNull(CellValue? cell) {
+  final String? text = _cellText(cell);
+  return (text == null || text.isEmpty) ? null : text;
+}
+
+int? _cellInt(CellValue? cell) => switch (cell) {
+      IntCellValue() => cell.value,
+      DoubleCellValue() => cell.value.round(),
+      TextCellValue() => int.tryParse(cell.value.toString().trim()),
+      _ => null,
+    };
+
+double? _cellDouble(CellValue? cell) => switch (cell) {
+      DoubleCellValue() => cell.value,
+      IntCellValue() => cell.value.toDouble(),
+      TextCellValue() => double.tryParse(cell.value.toString().trim()),
+      _ => null,
+    };
+
+/// A nullable text column on the way out. Null and empty are written the same
+/// way — as an empty cell — so that export → import → export is a fixed point
+/// rather than flipping a value between `''` and NULL on every pass.
+CellValue? _textOrBlank(Object? value) {
+  final String text = (value as String?) ?? '';
+  return text.isEmpty ? null : TextCellValue(text);
+}
+
+CellValue? _intOrBlank(Object? value) =>
+    value == null ? null : IntCellValue((value as num).toInt());
+
+/// A date the spreadsheet understands, so Sheets sorts and filters it as a date
+/// rather than as text. Purely for reading: the authoritative value is always
+/// the neighbouring epoch-millis column, because an Excel serial date carries no
+/// timezone and this one sits inside a unique index.
+CellValue? _dateCell(Object? millis) => millis == null
+    ? null
+    : DateTimeCellValue.fromDateTime(
+        DateTime.fromMillisecondsSinceEpoch((millis as num).toInt()),
+      );
+
+/// The split lines as one readable phrase — `Grocery 1200.00; Food 800.00`.
+/// Display only; the Splits sheet is what a restore reads.
+String splitSummary(List<Map<String, Object?>> lines, Map<int, String> names) {
+  if (lines.isEmpty) return '';
+  return lines.map((Map<String, Object?> line) {
+    final String name =
+        names[(line['category_id'] as num?)?.toInt()] ?? AppDatabase.uncategorized;
+    final double amount = (line['amount'] as num?)?.toDouble() ?? 0;
+    return '$name ${amount.toStringAsFixed(2)}';
+  }).join('; ');
+}
+
+// --- writing ---------------------------------------------------------------
+
+/// The whole database as a workbook, ready to be written to disk.
+///
+/// Seven sheets, each with a header row the importer keys off. The readable
+/// columns come first and the machinery is pushed to the right, so that opening
+/// the file lands you on dates, amounts and merchant names rather than on ids.
+Uint8List encodeBackupWorkbook(BackupData data) {
+  final Excel excel = Excel.createExcel();
+
+  // Category and alias lookups for the display-only columns. Built once here
+  // rather than queried per row, and never consulted on the way back in.
+  final Map<int, String> categoryNames = <int, String>{
+    for (final Map<String, Object?> row in data.categories)
+      (row['id'] as num).toInt(): row['name'] as String,
+  };
+  final Map<String, String> merchantAliases = <String, String>{
+    for (final Map<String, Object?> row in data.aliases)
+      if (row['kind'] == NameKind.merchant.column)
+        (row['alias'] as String).toLowerCase(): row['canonical'] as String,
+  };
+  final Map<String, String> cardAliases = <String, String>{
+    for (final Map<String, Object?> row in data.aliases)
+      if (row['kind'] == NameKind.card.column)
+        (row['alias'] as String).toLowerCase(): row['canonical'] as String,
+  };
+  final Map<int, List<Map<String, Object?>>> splitsByTxn =
+      <int, List<Map<String, Object?>>>{};
+  for (final Map<String, Object?> row in data.splits) {
+    (splitsByTxn[(row['transaction_id'] as num).toInt()] ??=
+            <Map<String, Object?>>[])
+        .add(row);
+  }
+
+  String merged(Map<String, String> aliases, String? raw) =>
+      raw == null ? '' : (aliases[raw.toLowerCase()] ?? raw);
+
+  void sheet(String name, List<String> headers,
+      List<List<CellValue?>> Function() rows) {
+    final Sheet target = excel[name];
+    target.appendRow(
+      headers.map<CellValue?>((String h) => TextCellValue(h)).toList(),
+    );
+    for (int i = 0; i < headers.length; i++) {
+      target
+          .cell(CellIndex.indexByColumnRow(columnIndex: i, rowIndex: 0))
+          .cellStyle = CellStyle(bold: true);
+    }
+    for (final List<CellValue?> row in rows()) {
+      target.appendRow(row);
+    }
+    for (int i = 0; i < headers.length; i++) {
+      target.setColumnAutoFit(i);
+    }
+  }
+
+  sheet(
+    kSheetTransactions,
+    const <String>[
+      'Date',
+      'Amount',
+      'Direction',
+      'Merchant',
+      'Category',
+      'Card / account',
+      'Note',
+      'Split',
+      'Reference',
+      'id',
+      'Timestamp (ms)',
+      'Merchant (as stored)',
+      'Card (as stored)',
+      'Category id',
+    ],
+    () => data.transactions.map((Map<String, Object?> row) {
+      final int id = (row['id'] as num).toInt();
+      final int categoryId = (row['category_id'] as num).toInt();
+      return <CellValue?>[
+        _dateCell(row['date']),
+        DoubleCellValue((row['amount'] as num).toDouble()),
+        TextCellValue(row['direction'] as String),
+        TextCellValue(merged(merchantAliases, row['merchant'] as String)),
+        TextCellValue(categoryNames[categoryId] ?? ''),
+        TextCellValue(merged(cardAliases, row['payment_type'] as String?)),
+        _textOrBlank(row['note']),
+        _textOrBlank(
+          splitSummary(
+            splitsByTxn[id] ?? const <Map<String, Object?>>[],
+            categoryNames,
+          ),
+        ),
+        _textOrBlank(row['reference']),
+        IntCellValue(id),
+        IntCellValue((row['date'] as num).toInt()),
+        TextCellValue(row['merchant'] as String),
+        _textOrBlank(row['payment_type']),
+        IntCellValue(categoryId),
+      ];
+    }).toList(),
+  );
+
+  sheet(
+    kSheetSplits,
+    const <String>[
+      'transaction_id',
+      'position',
+      'Category',
+      'Amount',
+      'Category id',
+      'id',
+    ],
+    () => data.splits.map((Map<String, Object?> row) {
+      final int categoryId = (row['category_id'] as num).toInt();
+      return <CellValue?>[
+        IntCellValue((row['transaction_id'] as num).toInt()),
+        IntCellValue((row['position'] as num).toInt()),
+        TextCellValue(categoryNames[categoryId] ?? ''),
+        DoubleCellValue((row['amount'] as num).toDouble()),
+        IntCellValue(categoryId),
+        IntCellValue((row['id'] as num).toInt()),
+      ];
+    }).toList(),
+  );
+
+  sheet(
+    kSheetCategories,
+    const <String>['id', 'Name'],
+    () => data.categories
+        .map((Map<String, Object?> row) => <CellValue?>[
+              IntCellValue((row['id'] as num).toInt()),
+              TextCellValue(row['name'] as String),
+            ])
+        .toList(),
+  );
+
+  sheet(
+    kSheetMerchantDefaults,
+    const <String>['Merchant', 'Category', 'Category id'],
+    () => data.merchantMappings.map((Map<String, Object?> row) {
+      final int categoryId = (row['category_id'] as num).toInt();
+      return <CellValue?>[
+        TextCellValue(row['merchant_name'] as String),
+        TextCellValue(categoryNames[categoryId] ?? ''),
+        IntCellValue(categoryId),
+      ];
+    }).toList(),
+  );
+
+  sheet(
+    kSheetAliases,
+    const <String>['Kind', 'Alias', 'Canonical'],
+    () => data.aliases
+        .map((Map<String, Object?> row) => <CellValue?>[
+              TextCellValue(row['kind'] as String),
+              TextCellValue(row['alias'] as String),
+              TextCellValue(row['canonical'] as String),
+            ])
+        .toList(),
+  );
+
+  sheet(
+    kSheetDeleted,
+    const <String>[
+      'Deleted at',
+      'Amount',
+      'Merchant',
+      'Direction',
+      'Card / account',
+      'Note',
+      'Reference',
+      'Timestamp (ms)',
+      'Deleted at (ms)',
+      'Category id',
+      'Original id',
+      'Splits (JSON)',
+    ],
+    () => data.deleted
+        .map((Map<String, Object?> row) => <CellValue?>[
+              _dateCell(row['deleted_at']),
+              DoubleCellValue((row['amount'] as num).toDouble()),
+              TextCellValue(row['merchant'] as String),
+              TextCellValue(row['direction'] as String),
+              _textOrBlank(row['payment_type']),
+              _textOrBlank(row['note']),
+              _textOrBlank(row['reference']),
+              IntCellValue((row['date'] as num).toInt()),
+              _intOrBlank(row['deleted_at']),
+              _intOrBlank(row['category_id']),
+              _intOrBlank(row['original_id']),
+              _textOrBlank(row['splits_json']),
+            ])
+        .toList(),
+  );
+
+  sheet(
+    kSheetMeta,
+    const <String>['Key', 'Value'],
+    () => <List<CellValue?>>[
+      for (final MapEntry<String, String> entry in data.meta.entries)
+        <CellValue?>[TextCellValue(entry.key), TextCellValue(entry.value)],
+      // `app_meta` rides here under a prefix rather than in a sheet of its own.
+      // It holds one key — the inbox scan watermark — and a whole tab for it
+      // would be a tab of noise.
+      for (final Map<String, Object?> row in data.appMeta)
+        <CellValue?>[
+          TextCellValue('app_meta.${row['key']}'),
+          TextCellValue(row['value'] as String),
+        ],
+    ],
+  );
+
+  // createExcel() opens with a stock 'Sheet1'. It can only go once the seven
+  // real sheets exist, since a workbook may not be left with none.
+  excel.delete('Sheet1');
+  excel.setDefaultSheet(kSheetTransactions);
+
+  final List<int>? bytes = excel.encode();
+  if (bytes == null) {
+    throw const BackupFormatException('The workbook could not be written.');
+  }
+  return Uint8List.fromList(bytes);
+}
+
+// --- reading ---------------------------------------------------------------
+
+/// One sheet, reduced to a header-name → column-index map plus its data rows.
+class _SheetReader {
+  _SheetReader(this.name, this._headers, this._rows);
+
+  factory _SheetReader.of(Excel excel, String name) {
+    final Sheet? sheet = excel.tables[name];
+    if (sheet == null) {
+      throw BackupFormatException(
+        'This workbook has no "$name" sheet, so it is not a backup this app '
+        'can read.',
+      );
+    }
+    final List<List<Data?>> rows = sheet.rows;
+    if (rows.isEmpty) {
+      throw BackupFormatException('The "$name" sheet is empty — not even a '
+          'header row.');
+    }
+    final Map<String, int> headers = <String, int>{};
+    for (int i = 0; i < rows.first.length; i++) {
+      final String? label = _cellText(rows.first[i]?.value)?.trim();
+      if (label != null && label.isNotEmpty) headers[label] = i;
+    }
+    for (final String required in kRequiredHeaders[name]!) {
+      if (!headers.containsKey(required)) {
+        throw BackupFormatException(
+          'The "$name" sheet has no "$required" column. It is one of the '
+          'columns a restore reads, so the file cannot be imported.',
+        );
+      }
+    }
+    return _SheetReader(name, headers, rows.skip(1).toList());
+  }
+
+  final String name;
+  final Map<String, int> _headers;
+  final List<List<Data?>> _rows;
+
+  int get length => _rows.length;
+
+  /// True when every cell in the row is empty. Sheets pads a table out with
+  /// blank rows the moment anyone scrolls, and importing those as transactions
+  /// with a null amount would be absurd.
+  bool _isBlank(List<Data?> row) =>
+      row.every((Data? cell) => _cellText(cell?.value)?.isEmpty ?? true);
+
+  /// Walks the data rows, handing [read] a cell-getter and the row's number as
+  /// a spreadsheet would print it. Blank rows are skipped rather than failing
+  /// the import.
+  void forEach(
+    void Function(CellValue? Function(String) cell, int rowNumber) read,
+  ) {
+    for (int i = 0; i < _rows.length; i++) {
+      final List<Data?> row = _rows[i];
+      if (_isBlank(row)) continue;
+      CellValue? cell(String header) {
+        final int? index = _headers[header];
+        if (index == null || index >= row.length) return null;
+        return row[index]?.value;
+      }
+
+      read(cell, i + 2); // +2: one-based, and past the header row
+    }
+  }
+
+  /// [forEach], collecting what each row reads into a table.
+  List<Map<String, Object?>> map(
+    Map<String, Object?> Function(CellValue? Function(String) cell, int rowNumber)
+        read,
+  ) {
+    final List<Map<String, Object?>> out = <Map<String, Object?>>[];
+    forEach((CellValue? Function(String) cell, int rowNumber) {
+      out.add(read(cell, rowNumber));
+    });
+    return out;
+  }
+
+  Never bad(int rowNumber, String problem) => throw BackupFormatException(
+        '"$name" row $rowNumber: $problem',
+      );
+}
+
+/// Reads a workbook written by [encodeBackupWorkbook] back into raw rows.
+///
+/// Throws [BackupFormatException] rather than returning half a database. Only
+/// the columns a restore needs are read; the display ones are recomputed on the
+/// next export, which is also why hand-editing a merchant name in the readable
+/// column has no effect — the "(as stored)" column is the one that counts.
+BackupData decodeBackupWorkbook(List<int> bytes) {
+  final Excel excel;
+  try {
+    excel = Excel.decodeBytes(bytes);
+  } catch (error) {
+    throw BackupFormatException(
+      'That file could not be opened as a spreadsheet ($error).',
+    );
+  }
+
+  final _SheetReader metaSheet = _SheetReader.of(excel, kSheetMeta);
+  final Map<String, String> meta = <String, String>{};
+  final List<Map<String, Object?>> appMeta = <Map<String, Object?>>[];
+  metaSheet.forEach((CellValue? Function(String) cell, int _) {
+    final String key = _cellText(cell('Key'))?.trim() ?? '';
+    final String value = _cellText(cell('Value')) ?? '';
+    if (key.startsWith('app_meta.')) {
+      appMeta.add(<String, Object?>{
+        'key': key.substring('app_meta.'.length),
+        'value': value,
+      });
+    } else if (key.isNotEmpty) {
+      meta[key] = value;
+    }
+  });
+
+  if (meta['format'] != kBackupFormat) {
+    throw const BackupFormatException(
+      'This spreadsheet was not written by this app, so restoring from it '
+      'would be guesswork.',
+    );
+  }
+
+  final _SheetReader categories = _SheetReader.of(excel, kSheetCategories);
+  final _SheetReader mappings = _SheetReader.of(excel, kSheetMerchantDefaults);
+  final _SheetReader transactions = _SheetReader.of(excel, kSheetTransactions);
+  final _SheetReader splits = _SheetReader.of(excel, kSheetSplits);
+  final _SheetReader deleted = _SheetReader.of(excel, kSheetDeleted);
+  final _SheetReader aliases = _SheetReader.of(excel, kSheetAliases);
+
+  return BackupData(
+    meta: meta,
+    appMeta: appMeta,
+    categories: categories.map((CellValue? Function(String) cell, int row) {
+      final int? id = _cellInt(cell('id'));
+      final String? name = _cellText(cell('Name'));
+      if (id == null) categories.bad(row, 'the id is missing or not a number.');
+      if (name == null || name.isEmpty) categories.bad(row, 'the name is empty.');
+      return <String, Object?>{'id': id, 'name': name};
+    }),
+    merchantMappings: mappings.map((CellValue? Function(String) cell, int row) {
+      final String? merchant = _cellText(cell('Merchant'));
+      final int? categoryId = _cellInt(cell('Category id'));
+      if (merchant == null || merchant.isEmpty) {
+        mappings.bad(row, 'the merchant is empty.');
+      }
+      if (categoryId == null) {
+        mappings.bad(row, 'the category id is missing or not a number.');
+      }
+      return <String, Object?>{
+        'merchant_name': merchant,
+        'category_id': categoryId,
+      };
+    }),
+    transactions:
+        transactions.map((CellValue? Function(String) cell, int row) {
+      final int? id = _cellInt(cell('id'));
+      final int? date = _cellInt(cell('Timestamp (ms)'));
+      final double? amount = _cellDouble(cell('Amount'));
+      final String? merchant = _cellText(cell('Merchant (as stored)'));
+      final int? categoryId = _cellInt(cell('Category id'));
+      if (id == null) transactions.bad(row, 'the id is missing.');
+      if (date == null) transactions.bad(row, 'the timestamp is missing.');
+      if (amount == null) transactions.bad(row, 'the amount is not a number.');
+      if (merchant == null || merchant.isEmpty) {
+        transactions.bad(row, 'the stored merchant is empty.');
+      }
+      if (categoryId == null) transactions.bad(row, 'the category id is missing.');
+      return <String, Object?>{
+        'id': id,
+        'amount': amount,
+        'payment_type': _cellTextOrNull(cell('Card (as stored)')),
+        'merchant': merchant,
+        'date': date,
+        'category_id': categoryId,
+        'direction': _cellText(cell('Direction')) ?? TxnDirection.debit.name,
+        'reference': _cellText(cell('Reference')) ?? '',
+        'note': _cellText(cell('Note')) ?? '',
+      };
+    }),
+    splits: splits.map((CellValue? Function(String) cell, int row) {
+      final int? id = _cellInt(cell('id'));
+      final int? transactionId = _cellInt(cell('transaction_id'));
+      final int? categoryId = _cellInt(cell('Category id'));
+      final double? amount = _cellDouble(cell('Amount'));
+      if (id == null) splits.bad(row, 'the id is missing.');
+      if (transactionId == null) splits.bad(row, 'the transaction id is missing.');
+      if (categoryId == null) splits.bad(row, 'the category id is missing.');
+      if (amount == null) splits.bad(row, 'the amount is not a number.');
+      return <String, Object?>{
+        'id': id,
+        'transaction_id': transactionId,
+        'category_id': categoryId,
+        'amount': amount,
+        'position': _cellInt(cell('position')) ?? 0,
+      };
+    }),
+    deleted: deleted.map((CellValue? Function(String) cell, int row) {
+      final double? amount = _cellDouble(cell('Amount'));
+      final String? merchant = _cellText(cell('Merchant'));
+      final int? date = _cellInt(cell('Timestamp (ms)'));
+      if (amount == null) deleted.bad(row, 'the amount is not a number.');
+      if (merchant == null || merchant.isEmpty) {
+        deleted.bad(row, 'the merchant is empty.');
+      }
+      if (date == null) deleted.bad(row, 'the timestamp is missing.');
+      return <String, Object?>{
+        'amount': amount,
+        'merchant': merchant,
+        'date': date,
+        'direction': _cellText(cell('Direction')) ?? TxnDirection.debit.name,
+        'reference': _cellText(cell('Reference')) ?? '',
+        'payment_type': _cellTextOrNull(cell('Card / account')),
+        'category_id': _cellInt(cell('Category id')),
+        'original_id': _cellInt(cell('Original id')),
+        'deleted_at': _cellInt(cell('Deleted at (ms)')),
+        'splits_json': _cellTextOrNull(cell('Splits (JSON)')),
+        'note': _cellTextOrNull(cell('Note')),
+      };
+    }),
+    aliases: aliases.map((CellValue? Function(String) cell, int row) {
+      final String? kind = _cellText(cell('Kind'));
+      final String? alias = _cellText(cell('Alias'));
+      final String? canonical = _cellText(cell('Canonical'));
+      if (kind == null || kind.isEmpty) aliases.bad(row, 'the kind is empty.');
+      if (alias == null || alias.isEmpty) aliases.bad(row, 'the alias is empty.');
+      if (canonical == null || canonical.isEmpty) {
+        aliases.bad(row, 'the canonical name is empty.');
+      }
+      return <String, Object?>{
+        'kind': kind,
+        'alias': alias,
+        'canonical': canonical,
+      };
+    }),
+  );
+}
+
+// --- validation ------------------------------------------------------------
+
+/// Everything wrong with [data], as sentences fit to show the user. Empty means
+/// it is safe to import.
+///
+/// This runs *before* anything is deleted, and a single entry is enough to
+/// abandon the restore — which is the whole point. The database's own foreign
+/// keys would catch most of these too, but only halfway through the write, and
+/// "which row was it?" is not a question a rolled-back transaction can answer.
+List<String> validateBackup(BackupData data, {required int appSchemaVersion}) {
+  final List<String> problems = <String>[];
+
+  final int? formatVersion = data.formatVersion;
+  if (formatVersion == null) {
+    problems.add('The file does not say which backup format it uses.');
+  } else if (formatVersion > kBackupFormatVersion) {
+    problems.add(
+      'This backup is in format version $formatVersion, and this app '
+      'understands up to $kBackupFormatVersion. Update the app first.',
+    );
+  }
+
+  final int? schemaVersion = data.schemaVersion;
+  if (schemaVersion == null) {
+    problems.add('The file does not say which database version wrote it.');
+  } else if (schemaVersion > appSchemaVersion) {
+    // Refused outright rather than imported hopefully. A newer version may have
+    // columns this build has never heard of, and dropping them silently would
+    // turn a backup into a lossy one at the moment it is most needed.
+    problems.add(
+      'This backup came from a newer version of the app (database v'
+      '$schemaVersion, this app reads up to v$appSchemaVersion). Update the '
+      'app, then restore.',
+    );
+  }
+
+  final Set<int> categoryIds = <int>{};
+  final Set<String> categoryNames = <String>{};
+  for (final Map<String, Object?> row in data.categories) {
+    final int id = row['id'] as int;
+    if (!categoryIds.add(id)) {
+      problems.add('Two categories share the id $id.');
+    }
+    // The column is UNIQUE COLLATE NOCASE, so two spellings differing only in
+    // case would collide on insert rather than both landing.
+    if (!categoryNames.add((row['name'] as String).toLowerCase())) {
+      problems.add('Two categories are named "${row['name']}".');
+    }
+  }
+  // Every uncategorised transaction points at it, deleting a category moves its
+  // rows to it, and the picker pins it to the top. A backup without it cannot
+  // produce a working app.
+  if (!categoryNames.contains(AppDatabase.uncategorized.toLowerCase())) {
+    problems.add(
+      'The Categories sheet has no "${AppDatabase.uncategorized}" row, which '
+      'the app cannot run without.',
+    );
+  }
+
+  const Set<String> directions = <String>{'debit', 'credit'};
+  final Set<int> transactionIds = <int>{};
+  final Set<String> naturalKeys = <String>{};
+  for (final Map<String, Object?> row in data.transactions) {
+    final int id = row['id'] as int;
+    if (!transactionIds.add(id)) {
+      problems.add('Two transactions share the id $id.');
+    }
+    if (!categoryIds.contains(row['category_id'])) {
+      problems.add(
+        'Transaction $id is in category ${row['category_id']}, which is not in '
+        'the Categories sheet.',
+      );
+    }
+    if (!directions.contains(row['direction'])) {
+      problems.add(
+        'Transaction $id has direction "${row['direction']}" — it must be '
+        'debit or credit.',
+      );
+    }
+    if (!naturalKeys.add(_naturalKeyString(row))) {
+      problems.add(
+        'Two transactions have the same amount, merchant, timestamp, direction '
+        'and reference, which the database forbids (see transaction $id).',
+      );
+    }
+  }
+
+  final Map<int, double> splitTotals = <int, double>{};
+  final Set<int> splitIds = <int>{};
+  for (final Map<String, Object?> row in data.splits) {
+    final int id = row['id'] as int;
+    final int transactionId = row['transaction_id'] as int;
+    if (!splitIds.add(id)) problems.add('Two split lines share the id $id.');
+    if (!transactionIds.contains(transactionId)) {
+      problems.add(
+        'A split line belongs to transaction $transactionId, which is not in '
+        'the Transactions sheet.',
+      );
+    }
+    if (!categoryIds.contains(row['category_id'])) {
+      problems.add(
+        'A split line on transaction $transactionId is in category '
+        '${row['category_id']}, which is not in the Categories sheet.',
+      );
+    }
+    splitTotals[transactionId] =
+        (splitTotals[transactionId] ?? 0) + (row['amount'] as double);
+  }
+
+  // SQLite cannot express this as a CHECK, so it is enforced in Dart on the way
+  // in — exactly as `saveSplits` does on the way out.
+  final Map<int, double> amounts = <int, double>{
+    for (final Map<String, Object?> row in data.transactions)
+      row['id'] as int: row['amount'] as double,
+  };
+  splitTotals.forEach((int transactionId, double total) {
+    final double? amount = amounts[transactionId];
+    if (amount != null && (total - amount).abs() > _splitTolerance) {
+      problems.add(
+        'The split lines on transaction $transactionId add up to '
+        '${total.toStringAsFixed(2)}, but the transaction is '
+        '${amount.toStringAsFixed(2)}.',
+      );
+    }
+  });
+
+  final Set<String> mappedMerchants = <String>{};
+  for (final Map<String, Object?> row in data.merchantMappings) {
+    if (!mappedMerchants.add((row['merchant_name'] as String).toLowerCase())) {
+      problems.add(
+        'Two merchant defaults are set for "${row['merchant_name']}".',
+      );
+    }
+    if (!categoryIds.contains(row['category_id'])) {
+      problems.add(
+        'The default for "${row['merchant_name']}" points at category '
+        '${row['category_id']}, which is not in the Categories sheet.',
+      );
+    }
+  }
+
+  final Set<String> kinds =
+      NameKind.values.map((NameKind k) => k.column).toSet();
+  final Set<String> aliasKeys = <String>{};
+  for (final Map<String, Object?> row in data.aliases) {
+    final String kind = row['kind'] as String;
+    if (!kinds.contains(kind)) {
+      problems.add('"$kind" is not a kind of name the app merges.');
+    }
+    if (!aliasKeys.add('$kind ${(row['alias'] as String).toLowerCase()}')) {
+      problems.add('The alias "${row['alias']}" is listed twice.');
+    }
+  }
+
+  final Set<String> deletedKeys = <String>{};
+  for (final Map<String, Object?> row in data.deleted) {
+    if (!deletedKeys.add(_naturalKeyString(row))) {
+      problems.add(
+        'Two deleted rows have the same amount, merchant, timestamp, direction '
+        'and reference (see "${row['merchant']}").',
+      );
+    }
+    if (!directions.contains(row['direction'])) {
+      problems.add(
+        'A deleted row for "${row['merchant']}" has direction '
+        '"${row['direction']}" — it must be debit or credit.',
+      );
+    }
+    final Object? categoryId = row['category_id'];
+    // Nullable by design: a tombstone written before schema v4 has no category,
+    // and restores into Uncategorized. A category that is *named* but missing is
+    // a different matter.
+    if (categoryId != null && !categoryIds.contains(categoryId)) {
+      problems.add(
+        'A deleted row for "${row['merchant']}" is in category $categoryId, '
+        'which is not in the Categories sheet.',
+      );
+    }
+  }
+
+  return problems;
+}
+
+/// The five columns that uniquely identify a transaction, as one comparable
+/// string. `toLowerCase` on the merchant because the real index is COLLATE
+/// NOCASE, and the amount through `toString` because that is round-trip exact.
+String _naturalKeyString(Map<String, Object?> row) => <String>[
+      (row['amount'] as double).toString(),
+      (row['merchant'] as String).toLowerCase(),
+      (row['date'] as int).toString(),
+      row['direction'] as String,
+      row['reference'] as String,
+    ].join(' ');
+
+// --- files, isolates and the share sheet -----------------------------------
+
+/// What Android and Google Drive need to be told an `.xlsx` is, so that Sheets
+/// offers to open it rather than the file being treated as an unknown blob.
+const String kXlsxMimeType =
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+/// What a backup is called. Dated, because the first thing anyone wants to know
+/// about a file found in Drive a year later is when it was taken.
+///
+/// The pre-restore copy carries the time as well: a restore that went wrong is
+/// likely to be followed by another attempt within the minute, and two safety
+/// copies from one afternoon must not overwrite each other.
+String backupFileName(DateTime at, {bool beforeRestore = false}) =>
+    beforeRestore
+        ? 'tu-expense-before-restore-'
+            '${DateFormat('yyyy-MM-dd-HHmm').format(at)}.xlsx'
+        : 'tu-expense-${DateFormat('yyyy-MM-dd').format(at)}.xlsx';
+
+/// Where backups land. App-specific external storage, for the same reasons the
+/// updater uses it: writable without a storage permission, and readable by the
+/// app a share hands the file on to.
+Future<Directory> _backupFolder() async {
+  final Directory base = await getExternalStorageDirectory() ??
+      await getApplicationSupportDirectory();
+  final Directory folder = Directory(p.join(base.path, 'backups'));
+  await folder.create(recursive: true);
+  return folder;
+}
+
+/// Builds the workbook and writes it, returning the file.
+///
+/// The encoding happens on a background isolate. A workbook is zipped XML built
+/// a cell at a time, so a few thousand transactions is comfortably enough work
+/// to freeze a spinner mid-spin if it were done here.
+Future<File> writeBackup(BackupData data, String fileName) async {
+  final Directory folder = await _backupFolder();
+  final File file = File(p.join(folder.path, fileName));
+  await file.writeAsBytes(await compute(encodeBackupWorkbook, data));
+  return file;
+}
+
+/// [decodeBackupWorkbook] on a background isolate.
+///
+/// Returns the failure rather than throwing it: the message is written for the
+/// user, and having it survive the isolate boundary as a plain string is surer
+/// than trusting an exception object to.
+Future<(BackupData?, String?)> decodeBackupInBackground(Uint8List bytes) =>
+    compute(_decodeOrMessage, bytes);
+
+(BackupData?, String?) _decodeOrMessage(Uint8List bytes) {
+  try {
+    return (decodeBackupWorkbook(bytes), null);
+  } on BackupFormatException catch (error) {
+    return (null, error.message);
+  } catch (error) {
+    return (null, 'That file could not be read as a backup ($error).');
+  }
+}
+
+/// Asks before a restore throws the current ledger away.
+///
+/// Both counts are named because they are the one thing that makes the question
+/// answerable — restoring 1,190 transactions over 1,284 is a very different
+/// proposition from restoring them over none, and only the user knows which of
+/// the two they meant. False for a dismissed dialog, so a tap outside cancels.
+Future<bool> confirmRestore(
+  BuildContext context, {
+  required int replacing,
+  required int incoming,
+}) async {
+  final bool? confirmed = await showDialog<bool>(
+    context: context,
+    builder: (BuildContext dialogContext) {
+      final ColorScheme scheme = Theme.of(dialogContext).colorScheme;
+      return AlertDialog(
+        title: const Text('Restore from this backup?'),
+        content: Text(
+          replacing == 0
+              ? 'This loads $incoming transactions. There is nothing in the '
+                  'app to replace.'
+              : 'This replaces all $replacing transactions currently in the '
+                  'app with the $incoming in this file, along with their '
+                  'categories, splits, merges and deleted rows.\n\n'
+                  'A copy of what is here now is saved first, but nothing '
+                  'else can undo it.',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: scheme.error,
+              foregroundColor: scheme.onError,
+            ),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Replace'),
+          ),
+        ],
+      );
+    },
+  );
+  return confirmed ?? false;
+}
+
+/// Shows why a file was refused, having touched nothing.
+///
+/// Long lists are truncated: a workbook broken in one place is usually broken
+/// in a hundred, and a dialog listing all hundred says less than one listing
+/// five and a count.
+Future<void> showBackupProblems(
+  BuildContext context,
+  List<String> problems,
+) {
+  const int shown = 5;
+  final List<String> visible = problems.take(shown).toList();
+  final int rest = problems.length - visible.length;
+  return showDialog<void>(
+    context: context,
+    builder: (BuildContext dialogContext) => AlertDialog(
+      title: const Text('This backup cannot be restored'),
+      content: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const Text('Nothing in the app has been changed.'),
+            const SizedBox(height: 12),
+            for (final String problem in visible)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text('• $problem'),
+              ),
+            if (rest > 0)
+              Text(
+                'and $rest more.',
+                style: Theme.of(dialogContext).textTheme.bodySmall,
+              ),
+          ],
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('Close'),
+        ),
+      ],
+    ),
+  );
 }
 
 /// What one pass over the inbox did. [skipped] counts alerts that parsed but
@@ -7791,6 +8932,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _loading = true;
   bool _checking = false;
 
+  /// One at a time, and neither while the other runs: both walk the whole
+  /// database, and a restore landing halfway through an export would write a
+  /// workbook of two different ledgers.
+  bool _exporting = false;
+  bool _restoring = false;
+
+  bool get _busyWithData => _exporting || _restoring;
+
   /// The release a check on this screen turned up, kept so the Install button
   /// survives dismissing the dialog.
   AppRelease? _available;
@@ -7824,6 +8973,116 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // race against and no reason to make it lag a disk write.
     setState(() => _autoCheck = value);
     await UpdatePrefs.instance.setAutoCheckEnabled(value);
+  }
+
+  void _say(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
+  }
+
+  /// Writes the whole database to a workbook and offers it to the share sheet,
+  /// which is how it reaches Drive — and from Drive, Google Sheets.
+  Future<void> _export() async {
+    if (_busyWithData) return;
+    setState(() => _exporting = true);
+    try {
+      final BackupData data = await AppDatabase.instance.exportAll();
+      final File file =
+          await writeBackup(data, backupFileName(DateTime.now()));
+      if (!mounted) return;
+      await SharePlus.instance.share(
+        ShareParams(
+          files: <XFile>[XFile(file.path, mimeType: kXlsxMimeType)],
+          subject: 'TU Expense Tracker backup',
+          text: '${data.meta['transactions']} transactions, exported '
+              '${DateFormat('d MMM yyyy').format(DateTime.now())}.',
+        ),
+      );
+    } catch (error) {
+      _say('The export failed: $error');
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
+  /// Reads a workbook back over the top of everything.
+  ///
+  /// Nothing is deleted until the file has been decoded, validated and
+  /// confirmed, and a copy of what is about to be replaced has been written —
+  /// so every way this can fail is a way that leaves the ledger alone.
+  Future<void> _restore() async {
+    if (_busyWithData) return;
+
+    final PlatformFile? picked = await FilePicker.pickFile(
+      dialogTitle: 'Choose a backup workbook',
+      type: FileType.custom,
+      allowedExtensions: const <String>['xlsx'],
+    );
+    if (picked == null || !mounted) return;
+
+    setState(() => _restoring = true);
+    try {
+      final (BackupData? backup, String? unreadable) =
+          await decodeBackupInBackground(await picked.readAsBytes());
+      if (!mounted) return;
+      if (backup == null) {
+        await showBackupProblems(context, <String>[unreadable!]);
+        return;
+      }
+
+      final List<String> problems = validateBackup(
+        backup,
+        appSchemaVersion: AppDatabase.schemaVersion,
+      );
+      if (problems.isNotEmpty) {
+        await showBackupProblems(context, problems);
+        return;
+      }
+
+      // Read before asking, so the question can name what is about to go.
+      final BackupData current = await AppDatabase.instance.exportAll();
+      if (!mounted) return;
+      final bool go = await confirmRestore(
+        context,
+        replacing: current.transactions.length,
+        incoming: backup.transactions.length,
+      );
+      if (!go || !mounted) return;
+
+      // The one irreversible action in the app, made reversible. Written before
+      // the wipe rather than after, so a crash in between still leaves it.
+      final File safety = await writeBackup(
+        current,
+        backupFileName(DateTime.now(), beforeRestore: true),
+      );
+      await AppDatabase.instance.replaceAll(backup);
+      if (!mounted) return;
+
+      await showDialog<void>(
+        context: context,
+        builder: (BuildContext dialogContext) => AlertDialog(
+          title: const Text('Restored'),
+          content: Text(
+            '${backup.transactions.length} transactions, '
+            '${backup.categories.length} categories and '
+            '${backup.deleted.length} deleted rows are back.\n\n'
+            'What was here before was saved as ${p.basename(safety.path)}.',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Done'),
+            ),
+          ],
+        ),
+      );
+    } catch (error) {
+      _say('The restore failed: $error');
+    } finally {
+      if (mounted) setState(() => _restoring = false);
+    }
   }
 
   /// The explicit check. Unlike the launch one this always reports back, so a
@@ -7919,6 +9178,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       builder: (_) => const CategoriesScreen(),
                     ),
                   ),
+                ),
+                const Divider(height: 32),
+                _SettingsHeader('Data'),
+                ListTile(
+                  leading: const Icon(Icons.table_view_outlined),
+                  title: const Text('Export data'),
+                  subtitle: const Text(
+                    'A spreadsheet of everything — and the same file a '
+                    'restore reads back',
+                  ),
+                  trailing: _exporting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : FilledButton.tonal(
+                          onPressed: _busyWithData ? null : _export,
+                          child: const Text('Export'),
+                        ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.settings_backup_restore),
+                  title: const Text('Restore from backup'),
+                  subtitle: const Text(
+                    'Replaces everything in the app with an exported '
+                    'workbook',
+                  ),
+                  trailing: _restoring
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : FilledButton.tonal(
+                          onPressed: _busyWithData ? null : _restore,
+                          child: const Text('Restore'),
+                        ),
                 ),
                 const Divider(height: 32),
                 _SettingsHeader('Updates'),
