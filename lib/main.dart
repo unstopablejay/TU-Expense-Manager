@@ -447,6 +447,73 @@ class ExpenseCategory {
   final String name;
 }
 
+/// A category together with everything filed under it — what the cleanup screen
+/// lists, and what lets a delete describe its consequences before it happens.
+class CategoryUsage {
+  const CategoryUsage({
+    required this.category,
+    required this.unsplitCount,
+    required this.splitCount,
+    required this.merchantDefaultCount,
+  });
+
+  factory CategoryUsage.fromMap(Map<String, Object?> map) => CategoryUsage(
+        category: ExpenseCategory.fromMap(map),
+        unsplitCount: map['unsplit_count'] as int,
+        splitCount: map['split_count'] as int,
+        merchantDefaultCount: map['merchant_default_count'] as int,
+      );
+
+  final ExpenseCategory category;
+
+  /// Transactions filed here outright, with no split lines of their own.
+  final int unsplitCount;
+
+  /// Split transactions with at least one line here — counted once each,
+  /// however many of their lines land in this category.
+  final int splitCount;
+
+  /// `merchant_mappings` rows pointing here.
+  final int merchantDefaultCount;
+
+  /// How many transactions the ledger shows under a filter on this category.
+  ///
+  /// The two counts add rather than overlap: a transaction either has split
+  /// lines or it does not, and only one of the two queries can see it.
+  int get txnCount => unsplitCount + splitCount;
+
+  bool get inUse => txnCount > 0 || merchantDefaultCount > 0;
+}
+
+/// What one [AppDatabase.deleteCategory] moved, and everything needed to move it
+/// back.
+///
+/// Row ids rather than a predicate, and that is the whole point: rows already
+/// sitting in the destination before the delete must not be dragged out of it by
+/// an undo. Only what actually moved is listed here.
+class CategoryDeletion {
+  const CategoryDeletion({
+    required this.categoryId,
+    required this.categoryName,
+    required this.transactionIds,
+    required this.splitIds,
+    required this.merchantNames,
+    required this.tombstones,
+  });
+
+  final int categoryId;
+  final String categoryName;
+  final List<int> transactionIds;
+  final List<int> splitIds;
+  final List<String> merchantNames;
+
+  /// The `deleted_transactions` rows that named the category, exactly as they
+  /// read before the delete: the natural key plus the two columns that mentioned
+  /// it. Kept whole because `splits_json` is rewritten rather than repointed,
+  /// and putting the old text straight back is the only exact undo of that.
+  final List<Map<String, Object?>> tombstones;
+}
+
 /// One category/amount line of a split transaction.
 ///
 /// Carries the category *name* as well as its id so a tombstone snapshot and
@@ -1153,6 +1220,280 @@ class AppDatabase {
     ''');
     return rows.map(MerchantSummary.fromMap).toList();
   }
+
+  // -------------------------------------------------------------------------
+  // 2c. DELETING A CATEGORY
+  // -------------------------------------------------------------------------
+
+  /// Every category with what is filed under it, in the same order as
+  /// [categories].
+  ///
+  /// The transaction counts are split in two because a split transaction is not
+  /// "in" a category the way an unsplit one is: it has a line there. Counting it
+  /// through `transactions.category_id` would both miss the splits whose minor
+  /// line is here and count the ones whose dominant line is, which is neither of
+  /// the two numbers anybody wants.
+  Future<List<CategoryUsage>> categoryUsage() async {
+    final db = await database;
+    final rows = await db.rawQuery('''
+      SELECT c.id, c.name,
+             (SELECT COUNT(*)
+                FROM transactions t
+               WHERE t.category_id = c.id
+                 AND NOT EXISTS (SELECT 1
+                                   FROM transaction_splits s
+                                  WHERE s.transaction_id = t.id))
+               AS unsplit_count,
+             (SELECT COUNT(DISTINCT s.transaction_id)
+                FROM transaction_splits s
+               WHERE s.category_id = c.id)
+               AS split_count,
+             (SELECT COUNT(*)
+                FROM merchant_mappings m
+               WHERE m.category_id = c.id)
+               AS merchant_default_count
+      FROM categories c
+      ORDER BY CASE WHEN c.name = '$uncategorized' THEN 0 ELSE 1 END, c.name ASC
+    ''');
+    return rows.map(CategoryUsage.fromMap).toList();
+  }
+
+  /// Removes [category] and moves everything filed under it into [moveToId].
+  ///
+  /// All of it in one SQL transaction. The foreign keys on `transactions` and
+  /// `transaction_splits` deliberately do not cascade, so a half-applied delete
+  /// either throws with the category still standing or finishes — it can never
+  /// leave a split line pointing at a category that is gone.
+  ///
+  /// `merchant_mappings` is repointed by hand rather than left to its `ON DELETE
+  /// CASCADE`: a merchant that defaulted to Food belongs under whatever Food
+  /// became, and letting the row cascade away would quietly demote it from
+  /// "always files here" to "never configured".
+  ///
+  /// `deleted_transactions` has no foreign key to follow, which is exactly why it
+  /// has to be repointed too. A tombstone left naming a category that no longer
+  /// exists restores into a `transactions` insert the FK then rejects, so the bin
+  /// would throw instead of restoring — and its `splits_json` snapshot has to be
+  /// rewritten for the same reason [restoreTransactions] checks it, or the
+  /// breakdown is dropped on the way back.
+  ///
+  /// Returns what moved, which is what [restoreCategory] needs to undo it.
+  Future<CategoryDeletion> deleteCategory({
+    required ExpenseCategory category,
+    required int moveToId,
+  }) async {
+    if (category.id == await uncategorizedId()) {
+      // Everything falls back to it — ingest, a pre-v4 restore, a merchant set
+      // to always ask. There would be nowhere for any of that to land.
+      throw ArgumentError('$uncategorized cannot be deleted');
+    }
+    if (category.id == moveToId) {
+      throw ArgumentError('A category cannot be moved into itself');
+    }
+
+    final db = await database;
+    return db.transaction<CategoryDeletion>((Transaction txn) async {
+      final List<Map<String, Object?>> target = await txn.query(
+        'categories',
+        columns: <String>['name'],
+        where: 'id = ?',
+        whereArgs: <Object?>[moveToId],
+        limit: 1,
+      );
+      if (target.isEmpty) throw ArgumentError('No category with id $moveToId');
+      final String moveToName = target.first['name'] as String;
+
+      final List<int> transactionIds = (await txn.query(
+        'transactions',
+        columns: <String>['id'],
+        where: 'category_id = ?',
+        whereArgs: <Object?>[category.id],
+      )).map((Map<String, Object?> r) => r['id'] as int).toList();
+
+      final List<int> splitIds = (await txn.query(
+        'transaction_splits',
+        columns: <String>['id'],
+        where: 'category_id = ?',
+        whereArgs: <Object?>[category.id],
+      )).map((Map<String, Object?> r) => r['id'] as int).toList();
+
+      final List<String> merchantNames = (await txn.query(
+        'merchant_mappings',
+        columns: <String>['merchant_name'],
+        where: 'category_id = ?',
+        whereArgs: <Object?>[category.id],
+      )).map((Map<String, Object?> r) => r['merchant_name'] as String).toList();
+
+      // Every candidate tombstone read, then filtered by decoding rather than by
+      // a LIKE over the JSON: `"category_id":1` is a prefix of
+      // `"category_id":12`, and the shape of the encoding is not something this
+      // should have to know.
+      final List<Map<String, Object?>> tombstones = <Map<String, Object?>>[];
+      for (final Map<String, Object?> row in await txn.query(
+        'deleted_transactions',
+        columns: _tombstoneCategoryColumns,
+        where: 'category_id = ? OR splits_json IS NOT NULL',
+        whereArgs: <Object?>[category.id],
+      )) {
+        final List<TxnSplit> lines = decodeSplits(row['splits_json'] as String?);
+        final bool inLines =
+            lines.any((TxnSplit l) => l.categoryId == category.id);
+        final bool inColumn = row['category_id'] == category.id;
+        if (!inLines && !inColumn) continue;
+
+        tombstones.add(row);
+        await txn.update(
+          'deleted_transactions',
+          <String, Object?>{
+            if (inColumn) 'category_id': moveToId,
+            // Only when a line actually named the category: writing the
+            // re-encoded lines unconditionally would turn an unreadable
+            // `splits_json` into NULL for rows this has no business changing.
+            if (inLines)
+              'splits_json': encodeSplits(<TxnSplit>[
+                for (final TxnSplit line in lines)
+                  if (line.categoryId == category.id)
+                    TxnSplit(
+                      categoryId: moveToId,
+                      categoryName: moveToName,
+                      amount: line.amount,
+                    )
+                  else
+                    line,
+              ]),
+          },
+          where: _naturalKeyWhere,
+          whereArgs: _naturalKeyArgsOf(row),
+        );
+      }
+
+      for (final String table in <String>[
+        'transactions',
+        'transaction_splits',
+        'merchant_mappings',
+      ]) {
+        await txn.update(
+          table,
+          <String, Object?>{'category_id': moveToId},
+          where: 'category_id = ?',
+          whereArgs: <Object?>[category.id],
+        );
+      }
+
+      await txn.delete(
+        'categories',
+        where: 'id = ?',
+        whereArgs: <Object?>[category.id],
+      );
+
+      return CategoryDeletion(
+        categoryId: category.id,
+        categoryName: category.name,
+        transactionIds: transactionIds,
+        splitIds: splitIds,
+        merchantNames: merchantNames,
+        tombstones: tombstones,
+      );
+    });
+  }
+
+  /// Puts back what [deleteCategory] moved.
+  ///
+  /// The category returns under its original id wherever that id is still free —
+  /// `AUTOINCREMENT` never hands one out twice, so it is — which is what lets the
+  /// tombstones be restored verbatim. Should the same name have been created
+  /// afresh in the meantime, that row wins and the moved rows go back into it
+  /// instead: same name, same transactions, a different id.
+  Future<void> restoreCategory(CategoryDeletion deletion) async {
+    final db = await database;
+    await db.transaction((Transaction txn) async {
+      int id = await txn.insert(
+        'categories',
+        <String, Object?>{'id': deletion.categoryId, 'name': deletion.categoryName},
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+      if (id == 0) {
+        final List<Map<String, Object?>> existing = await txn.query(
+          'categories',
+          columns: <String>['id'],
+          where: 'name = ?',
+          whereArgs: <Object?>[deletion.categoryName],
+          limit: 1,
+        );
+        // Nothing to move back into and no way to make one. Leaving the rows
+        // where the delete put them is the only safe answer.
+        if (existing.isEmpty) return;
+        id = existing.first['id'] as int;
+      }
+
+      await _repoint(txn, 'transactions', 'id', deletion.transactionIds, id);
+      await _repoint(txn, 'transaction_splits', 'id', deletion.splitIds, id);
+      await _repoint(
+          txn, 'merchant_mappings', 'merchant_name', deletion.merchantNames, id);
+
+      // Only exact when the original id came back; against a different one the
+      // stored text would point at an id that does not exist and reintroduce the
+      // failing restore this all exists to prevent. The tombstones then stay
+      // where the delete left them, which is at least a category that exists.
+      if (id != deletion.categoryId) return;
+      for (final Map<String, Object?> row in deletion.tombstones) {
+        await txn.update(
+          'deleted_transactions',
+          <String, Object?>{
+            'category_id': row['category_id'],
+            'splits_json': row['splits_json'],
+          },
+          where: _naturalKeyWhere,
+          whereArgs: _naturalKeyArgsOf(row),
+        );
+      }
+    });
+  }
+
+  /// Sets `category_id` on the [table] rows [keyColumn] names, in chunks small
+  /// enough for SQLite's bound-variable limit — an undo can name every
+  /// transaction in the ledger.
+  static Future<void> _repoint(
+    Transaction txn,
+    String table,
+    String keyColumn,
+    List<Object?> keys,
+    int categoryId,
+  ) async {
+    const int chunk = 400;
+    for (var i = 0; i < keys.length; i += chunk) {
+      final int end = i + chunk < keys.length ? i + chunk : keys.length;
+      final List<Object?> slice = keys.sublist(i, end);
+      await txn.update(
+        table,
+        <String, Object?>{'category_id': categoryId},
+        where:
+            '$keyColumn IN (${List<String>.filled(slice.length, '?').join(', ')})',
+        whereArgs: slice,
+      );
+    }
+  }
+
+  /// What [deleteCategory] reads off a tombstone: its key, and the two columns
+  /// that can name a category.
+  static const List<String> _tombstoneCategoryColumns = <String>[
+    'amount',
+    'merchant',
+    'date',
+    'direction',
+    'reference',
+    'category_id',
+    'splits_json',
+  ];
+
+  /// `whereArgs` for [_naturalKeyWhere] from a raw `deleted_transactions` row.
+  static List<Object?> _naturalKeyArgsOf(Map<String, Object?> row) => <Object?>[
+        row['amount'],
+        row['merchant'],
+        row['date'],
+        row['direction'],
+        row['reference'],
+      ];
 
   // -------------------------------------------------------------------------
   // 3. AUTO-CATEGORIZE
@@ -3342,45 +3683,18 @@ class _HomeShellState extends State<HomeShell> {
 
   void _clearSelection() => setState(_selected.clear);
 
-  /// Bulk delete asks first. The selection bar's delete sits exactly where the
-  /// overflow menu is otherwise, so a reach for the menu can land on it — and
-  /// unlike a swipe, nothing about tapping an app bar icon says "destructive".
+  /// Bulk delete asks first, through the same
+  /// [confirmDeleteTransactions] a swipe goes through. The selection bar's
+  /// delete sits exactly where the overflow menu is otherwise, so a reach for
+  /// the menu can land on it.
   Future<void> _confirmBulkDelete() async {
     final gone = _transactions
         .where((ExpenseTxn t) => _selected.contains(t.id))
         .toList();
     if (gone.isEmpty) return;
 
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) {
-        final scheme = Theme.of(dialogContext).colorScheme;
-        return AlertDialog(
-          title: Text(gone.length == 1
-              ? 'Delete this transaction?'
-              : 'Delete ${gone.length} transactions?'),
-          content: const Text(
-            'They stay out of future inbox scans, and can be brought back from '
-            'Deleted transactions.',
-          ),
-          actions: <Widget>[
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              style: FilledButton.styleFrom(
-                backgroundColor: scheme.error,
-                foregroundColor: scheme.onError,
-              ),
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Delete'),
-            ),
-          ],
-        );
-      },
-    );
-    if (!mounted || !(confirmed ?? false)) return;
+    final bool confirmed = await confirmDeleteTransactions(context, gone.length);
+    if (!mounted || !confirmed) return;
     await _delete(gone);
   }
 
@@ -4375,6 +4689,47 @@ class _NothingToChart extends StatelessWidget {
 // TRANSACTIONS TAB — the whole ledger: filtered, sorted, and editable in place
 // ---------------------------------------------------------------------------
 
+/// Asks before [count] transactions are deleted. False for a dismissed dialog,
+/// so a tap outside is a cancel.
+///
+/// One function for every route to a delete — the swipe on a row and the bulk
+/// delete in the selection bar — so the two cannot end up making different
+/// promises about what deleting means. It is a real question in both cases: the
+/// rows go out of future inbox scans as well as out of the ledger, which is not
+/// something a gesture should be able to do on its own.
+Future<bool> confirmDeleteTransactions(BuildContext context, int count) async {
+  final bool? confirmed = await showDialog<bool>(
+    context: context,
+    builder: (BuildContext dialogContext) {
+      final ColorScheme scheme = Theme.of(dialogContext).colorScheme;
+      return AlertDialog(
+        title: Text(count == 1
+            ? 'Delete this transaction?'
+            : 'Delete $count transactions?'),
+        content: Text(
+          '${count == 1 ? 'It stays' : 'They stay'} out of future inbox scans, '
+          'and can be brought back from Deleted transactions.',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: scheme.error,
+              foregroundColor: scheme.onError,
+            ),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      );
+    },
+  );
+  return confirmed ?? false;
+}
+
 /// The screen over the ledger itself. (The Dashboard tab is the same rows as
 /// charts; this is the rows.)
 ///
@@ -4445,12 +4800,35 @@ class TransactionsTab extends StatelessWidget {
   /// A scrolling row of chips that each open a sheet does fit, and matches how
   /// the rest of the app asks for a choice.
   Widget _chipStrip(BuildContext context) {
+    // Offered against the resting state rather than against `isEmpty`: a user
+    // who widened to *all* months has an empty filter set and very much wants a
+    // way back to this month.
+    final bool atRest = filters.isDefaultFor(currentMonth);
+
     return SizedBox(
       height: 56,
       child: ListView(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
         children: <Widget>[
+          // First in the strip, because this is the way out of a filter set that
+          // has narrowed the ledger to nothing and it cannot be the thing that
+          // needs scrolling to. Behind the four facet chips it was reachable only
+          // by scrolling past the very chips that caused the problem.
+          //
+          // Dead rather than absent when there is nothing to clear, for the same
+          // reason the merge screen's app bar keeps its button: a chip that comes
+          // and goes reshuffles everything behind it, and this one sits in front
+          // of all four. It also has to be visible before it is needed, or
+          // nobody learns it is there.
+          ActionChip(
+            avatar: const Icon(Icons.filter_alt_off_outlined, size: 18),
+            label: const Text('Clear all'),
+            onPressed: atRest
+                ? null
+                : () => onFiltersChanged(LedgerFilters.defaults(currentMonth)),
+          ),
+          const SizedBox(width: 8),
           ActionChip(
             avatar: const Icon(Icons.swap_vert, size: 18),
             // The order is always in force, so the chip names the current one
@@ -4525,18 +4903,6 @@ class TransactionsTab extends StatelessWidget {
                   : filters.copyWith(paymentType: picked.first));
             },
           ),
-          // Offered against the resting state rather than against `isEmpty`:
-          // a user who widened to all months has an empty filter set and very
-          // much wants a way back to this month.
-          if (!filters.isDefaultFor(currentMonth)) ...<Widget>[
-            const SizedBox(width: 8),
-            ActionChip(
-              avatar: const Icon(Icons.close, size: 18),
-              label: const Text('Clear'),
-              onPressed: () =>
-                  onFiltersChanged(LedgerFilters.defaults(currentMonth)),
-            ),
-          ],
         ],
       ),
     );
@@ -4601,7 +4967,8 @@ class TransactionsTab extends StatelessWidget {
                                     money: money,
                                   );
                                 }
-                                return _ledgerRow(entries[index - 1], selecting);
+                                return _ledgerRow(
+                                    context, entries[index - 1], selecting);
                               },
                             ),
                 ),
@@ -4610,14 +4977,14 @@ class TransactionsTab extends StatelessWidget {
     );
   }
 
-  Widget _ledgerRow(LedgerEntry entry, bool selecting) {
+  Widget _ledgerRow(BuildContext context, LedgerEntry entry, bool selecting) {
     final ExpenseTxn txn = entry.txn;
 
     // Under a category filter a split shows only the part that matched, but
-    // deleting takes the whole transaction. Swipe is the one delete with no
-    // confirmation behind it, so it is withheld from rows that are showing
-    // less than they would remove; the actions sheet, which prints the full
-    // amount at the top, still deletes them.
+    // deleting takes the whole transaction. Swipe is withheld from a row that is
+    // showing less than it would remove, even with the confirmation behind it:
+    // the dialog can say what is going but not what it was part of. The actions
+    // sheet prints the full amount at the top and deletes them from there.
     final bool partial = entry.amount != txn.amount;
 
     return Dismissible(
@@ -4627,6 +4994,11 @@ class TransactionsTab extends StatelessWidget {
       direction: selecting || partial
           ? DismissDirection.none
           : DismissDirection.endToStart,
+      // Answered before the row animates out — a false springs it back, and
+      // `onDismissed` never runs. The gesture is easy to make by accident on a
+      // scrolling list, and what it does outlives the snackbar that offers to
+      // undo it.
+      confirmDismiss: (_) => confirmDeleteTransactions(context, 1),
       onDismissed: (_) => onDelete(txn),
       background: _DismissBackground(),
       child: _TransactionTile(
@@ -7010,6 +7382,396 @@ class _MerchantDefaultsScreenState extends State<MerchantDefaultsScreen> {
   }
 }
 
+/// Every category, what is filed under it, and the two ways to change the list:
+/// add one, or be rid of one.
+///
+/// Deleting is never destructive of transactions: the delete has to name
+/// somewhere for its rows to go, they move there whole, and the snackbar behind
+/// it puts every one of them back. Uncategorized is not on offer — it is where
+/// everything else falls back to, including the rows a delete moves when the
+/// user picks nothing better.
+///
+/// Adding is here as well as in the picker on a transaction because the two
+/// answer different questions. The picker adds a category because *this* charge
+/// needs one and there is a keyboard already open; this screen is where someone
+/// sets up the handful they intend to use before any of it arrives.
+class CategoriesScreen extends StatefulWidget {
+  const CategoriesScreen({super.key});
+
+  @override
+  State<CategoriesScreen> createState() => _CategoriesScreenState();
+}
+
+class _CategoriesScreenState extends State<CategoriesScreen> {
+  final AppDatabase _db = AppDatabase.instance;
+
+  List<CategoryUsage> _usage = const <CategoryUsage>[];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final List<CategoryUsage> usage = await _db.categoryUsage();
+    if (!mounted) return;
+    setState(() {
+      _usage = usage;
+      _loading = false;
+    });
+  }
+
+  static bool _isFallback(CategoryUsage usage) =>
+      usage.category.name == AppDatabase.uncategorized;
+
+  Future<void> _add() async {
+    final String? name = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _NewCategorySheet(
+        taken: <String>[
+          for (final CategoryUsage usage in _usage) usage.category.name,
+        ],
+      ),
+    );
+    if (name == null || !mounted) return;
+
+    final ExpenseCategory added = await _db.addCategory(name);
+    await _load();
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text('Added ${added.name}')));
+  }
+
+  Future<void> _delete(CategoryUsage usage) async {
+    final List<ExpenseCategory> destinations = <ExpenseCategory>[
+      for (final CategoryUsage other in _usage)
+        if (other.category.id != usage.category.id) other.category,
+    ];
+    // Uncategorized is never deletable, so there is always somewhere left for
+    // the rows to go. Checked rather than trusted.
+    if (destinations.isEmpty) return;
+
+    final ExpenseCategory? into = await showModalBottomSheet<ExpenseCategory>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) =>
+          _DeleteCategorySheet(usage: usage, destinations: destinations),
+    );
+    if (into == null || !mounted) return;
+
+    final CategoryDeletion deletion = await _db.deleteCategory(
+      category: usage.category,
+      moveToId: into.id,
+    );
+    await _load();
+    if (!mounted) return;
+
+    final int moved = usage.txnCount;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(
+          moved == 0
+              ? 'Deleted ${usage.category.name}'
+              : 'Deleted ${usage.category.name} · $moved '
+                  'transaction${moved == 1 ? '' : 's'} now under ${into.name}',
+        ),
+        action: SnackBarAction(
+          label: 'Undo',
+          onPressed: () async {
+            await _db.restoreCategory(deletion);
+            await _load();
+          },
+        ),
+      ));
+  }
+
+  String _subtitle(CategoryUsage usage) {
+    final int n = usage.txnCount;
+    return <String>[
+      n == 0 ? 'Nothing filed under it' : '$n transaction${n == 1 ? '' : 's'}',
+      if (usage.splitCount > 0) '${usage.splitCount} of them split',
+      if (usage.merchantDefaultCount > 0)
+        'default for ${usage.merchantDefaultCount} '
+            'merchant${usage.merchantDefaultCount == 1 ? '' : 's'}',
+      if (_isFallback(usage)) 'the fallback, so it stays',
+    ].join(' · ');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final Brightness brightness = theme.brightness;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Categories')),
+      floatingActionButton: _loading
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: _add,
+              icon: const Icon(Icons.add),
+              label: const Text('New category'),
+            ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView.builder(
+              // Clear of the button, which floats over the last row otherwise.
+              padding: const EdgeInsets.only(bottom: 88),
+              itemCount: _usage.length,
+              itemBuilder: (BuildContext context, int index) {
+                final CategoryUsage usage = _usage[index];
+                final String name = usage.category.name;
+
+                return ListTile(
+                  leading: Icon(
+                    categoryIcon(name),
+                    color: categoryColor(name, brightness),
+                  ),
+                  title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  subtitle: Text(_subtitle(usage)),
+                  trailing: _isFallback(usage)
+                      ? null
+                      : IconButton(
+                          tooltip: 'Delete $name',
+                          icon: const Icon(Icons.delete_outline),
+                          color: theme.colorScheme.error,
+                          onPressed: () => _delete(usage),
+                        ),
+                );
+              },
+            ),
+    );
+  }
+}
+
+/// Names a new category.
+///
+/// The names already in use come in so a collision is caught while it is still
+/// being typed. [AppDatabase.addCategory] would quietly hand back the existing
+/// row instead — exactly right for the picker on a transaction, where the user
+/// wants *a* category by that name and does not care whether it had to be
+/// created, and wrong here, where the list is the subject and an Add that
+/// appears to do nothing is the whole confusion.
+class _NewCategorySheet extends StatefulWidget {
+  const _NewCategorySheet({required this.taken});
+
+  final List<String> taken;
+
+  @override
+  State<_NewCategorySheet> createState() => _NewCategorySheetState();
+}
+
+class _NewCategorySheetState extends State<_NewCategorySheet> {
+  final TextEditingController _name = TextEditingController();
+
+  /// Lower-cased name to the spelling on screen, so a clash can be reported in
+  /// the words the list actually shows.
+  ///
+  /// Case-insensitive because the column is `UNIQUE COLLATE NOCASE` — "grocery"
+  /// would not be a second category, it would be a failed insert. Dart's
+  /// lower-casing is the Unicode one and SQLite's NOCASE only folds ASCII, so
+  /// this can refuse a name the table would have taken; erring towards refusing
+  /// is the harmless direction.
+  late final Map<String, String> _taken = <String, String>{
+    for (final String name in widget.taken) name.toLowerCase(): name,
+  };
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final String name = _name.text.trim();
+    if (name.isEmpty || _taken.containsKey(name.toLowerCase())) return;
+    Navigator.pop(context, name);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final String typed = _name.text.trim();
+    final String? clash = _taken[typed.toLowerCase()];
+
+    return Padding(
+      // Lifts the field clear of the keyboard.
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        bottom: MediaQuery.viewInsetsOf(context).bottom + 20,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('New category', style: theme.textTheme.titleLarge),
+            const SizedBox(height: 4),
+            Text(
+              'It joins the picker on every transaction and can be set as a '
+              "merchant's default.",
+              style: theme.textTheme.bodySmall,
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: _name,
+              autofocus: true,
+              textCapitalization: TextCapitalization.words,
+              onChanged: (_) => setState(() {}),
+              onSubmitted: (_) => _submit(),
+              decoration: InputDecoration(
+                isDense: true,
+                border: const OutlineInputBorder(),
+                labelText: 'Call it',
+                errorText: clash == null ? null : '$clash already exists',
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: <Widget>[
+                const Spacer(),
+                FilledButton(
+                  // Dead until there is a name that can actually be inserted,
+                  // rather than pressable and silently ineffective.
+                  onPressed: typed.isEmpty || clash != null ? null : _submit,
+                  child: const Text('Add'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Says where a deleted category's transactions go, and is the confirmation for
+/// deleting it.
+///
+/// One step rather than two. The destination and the consequence of choosing it
+/// are on screen together, so a dialog after this would be asking again about
+/// something already spelled out — and the snackbar behind it carries Undo.
+class _DeleteCategorySheet extends StatefulWidget {
+  const _DeleteCategorySheet({required this.usage, required this.destinations});
+
+  final CategoryUsage usage;
+
+  /// Every category except the one being deleted, in [AppDatabase.categories]
+  /// order — so Uncategorized, the default pick, is first.
+  final List<ExpenseCategory> destinations;
+
+  @override
+  State<_DeleteCategorySheet> createState() => _DeleteCategorySheetState();
+}
+
+class _DeleteCategorySheetState extends State<_DeleteCategorySheet> {
+  /// Uncategorized where it is there to be had. It is the honest default: the
+  /// app cannot know which of the remaining categories these transactions
+  /// belonged in, and quietly filing them under a real one would invent an
+  /// answer the ledger would then show as fact.
+  late ExpenseCategory _into = widget.destinations.firstWhere(
+    (ExpenseCategory c) => c.name == AppDatabase.uncategorized,
+    orElse: () => widget.destinations.first,
+  );
+
+  /// What the delete will do, in the numbers actually at stake.
+  String get _consequence {
+    final CategoryUsage usage = widget.usage;
+    if (!usage.inUse) return 'Nothing is filed under it, so nothing moves.';
+
+    final int n = usage.txnCount;
+    final List<String> moving = <String>[
+      if (n > 0) '$n transaction${n == 1 ? '' : 's'}',
+      if (usage.merchantDefaultCount > 0)
+        '${usage.merchantDefaultCount} merchant '
+            'default${usage.merchantDefaultCount == 1 ? '' : 's'}',
+    ];
+    return '${moving.join(' and ')} move to the category you pick. '
+        'Nothing is thrown away, and this can be undone.'
+        '${usage.splitCount > 0 ? ' The '
+            '${usage.splitCount} split one${usage.splitCount == 1 ? '' : 's'} '
+            'keep their other lines and still add up.' : ''}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final Brightness brightness = theme.brightness;
+    final CategoryUsage usage = widget.usage;
+
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 20,
+        right: 20,
+        bottom: MediaQuery.viewInsetsOf(context).bottom + 20,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('Delete ${usage.category.name}',
+                style: theme.textTheme.titleLarge),
+            const SizedBox(height: 4),
+            Text(_consequence, style: theme.textTheme.bodySmall),
+            if (usage.inUse) ...<Widget>[
+              const SizedBox(height: 16),
+              Text('Move them to', style: theme.textTheme.labelLarge),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: <Widget>[
+                  for (final ExpenseCategory category in widget.destinations)
+                    ChoiceChip(
+                      avatar: Icon(
+                        categoryIcon(category.name),
+                        size: 18,
+                        color: categoryColor(category.name, brightness),
+                      ),
+                      label: Text(category.name),
+                      selected: category.id == _into.id,
+                      onSelected: (_) => setState(() => _into = category),
+                    ),
+                ],
+              ),
+            ],
+            const Divider(height: 32),
+            Row(
+              children: <Widget>[
+                const Spacer(),
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: theme.colorScheme.error,
+                    foregroundColor: theme.colorScheme.onError,
+                  ),
+                  onPressed: () => Navigator.pop(context, _into),
+                  child: const Text('Delete'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// The second destination. A body only — the shell it sits in supplies the
 /// Scaffold and the app bar, so there is no second one of either here.
 class SettingsScreen extends StatefulWidget {
@@ -7141,6 +7903,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     MaterialPageRoute<void>(
                       builder: (_) =>
                           const MergeNamesScreen(kind: NameKind.card),
+                    ),
+                  ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.label_outline),
+                  title: const Text('Categories'),
+                  subtitle: const Text(
+                    'Add one, or drop one you never use — its transactions '
+                    'move, not go',
+                  ),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const CategoriesScreen(),
                     ),
                   ),
                 ),
