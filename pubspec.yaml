@@ -42,6 +42,13 @@ dependencies:
   path_provider: ^2.1.6       # To pick the directory the APK downloads into
   open_filex: ^4.7.0          # To hand the APK to Android's package installer
   fl_chart: ^1.2.0
+  # Export and backup. The workbook is both the spreadsheet you read and the
+  # file a restore reads back, so the package has to do both directions.
+  excel: ^4.0.6               # To write and read the .xlsx backup workbook
+  # 13.x, not 10.x: share_plus below 13 pins win32 ^5, which cannot co-exist
+  # with the win32 ^6 that package_info_plus 10 needs for the updater.
+  share_plus: ^13.3.0         # To hand the workbook to Drive, Gmail or Files
+  file_picker: ^12.0.0        # To pick a backup back off the device for restore
 
 dev_dependencies:
   flutter_test:
