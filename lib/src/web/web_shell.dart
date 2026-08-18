@@ -209,11 +209,7 @@ class _WebShellState extends State<WebShell> {
     if (device == null) return;
 
     final LedgerEdit edit = composeEdit(
-      // Time and randomness together: the time keeps ids readable in the
-      // server's log, and the random tail stops two clicks in the same
-      // millisecond colliding on what is meant to be an idempotency key.
-      editId: 'web-${DateTime.now().microsecondsSinceEpoch}-'
-          '${_random.nextInt(1 << 32).toRadixString(16)}',
+      editId: newEditId(DateTime.now().toUtc(), _random),
       op: op,
       txn: txn,
       now: DateTime.now().toUtc(),
