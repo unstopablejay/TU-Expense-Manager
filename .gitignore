@@ -52,7 +52,13 @@ devtools_options.yaml
 
 # The server package resolves its own dependencies
 server/.dart_tool/
-server/pubspec.lock
+
+# server/pubspec.lock is deliberately NOT ignored, and it was, which broke the
+# release: the Dockerfile COPYs it, so a clean checkout failed with
+# "/server/pubspec.lock: not found" while every local build passed on a file that
+# only existed on one disk. A lockfile belongs in the repository for an
+# application — it is what makes the build reproducible — and the app's own
+# pubspec.lock has always been committed. This was inconsistent with it.
 
 # The web build output
 /build/web/
