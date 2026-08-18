@@ -4626,7 +4626,6 @@ class _TransactionTile extends StatelessWidget {
   }
 }
 
-/// Bottom sheet that picks (or creates) the category for a merchant.
 /// One editable row of the split screen. The controller lives here rather than
 /// in a list beside the data so that deleting a row cannot leave the two out of
 /// step.
