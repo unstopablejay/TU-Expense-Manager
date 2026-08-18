@@ -15,6 +15,18 @@ name: tu-expense-server
 
 services:
   server:
+    # Published by the `Release` workflow when a v* tag is pushed.
+    #
+    # **A new GHCR package is private, even from a public repository.** Until it
+    # is made public, a pull from here fails with "denied" or "unauthorized" —
+    # which reads like a wrong image name rather than a permissions problem. Once,
+    # after the first tag:
+    #
+    #   github.com/unstopablejay?tab=packages -> tu-expense-server
+    #     -> Package settings -> Change visibility -> Public
+    #
+    # Or keep it private and authenticate on the box instead:
+    #   docker login ghcr.io -u unstopablejay -p <a PAT with read:packages>
     image: ghcr.io/unstopablejay/tu-expense-server:latest
     container_name: tu-expense-server
     restart: unless-stopped

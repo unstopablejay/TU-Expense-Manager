@@ -938,6 +938,23 @@ On **ZimaOS or CasaOS**, install through *Apps → + → Custom Install → Impo
 paste `docker-compose.yml`. The `x-casaos` block gives it a title, an icon and a
 working WebUI link rather than an anonymous container.
 
+The image itself is published by pushing a version tag:
+
+```bash
+git tag v1.2.0 && git push origin v1.2.0
+```
+
+That builds the signed APK and attaches it to a GitHub Release, and separately
+builds the `linux/amd64` image and pushes it to
+`ghcr.io/unstopablejay/tu-expense-server:1.2.0` and `:latest`.
+
+**One thing to do once, after the first tag.** A new GHCR package is private even
+when the repository is public, so ZimaOS pulling it gets `denied` — which reads
+like a wrong image name rather than a permissions problem. Make it public at
+*github.com/unstopablejay?tab=packages → tu-expense-server → Package settings →
+Change visibility*, or keep it private and run
+`docker login ghcr.io` on the box with a token that has `read:packages`.
+
 Then, on the phone: **Settings → Server sync**, enter the address
 (`http://192.168.1.99:8099`), sign in, and tap **Sync now**. In a browser, open the
 same address and sign in with the same account.
