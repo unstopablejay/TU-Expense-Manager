@@ -30,6 +30,8 @@ import 'screens/split_screen.dart';
 import 'screens/transaction_actions_sheet.dart';
 import 'screens/update_dialog.dart';
 import 'sms_source.dart';
+import 'sync_client.dart';
+import 'sync_prefs.dart';
 import 'update_service.dart';
 
 
@@ -242,11 +244,28 @@ class _HomeShellState extends State<HomeShell> {
       }
 
       await _load();
+
+      // Fire and forget, deliberately outside the scan's own timing. Awaiting it
+      // would leave the scan spinner turning on a dead VPN for as long as the
+      // push takes to give up, for a step the user did not ask to wait for.
+      if (added > 0) unawaited(_autoSync());
+
       return _ScanResult(
           added: added, skipped: skipped, addedInView: addedInView);
     } finally {
       if (mounted) setState(() => _scanning = false);
     }
+  }
+
+  /// Uploads after a scan, if that was asked for and a server is configured.
+  ///
+  /// Silent either way. This runs without the user having pressed anything, so a
+  /// SnackBar about a VPN that is not connected would be an interruption rather
+  /// than news — Settings shows the last result for anyone who wants to know.
+  Future<void> _autoSync() async {
+    if (!await SyncPrefs.instance.autoAfterScan()) return;
+    if (!await SyncPrefs.instance.isConfigured) return;
+    await SyncClient.instance.syncNow();
   }
 
   /// The toolbar action. [full] ignores the watermark and re-reads everything —
@@ -815,7 +834,11 @@ class _HomeShellState extends State<HomeShell> {
               onToggleSelected: _toggleSelected,
               onDelete: (ExpenseTxn txn) => _delete(<ExpenseTxn>[txn]),
             ),
-            const SettingsScreen(),
+            // Not const any more, and it needs the callback: a sync applies
+            // edits made in a browser, so Settings can now change the ledger.
+            // IndexedStack keeps this alive, so relying on the leaving-Settings
+            // reload alone would leave stale rows on screen until then.
+            SettingsScreen(onChanged: _load),
           ],
         ),
         floatingActionButton: onLedger && !selecting

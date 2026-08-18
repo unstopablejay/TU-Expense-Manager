@@ -16,6 +16,8 @@ import '../../core/constants.dart';
 import '../backup_dialogs.dart';
 import '../backup_files.dart';
 import '../database.dart';
+import '../sync_client.dart';
+import '../sync_prefs.dart';
 import '../update_service.dart';
 import '../widgets/settings_header.dart';
 import 'categories_screen.dart';
@@ -26,7 +28,16 @@ import 'update_dialog.dart';
 /// The second destination. A body only — the shell it sits in supplies the
 /// Scaffold and the app bar, so there is no second one of either here.
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key});
+  const SettingsScreen({super.key, this.onChanged});
+
+  /// Called when something here changed the ledger.
+  ///
+  /// A sync applies edits made in a browser, so this screen can now write to the
+  /// database. The shell reloads on leaving Settings anyway, but relying on that
+  /// alone would leave stale rows visible if the user syncs and then navigates
+  /// somewhere else first. The pushed sub-screens already take this callback for
+  /// the same reason.
+  final VoidCallback? onChanged;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -48,7 +59,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _exporting = false;
   bool _restoring = false;
 
-  bool get _busyWithData => _exporting || _restoring;
+  /// A sync walks the whole database too, so it joins the same queue.
+  bool _syncing = false;
+
+  bool get _busyWithData => _exporting || _restoring || _syncing;
+
+  // Server sync, all read in _load().
+  Uri? _serverUrl;
+  String? _syncUser;
+  String _deviceLabel = '';
+  DateTime? _lastPushed;
+  String? _syncStatus;
+  bool _autoAfterScan = false;
 
   /// The release a check on this screen turned up, kept so the Install button
   /// survives dismissing the dialog.
@@ -68,12 +90,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final info = await PackageInfo.fromPlatform();
     final auto = await UpdatePrefs.instance.autoCheckEnabled();
     final last = await UpdatePrefs.instance.lastChecked();
+
+    const SyncPrefs sync = SyncPrefs.instance;
+    final Uri? serverUrl = await sync.baseUrl();
+    final String? syncUser = await sync.username();
+    final String deviceLabel = await sync.deviceLabel();
+    final DateTime? lastPushed = await sync.lastPushed();
+    final String? lastResult = await sync.lastResult();
+    final bool autoAfterScan = await sync.autoAfterScan();
+
     if (!mounted) return;
     setState(() {
       _version = info.version;
       _build = info.buildNumber;
       _autoCheck = auto;
       _lastChecked = last;
+      _serverUrl = serverUrl;
+      _syncUser = syncUser;
+      _deviceLabel = deviceLabel;
+      _lastPushed = lastPushed;
+      _syncStatus = lastResult;
+      _autoAfterScan = autoAfterScan;
       _loading = false;
     });
   }
@@ -83,6 +120,273 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // race against and no reason to make it lag a disk write.
     setState(() => _autoCheck = value);
     await UpdatePrefs.instance.setAutoCheckEnabled(value);
+  }
+
+  /// Asks for the server address.
+  Future<void> _editServerUrl() async {
+    final String? entered = await _askForText(
+      title: 'Server address',
+      hint: 'http://192.168.1.99:8099',
+      initial: _serverUrl?.toString() ?? 'http://',
+      keyboardType: TextInputType.url,
+      validate: SyncPrefs.baseUrlProblem,
+    );
+    if (entered == null) return;
+
+    await SyncPrefs.instance.setBaseUrl(entered);
+    if (!mounted) return;
+    setState(() => _serverUrl = Uri.tryParse(entered.trim()));
+  }
+
+  /// Asks what to call this device in the browser's picker.
+  Future<void> _editDeviceLabel() async {
+    final String? entered = await _askForText(
+      title: 'Name for this device',
+      hint: "Jay's Pixel",
+      initial: _deviceLabel,
+      validate: (String value) =>
+          value.trim().isEmpty ? 'Give this device a name.' : null,
+    );
+    if (entered == null) return;
+
+    await SyncPrefs.instance.setDeviceLabel(entered);
+    if (!mounted) return;
+    setState(() => _deviceLabel = entered.trim());
+  }
+
+  /// Checks the server is there, without needing an account.
+  ///
+  /// Separate from signing in so a wrong address and a wrong password are
+  /// distinguishable, which is most of what makes setting this up bearable.
+  Future<void> _testConnection() async {
+    final Uri? base = _serverUrl;
+    if (base == null) {
+      _say('Add the server address first.');
+      return;
+    }
+    setState(() => _syncing = true);
+    try {
+      final SyncOutcome result = await SyncClient.instance.testConnection(base);
+      if (!mounted) return;
+      setState(() => _syncStatus =
+          result.failed ? result.error : 'The server answered. Sign in next.');
+      _say(result.failed ? result.error! : 'The server is there.');
+    } finally {
+      if (mounted) setState(() => _syncing = false);
+    }
+  }
+
+  /// Signs in, or out.
+  Future<void> _signIn() async {
+    final Uri? base = _serverUrl;
+    if (base == null) {
+      _say('Add the server address first.');
+      return;
+    }
+
+    final (String, String)? credentials = await _askForCredentials();
+    if (credentials == null) return;
+
+    setState(() => _syncing = true);
+    try {
+      final SyncOutcome result = await SyncClient.instance.signIn(
+        base: base,
+        username: credentials.$1,
+        password: credentials.$2,
+      );
+      if (!mounted) return;
+      if (result.failed) {
+        setState(() => _syncStatus = result.error);
+        _say(result.error!);
+        return;
+      }
+      final String? user = await SyncPrefs.instance.username();
+      if (!mounted) return;
+      setState(() {
+        _syncUser = user;
+        _syncStatus = 'Signed in. Tap Sync now to upload.';
+      });
+      _say('Signed in as $user.');
+    } finally {
+      if (mounted) setState(() => _syncing = false);
+    }
+  }
+
+  Future<void> _signOut() async {
+    setState(() => _syncing = true);
+    try {
+      await SyncClient.instance.signOut();
+      if (!mounted) return;
+      setState(() {
+        _syncUser = null;
+        _syncStatus = 'Signed out.';
+      });
+    } finally {
+      if (mounted) setState(() => _syncing = false);
+    }
+  }
+
+  /// Drains the edit queue, applies it, and uploads the ledger.
+  Future<void> _syncNow() async {
+    if (_busyWithData) return;
+    setState(() => _syncing = true);
+    try {
+      final SyncOutcome result = await SyncClient.instance.syncNow(
+        // A sync can apply edits made in a browser, so the shell has to know the
+        // ledger moved underneath it.
+        onChanged: widget.onChanged,
+      );
+      if (!mounted) return;
+      final DateTime? pushed = await SyncPrefs.instance.lastPushed();
+      if (!mounted) return;
+      setState(() {
+        _syncStatus = result.describe();
+        _lastPushed = pushed;
+        if (result.signedOut) _syncUser = null;
+      });
+      _say(result.describe());
+    } finally {
+      if (mounted) setState(() => _syncing = false);
+    }
+  }
+
+  Future<void> _setAutoAfterScan(bool value) async {
+    setState(() => _autoAfterScan = value);
+    await SyncPrefs.instance.setAutoAfterScan(value);
+  }
+
+  /// One text field in a dialog, validated before it closes.
+  Future<String?> _askForText({
+    required String title,
+    required String hint,
+    required String initial,
+    required String? Function(String) validate,
+    TextInputType? keyboardType,
+  }) async {
+    final TextEditingController controller =
+        TextEditingController(text: initial);
+    // Selection at the end rather than the whole field selected, so typing after
+    // the port number does not wipe the address.
+    controller.selection =
+        TextSelection.collapsed(offset: controller.text.length);
+
+    final String? result = await showDialog<String>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        String? problem;
+        return StatefulBuilder(
+          builder: (BuildContext context, StateSetter rebuild) => AlertDialog(
+            title: Text(title),
+            content: TextField(
+              controller: controller,
+              autofocus: true,
+              keyboardType: keyboardType,
+              decoration: InputDecoration(
+                hintText: hint,
+                errorText: problem,
+                border: const OutlineInputBorder(),
+              ),
+              onSubmitted: (String value) {
+                final String? bad = validate(value);
+                if (bad == null) {
+                  Navigator.pop(dialogContext, value);
+                } else {
+                  rebuild(() => problem = bad);
+                }
+              },
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final String? bad = validate(controller.text);
+                  if (bad == null) {
+                    Navigator.pop(dialogContext, controller.text);
+                  } else {
+                    rebuild(() => problem = bad);
+                  }
+                },
+                child: const Text('Save'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    controller.dispose();
+    return result;
+  }
+
+  /// Username and password together, since one without the other is no use.
+  Future<(String, String)?> _askForCredentials() async {
+    final TextEditingController username =
+        TextEditingController(text: _syncUser ?? '');
+    final TextEditingController password = TextEditingController();
+
+    final (String, String)? result = await showDialog<(String, String)>(
+      context: context,
+      builder: (BuildContext dialogContext) => AlertDialog(
+        title: const Text('Sign in to your server'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            TextField(
+              controller: username,
+              autofocus: true,
+              textInputAction: TextInputAction.next,
+              decoration: const InputDecoration(
+                labelText: 'Username',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: password,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Password',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (_) => Navigator.pop(
+                dialogContext,
+                (username.text, password.text),
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Signing in can take a few seconds: the server hashes your '
+              'password deliberately slowly.',
+              style: TextStyle(fontSize: 11),
+            ),
+          ],
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(
+              dialogContext,
+              (username.text, password.text),
+            ),
+            child: const Text('Sign in'),
+          ),
+        ],
+      ),
+    );
+    username.dispose();
+    password.dispose();
+
+    if (result == null) return null;
+    if (result.$1.trim().isEmpty || result.$2.isEmpty) {
+      _say('Both a username and a password are needed.');
+      return null;
+    }
+    return result;
   }
 
   void _say(String message) {
@@ -326,6 +630,85 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           onPressed: _busyWithData ? null : _restore,
                           child: const Text('Restore'),
                         ),
+                ),
+                const Divider(height: 32),
+                SettingsHeader('Server sync'),
+                ListTile(
+                  leading: const Icon(Icons.dns_outlined),
+                  title: const Text('Server address'),
+                  subtitle: Text(_serverUrl?.toString() ?? 'Not set'),
+                  onTap: _busyWithData ? null : _editServerUrl,
+                ),
+                ListTile(
+                  leading: const Icon(Icons.smartphone_outlined),
+                  title: const Text('Name for this device'),
+                  // Shown in the browser's device picker, so it is worth being
+                  // able to tell two phones apart.
+                  subtitle: Text(_deviceLabel),
+                  onTap: _busyWithData ? null : _editDeviceLabel,
+                ),
+                ListTile(
+                  leading: Icon(_syncUser == null
+                      ? Icons.person_outline
+                      : Icons.verified_user_outlined),
+                  title: Text(_syncUser == null ? 'Sign in' : 'Signed in'),
+                  subtitle: Text(_syncUser ?? 'Not signed in'),
+                  trailing: _syncUser == null
+                      ? null
+                      : TextButton(
+                          onPressed: _busyWithData ? null : _signOut,
+                          child: const Text('Sign out'),
+                        ),
+                  onTap: _busyWithData || _syncUser != null ? null : _signIn,
+                ),
+                ListTile(
+                  leading: const Icon(Icons.network_check_outlined),
+                  title: const Text('Test connection'),
+                  subtitle: const Text(
+                    'Checks the address without needing an account.',
+                  ),
+                  trailing: _syncing
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : FilledButton.tonal(
+                          onPressed: _busyWithData ? null : _testConnection,
+                          child: const Text('Test'),
+                        ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.cloud_upload_outlined),
+                  title: const Text('Sync now'),
+                  subtitle: Text(
+                    _syncStatus ??
+                        (_lastPushed == null
+                            ? 'Never synced'
+                            : 'Last synced '
+                                '${_checkedFormat.format(_lastPushed!)}'),
+                  ),
+                  trailing: _syncing
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : FilledButton.tonal(
+                          onPressed: _busyWithData || _syncUser == null
+                              ? null
+                              : _syncNow,
+                          child: const Text('Sync'),
+                        ),
+                ),
+                SwitchListTile(
+                  value: _autoAfterScan,
+                  onChanged: _syncUser == null ? null : _setAutoAfterScan,
+                  title: const Text('Sync after each inbox scan'),
+                  subtitle: const Text(
+                    'Uploads automatically when a scan finds something new. '
+                    'Off by default.',
+                  ),
                 ),
                 const Divider(height: 32),
                 SettingsHeader('Updates'),
