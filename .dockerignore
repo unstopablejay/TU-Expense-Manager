@@ -1,0 +1,34 @@
+# The build context is sent to the daemon in full before anything runs, so what
+# is excluded here is mostly about build time. android/build alone is hundreds of
+# megabytes and is not wanted by any stage.
+
+.git
+.github
+.idea
+.dart_tool
+.claude
+build
+android
+ios
+macos
+linux
+windows
+server/.dart_tool
+devtools_options.yaml
+
+# Never into an image: local SDK paths and the release signing key.
+android/local.properties
+android/key.properties
+*.jks
+*.keystore
+
+# Not needed by a stage that only builds the web bundle and the server.
+test
+tool
+*.md
+*.iml
+.metadata
+.flutter-plugins-dependencies
+Dockerfile
+.dockerignore
+docker-compose.yml
