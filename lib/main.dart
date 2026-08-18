@@ -28,6 +28,32 @@ void main() {
   runApp(const TuExpenseTrackerApp());
 }
 
+// ---------------------------------------------------------------------------
+// 0. SHARED CONSTANTS
+// ---------------------------------------------------------------------------
+//
+// These live at the top, outside every class, because both the app and the web
+// build need them and neither may reach for the other's platform code.
+// `AppDatabase` re-exposes the first two under its own names, so the README and
+// anything reading `AppDatabase.uncategorized` keeps working.
+
+/// The category every uncategorized row is filed under, and the one category
+/// that cannot be deleted. Compared case-insensitively wherever it is used.
+const String kUncategorized = 'Uncategorized';
+
+/// The database schema this build understands. A backup or snapshot stamped
+/// with a *higher* number is refused rather than imported — it may hold columns
+/// this build has never heard of.
+const int kSchemaVersion = 7;
+
+/// The longest note that is stored. Generous for the sentence a note actually
+/// is, and short enough that no single one can dominate the tile it annotates.
+const int kNoteMaxLength = 140;
+
+/// Paise. Amounts are doubles, so three ways through ₹0.10 cannot land exactly;
+/// anything under half a paisa is a rounding artefact rather than a real gap.
+const double kSplitTolerance = 0.005;
+
 /// A real YES Bank credit card alert, used to prefill the manual-entry dialog
 /// so the whole pipeline can be exercised without SMS permission.
 const String kSampleSms =
@@ -672,7 +698,7 @@ class ExpenseTxn {
         rawPaymentType: rawPaymentType,
       );
 
-  bool get isUncategorized => categoryName == AppDatabase.uncategorized;
+  bool get isUncategorized => categoryName == kUncategorized;
 
   bool get hasNote => note.isNotEmpty;
 
@@ -732,7 +758,7 @@ class DeletedTxn {
             ? null
             : DateTime.fromMillisecondsSinceEpoch(map['deleted_at'] as int),
         categoryName:
-            (map['category_name'] as String?) ?? AppDatabase.uncategorized,
+            (map['category_name'] as String?) ?? kUncategorized,
         note: (map['note'] as String?) ?? '',
         splits: decodeSplits(map['splits_json'] as String?),
       );
@@ -774,9 +800,9 @@ class AppDatabase {
   /// The schema this build understands. A backup stamps this into its Meta
   /// sheet, and one stamped with a *higher* number is refused rather than
   /// imported — it may hold columns this build has never heard of.
-  static const int schemaVersion = 7;
+  static const int schemaVersion = kSchemaVersion;
 
-  static const String uncategorized = 'Uncategorized';
+  static const String uncategorized = kUncategorized;
   static const List<String> _defaultCategories = <String>[
     uncategorized, // inserted first so it always lands on id = 1
     'Grocery',
@@ -1714,7 +1740,7 @@ class AppDatabase {
 
     final double sum =
         lines.fold<double>(0, (double s, TxnSplit l) => s + l.amount);
-    if ((sum - transaction.amount).abs() > _splitTolerance) {
+    if ((sum - transaction.amount).abs() > kSplitTolerance) {
       throw ArgumentError(
         'Split lines total $sum, which is not ${transaction.amount}',
       );
@@ -1993,22 +2019,17 @@ class AppDatabase {
       deleted: deleted,
       aliases: aliases,
       appMeta: appMeta,
-      meta: <String, String>{
-        'format': kBackupFormat,
-        'format_version': '$kBackupFormatVersion',
-        'schema_version': '$schemaVersion',
-        'app_version': info.version,
-        'app_build': info.buildNumber,
-        'exported_at': DateTime.now().toIso8601String(),
-        // Counts are a cheap sanity check for a human reading the file, and
-        // give the confirmation dialog something to say before it commits.
-        'transactions': '${transactions.length}',
-        'splits': '${splits.length}',
-        'categories': '${categories.length}',
-        'merchant_defaults': '${merchantMappings.length}',
-        'name_aliases': '${aliases.length}',
-        'deleted': '${deleted.length}',
-      },
+      meta: buildBackupMeta(
+        appVersion: info.version,
+        appBuild: info.buildNumber,
+        exportedAt: DateTime.now(),
+        transactions: transactions.length,
+        splits: splits.length,
+        categories: categories.length,
+        merchantDefaults: merchantMappings.length,
+        nameAliases: aliases.length,
+        deleted: deleted.length,
+      ),
     );
   }
 
@@ -3284,10 +3305,6 @@ String? _suggestionKey(String name, NameKind kind) {
 // SPLIT ARITHMETIC — pure, so the one fiddly calculation in the app is tested
 // ---------------------------------------------------------------------------
 
-/// Paise. Amounts are doubles, so three ways through ₹0.10 cannot land exactly;
-/// anything under half a paisa is a rounding artefact rather than a real gap.
-const double _splitTolerance = 0.005;
-
 /// How much of [total] the lines have not accounted for. Negative means they
 /// have over-allocated it.
 double unallocated(List<double> amounts, double total) =>
@@ -3296,7 +3313,7 @@ double unallocated(List<double> amounts, double total) =>
 bool isBalanced(
   List<double> amounts,
   double total, {
-  double tolerance = _splitTolerance,
+  double tolerance = kSplitTolerance,
 }) =>
     amounts.isNotEmpty && unallocated(amounts, total).abs() <= tolerance;
 
@@ -3344,10 +3361,6 @@ List<TxnSplit> decodeSplits(String? json) {
 // NOTES
 // ---------------------------------------------------------------------------
 
-/// The longest note that is stored. Generous for the sentence a note actually
-/// is, and short enough that no single one can dominate the tile it annotates.
-const int _noteMaxLength = 140;
-
 /// What actually gets stored for a typed note: trimmed, inner runs of
 /// whitespace collapsed onto single spaces, and capped.
 ///
@@ -3357,9 +3370,9 @@ const int _noteMaxLength = 140;
 /// storing one would light up the tile's indicator with nothing to show.
 String cleanNote(String raw) {
   final String collapsed = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
-  return collapsed.length <= _noteMaxLength
+  return collapsed.length <= kNoteMaxLength
       ? collapsed
-      : collapsed.substring(0, _noteMaxLength).trimRight();
+      : collapsed.substring(0, kNoteMaxLength).trimRight();
 }
 
 // ---------------------------------------------------------------------------
@@ -3375,6 +3388,40 @@ const String kBackupFormat = 'tu-expense-tracker-backup';
 /// schema. Bumped only if a sheet is renamed or a column changes meaning —
 /// *adding* a column needs no bump, because the importer reads by header name.
 const int kBackupFormatVersion = 1;
+
+/// The Meta block that stamps a backup or a snapshot.
+///
+/// One function rather than a literal at each writer: the `.xlsx` workbook and
+/// the JSON snapshot carry the same keys, and a key spelled two ways would only
+/// show up when the wrong one failed to read back.
+///
+/// Counts are a cheap sanity check for a human reading the file, and give the
+/// confirmation dialog something to say before it commits.
+Map<String, String> buildBackupMeta({
+  required String appVersion,
+  required String appBuild,
+  required DateTime exportedAt,
+  required int transactions,
+  required int splits,
+  required int categories,
+  required int merchantDefaults,
+  required int nameAliases,
+  required int deleted,
+}) =>
+    <String, String>{
+      'format': kBackupFormat,
+      'format_version': '$kBackupFormatVersion',
+      'schema_version': '$kSchemaVersion',
+      'app_version': appVersion,
+      'app_build': appBuild,
+      'exported_at': exportedAt.toIso8601String(),
+      'transactions': '$transactions',
+      'splits': '$splits',
+      'categories': '$categories',
+      'merchant_defaults': '$merchantDefaults',
+      'name_aliases': '$nameAliases',
+      'deleted': '$deleted',
+    };
 
 /// Sheet names. Constants because both the writer and the reader need them to
 /// agree exactly, and a typo in one of the two would only show up at restore.
@@ -3545,7 +3592,7 @@ String splitSummary(List<Map<String, Object?>> lines, Map<int, String> names) {
   if (lines.isEmpty) return '';
   return lines.map((Map<String, Object?> line) {
     final String name =
-        names[(line['category_id'] as num?)?.toInt()] ?? AppDatabase.uncategorized;
+        names[(line['category_id'] as num?)?.toInt()] ?? kUncategorized;
     final double amount = (line['amount'] as num?)?.toDouble() ?? 0;
     return '$name ${amount.toStringAsFixed(2)}';
   }).join('; ');
@@ -4063,9 +4110,9 @@ List<String> validateBackup(BackupData data, {required int appSchemaVersion}) {
   // Every uncategorised transaction points at it, deleting a category moves its
   // rows to it, and the picker pins it to the top. A backup without it cannot
   // produce a working app.
-  if (!categoryNames.contains(AppDatabase.uncategorized.toLowerCase())) {
+  if (!categoryNames.contains(kUncategorized.toLowerCase())) {
     problems.add(
-      'The Categories sheet has no "${AppDatabase.uncategorized}" row, which '
+      'The Categories sheet has no "$kUncategorized" row, which '
       'the app cannot run without.',
     );
   }
@@ -4128,7 +4175,7 @@ List<String> validateBackup(BackupData data, {required int appSchemaVersion}) {
   };
   splitTotals.forEach((int transactionId, double total) {
     final double? amount = amounts[transactionId];
-    if (amount != null && (total - amount).abs() > _splitTolerance) {
+    if (amount != null && (total - amount).abs() > kSplitTolerance) {
       problems.add(
         'The split lines on transaction $transactionId add up to '
         '${total.toStringAsFixed(2)}, but the transaction is '
@@ -4689,7 +4736,7 @@ class _HomeShellState extends State<HomeShell> {
           controller: controller,
           autofocus: true,
           maxLines: 3,
-          maxLength: _noteMaxLength,
+          maxLength: kNoteMaxLength,
           textCapitalization: TextCapitalization.sentences,
           decoration: InputDecoration(
             hintText: 'What was this for?',
@@ -4843,7 +4890,7 @@ class _HomeShellState extends State<HomeShell> {
   /// names, delete — in one sheet, so the list itself needs no per-row
   /// controls.
   Future<void> _openTransaction(ExpenseTxn txn) async {
-    final action = await showModalBottomSheet<_TxnAction>(
+    final action = await showModalBottomSheet<TxnAction>(
       context: context,
       showDragHandle: true,
       builder: (_) => TransactionActionsSheet(
@@ -4854,17 +4901,17 @@ class _HomeShellState extends State<HomeShell> {
     );
     if (!mounted || action == null) return;
     switch (action) {
-      case _TxnAction.categorize:
+      case TxnAction.categorize:
         await _pickCategory(txn);
-      case _TxnAction.note:
+      case TxnAction.note:
         await _editNote(txn);
-      case _TxnAction.split:
+      case TxnAction.split:
         await _splitTransaction(txn);
-      case _TxnAction.mergeMerchant:
+      case TxnAction.mergeMerchant:
         await _openMerge(NameKind.merchant, txn.merchant);
-      case _TxnAction.mergeCard:
+      case TxnAction.mergeCard:
         await _openMerge(NameKind.card, txn.paymentType);
-      case _TxnAction.delete:
+      case TxnAction.delete:
         await _delete(<ExpenseTxn>[txn]);
     }
   }
@@ -5285,8 +5332,9 @@ const int kMaxComparedMonths = 6;
 /// The steppers are here because moving one month at a time is the common
 /// gesture and a modal sheet is a heavy way to do it. They are hidden rather
 /// than disabled in a multi-selection, where "the previous month" means nothing.
-class _PeriodBar extends StatelessWidget {
-  const _PeriodBar({
+class PeriodBar extends StatelessWidget {
+  const PeriodBar({
+    super.key,
     required this.months,
     required this.options,
     required this.currentMonth,
@@ -5403,7 +5451,7 @@ class DashboardTab extends StatelessWidget {
 
     return Column(
       children: <Widget>[
-        _PeriodBar(
+        PeriodBar(
           months: months,
           options: monthChoices,
           currentMonth: currentMonth,
@@ -5646,9 +5694,7 @@ class _MonthComparisonCard extends StatelessWidget {
       spendByCategory(entries),
       limit: 6,
     );
-    final List<Color> monthColors = brightness == Brightness.dark
-        ? _chartHuesDark
-        : _chartHuesLight;
+    final List<Color> monthColors = chartHues(brightness);
 
     double amountFor(YearMonth m, String category) =>
         perMonth[m]?[category] ?? 0;
@@ -6060,7 +6106,7 @@ class TransactionsTab extends StatelessWidget {
         // beside it mean one unambiguous thing. The search box goes with them,
         // for exactly the same reason.
         if (!selecting) ...<Widget>[
-          _PeriodBar(
+          PeriodBar(
             months: filters.months,
             options: monthChoices,
             currentMonth: currentMonth,
@@ -6420,7 +6466,7 @@ class _DismissBackground extends StatelessWidget {
 // TRANSACTION ACTIONS — everything one row can be told to do
 // ---------------------------------------------------------------------------
 
-enum _TxnAction { categorize, note, split, mergeMerchant, mergeCard, delete }
+enum TxnAction { categorize, note, split, mergeMerchant, mergeCard, delete }
 
 class TransactionActionsSheet extends StatelessWidget {
   const TransactionActionsSheet({
@@ -6524,21 +6570,21 @@ class TransactionActionsSheet extends StatelessWidget {
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.label_outline),
               title: const Text('Change category'),
-              onTap: () => Navigator.pop(context, _TxnAction.categorize),
+              onTap: () => Navigator.pop(context, TxnAction.categorize),
             ),
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.sticky_note_2_outlined),
               title: Text(txn.hasNote ? 'Edit note' : 'Add note'),
               subtitle: const Text('Why this one happened'),
-              onTap: () => Navigator.pop(context, _TxnAction.note),
+              onTap: () => Navigator.pop(context, TxnAction.note),
             ),
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.call_split),
               title: Text(txn.isSplit ? 'Edit split' : 'Split'),
               subtitle: const Text('Across several categories'),
-              onTap: () => Navigator.pop(context, _TxnAction.split),
+              onTap: () => Navigator.pop(context, TxnAction.split),
             ),
             const Divider(height: 28),
             // These two act on the name, not on this transaction — the row is
@@ -6552,7 +6598,7 @@ class TransactionActionsSheet extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-              onTap: () => Navigator.pop(context, _TxnAction.mergeMerchant),
+              onTap: () => Navigator.pop(context, TxnAction.mergeMerchant),
             ),
             ListTile(
               contentPadding: EdgeInsets.zero,
@@ -6563,7 +6609,7 @@ class TransactionActionsSheet extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-              onTap: () => Navigator.pop(context, _TxnAction.mergeCard),
+              onTap: () => Navigator.pop(context, TxnAction.mergeCard),
             ),
             const Divider(height: 28),
             ListTile(
@@ -6574,7 +6620,7 @@ class TransactionActionsSheet extends StatelessWidget {
                 style: TextStyle(color: theme.colorScheme.error),
               ),
               subtitle: const Text('Kept out of future scans; restorable'),
-              onTap: () => Navigator.pop(context, _TxnAction.delete),
+              onTap: () => Navigator.pop(context, TxnAction.delete),
             ),
           ],
         ),
@@ -7177,7 +7223,7 @@ class _TransactionTile extends StatelessWidget {
                         // Only promise what a tap will actually do: nothing on
                         // a read-only list, and marking while selecting.
                         : onTap == null || selecting
-                            ? AppDatabase.uncategorized
+                            ? kUncategorized
                             : 'Tap to categorize or split',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: needsCategory
@@ -7631,7 +7677,7 @@ class _CategoryPickerSheetState extends State<CategoryPickerSheet> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final ExpenseCategory? uncategorized = widget.categories
-        .where((ExpenseCategory c) => c.name == AppDatabase.uncategorized)
+        .where((ExpenseCategory c) => c.name == kUncategorized)
         .firstOrNull;
 
     return Padding(
@@ -7673,7 +7719,7 @@ class _CategoryPickerSheetState extends State<CategoryPickerSheet> {
                   // Uncategorized is not a category anyone means to pick; where
                   // it is meaningful it is offered above, in the words that
                   // actually describe what it does.
-                  if (category.name != AppDatabase.uncategorized)
+                  if (category.name != kUncategorized)
                     ChoiceChip(
                       avatar: Icon(categoryIcon(category.name), size: 18),
                       label: Text(category.name),
@@ -7781,6 +7827,12 @@ const List<Color> _chartHuesDark = <Color>[
   Color(0xFFE66767),
 ];
 
+/// The hues for [brightness]. The two lists are separate palettes rather than
+/// one lightened programmatically, so callers ask for a brightness and never
+/// have to know which list answered.
+List<Color> chartHues(Brightness brightness) =>
+    brightness == Brightness.dark ? _chartHuesDark : _chartHuesLight;
+
 /// The seeded categories' fixed slots. Everything else hashes its name.
 const Map<String, int> _seededCategorySlots = <String, int>{
   'grocery': 0,
@@ -7805,11 +7857,10 @@ const Map<String, int> _seededCategorySlots = <String, int>{
 /// category anyone spent money "on", and giving them a hue would let the tail
 /// of the breakdown compete with the real answers.
 Color categoryColor(String category, Brightness brightness) {
-  final List<Color> hues =
-      brightness == Brightness.dark ? _chartHuesDark : _chartHuesLight;
+  final List<Color> hues = chartHues(brightness);
   final String key = category.toLowerCase();
   if (key == kOtherCategory.toLowerCase() ||
-      key == AppDatabase.uncategorized.toLowerCase()) {
+      key == kUncategorized.toLowerCase()) {
     return brightness == Brightness.dark
         ? const Color(0xFF898781)
         : const Color(0xFFC3C2B7);
@@ -8065,7 +8116,7 @@ class _MergeNamesScreenState extends State<MergeNamesScreen> {
                     padding: const EdgeInsets.only(bottom: 24),
                     children: <Widget>[
                       if (merged.isNotEmpty) ...<Widget>[
-                        _SettingsHeader('Merged'),
+                        SettingsHeader('Merged'),
                         for (final String canonical in merged)
                           _MergedTile(
                             canonical: canonical,
@@ -8075,7 +8126,7 @@ class _MergeNamesScreenState extends State<MergeNamesScreen> {
                         const Divider(height: 32),
                       ],
                       if (suggestions.isNotEmpty) ...<Widget>[
-                        _SettingsHeader('Looks like duplicates'),
+                        SettingsHeader('Looks like duplicates'),
                         for (final List<String> group in suggestions)
                           _SuggestionCard(
                             group: group,
@@ -8084,7 +8135,7 @@ class _MergeNamesScreenState extends State<MergeNamesScreen> {
                           ),
                         const Divider(height: 32),
                       ],
-                      _SettingsHeader('All ${widget.kind.plural}'),
+                      SettingsHeader('All ${widget.kind.plural}'),
                       for (final String name in names)
                         _NameTile(
                           name: name,
@@ -8473,7 +8524,7 @@ class _MerchantDefaultsScreenState extends State<MerchantDefaultsScreen> {
                   itemBuilder: (BuildContext context, int index) {
                     final MerchantSummary m = _merchants[index];
                     final bool alwaysAsk =
-                        m.defaultCategoryName == AppDatabase.uncategorized;
+                        m.defaultCategoryName == kUncategorized;
                     final bool unset = m.defaultCategoryId == null;
 
                     return ListTile(
@@ -8565,7 +8616,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
   }
 
   static bool _isFallback(CategoryUsage usage) =>
-      usage.category.name == AppDatabase.uncategorized;
+      usage.category.name == kUncategorized;
 
   Future<void> _add() async {
     final String? name = await showModalBottomSheet<String>(
@@ -8820,7 +8871,7 @@ class _DeleteCategorySheetState extends State<_DeleteCategorySheet> {
   /// belonged in, and quietly filing them under a real one would invent an
   /// answer the ledger would then show as fact.
   late ExpenseCategory _into = widget.destinations.firstWhere(
-    (ExpenseCategory c) => c.name == AppDatabase.uncategorized,
+    (ExpenseCategory c) => c.name == kUncategorized,
     orElse: () => widget.destinations.first,
   );
 
@@ -9034,7 +9085,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
       final List<String> problems = validateBackup(
         backup,
-        appSchemaVersion: AppDatabase.schemaVersion,
+        appSchemaVersion: kSchemaVersion,
       );
       if (problems.isNotEmpty) {
         await showBackupProblems(context, problems);
@@ -9121,7 +9172,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ? const Center(child: CircularProgressIndicator())
         : ListView(
             children: <Widget>[
-              _SettingsHeader('Categorization'),
+              SettingsHeader('Categorization'),
                 ListTile(
                   leading: const Icon(Icons.storefront_outlined),
                   title: const Text('Merchants & defaults'),
@@ -9136,7 +9187,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ),
                 const Divider(height: 32),
-                _SettingsHeader('Cleanup'),
+                SettingsHeader('Cleanup'),
                 ListTile(
                   leading: const Icon(Icons.merge_type),
                   title: const Text('Merge merchants'),
@@ -9180,7 +9231,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                 ),
                 const Divider(height: 32),
-                _SettingsHeader('Data'),
+                SettingsHeader('Data'),
                 ListTile(
                   leading: const Icon(Icons.table_view_outlined),
                   title: const Text('Export data'),
@@ -9218,7 +9269,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                 ),
                 const Divider(height: 32),
-                _SettingsHeader('Updates'),
+                SettingsHeader('Updates'),
                 SwitchListTile(
                   value: _autoCheck,
                   onChanged: _setAutoCheck,
@@ -9262,7 +9313,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                 const Divider(height: 32),
-                _SettingsHeader('About'),
+                SettingsHeader('About'),
                 ListTile(
                   title: const Text('TU Expense Tracker'),
                   subtitle: const Text(
@@ -9285,8 +9336,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
-class _SettingsHeader extends StatelessWidget {
-  const _SettingsHeader(this.label);
+class SettingsHeader extends StatelessWidget {
+  const SettingsHeader(this.label, {super.key});
 
   final String label;
 
