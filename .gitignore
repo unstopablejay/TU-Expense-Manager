@@ -46,3 +46,6 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Dart & Flutter DevTools settings, written by the tooling on demand
+devtools_options.yaml
