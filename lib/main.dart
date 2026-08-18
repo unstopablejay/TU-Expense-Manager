@@ -13,12 +13,14 @@ import 'src/mobile/home_shell.dart';
 
 export 'src/core/aliases.dart';
 export 'src/core/backup_data.dart';
+export 'src/core/backup_json.dart';
 export 'src/core/backup_validate.dart';
 export 'src/core/constants.dart';
 export 'src/core/ledger.dart';
 export 'src/core/ledger_view.dart';
 export 'src/core/models.dart';
 export 'src/core/parser.dart';
+export 'src/core/snapshot_store.dart';
 export 'src/core/splits.dart';
 export 'src/mobile/backup_dialogs.dart';
 export 'src/mobile/backup_files.dart';
