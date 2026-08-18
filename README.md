@@ -5,7 +5,9 @@ incoming spend and credit alerts, stores them in a local SQLite database, and le
 merchant → category mapping so that categorizing a merchant once applies to every past
 *and* future transaction from that merchant.
 
-Everything stays on the device. There is no backend and no network call.
+Everything stays on the device by default. There is no backend and no network call
+unless you choose to run one — see [Self-hosting](#self-hosting-optional), which is
+entirely optional and off until you configure it.
 
 ## How it works
 
@@ -847,6 +849,189 @@ alone deliberately, since `getDatabasesPath()` resolves it under whatever the cu
 `applicationId` is. The `applicationId` itself moved from `com.example.expense_manager` to
 `com.tu.expense.manager`, so a device carrying the old build will show both apps side by
 side; uninstall the old one to drop its ledger.
+
+## Self-hosting (optional)
+
+Everything above works with no server at all, and nothing in this section changes
+that: with no server address configured, the app makes no network call and behaves
+exactly as it always has. This is an addition for anyone who wants their ledger on
+their own hardware — the same shape as Immich or Jellyfin.
+
+**One tap on the phone puts the whole ledger on a box you own, and the same screens
+then open in any browser on your network.**
+
+```
+        PHONE (owns the ledger)                 YOUR SERVER (Docker)
+  ┌──────────────────────────────┐        ┌────────────────────────────────┐
+  │ SMS ─► parser ─► SQLite      │        │  one container, one port       │
+  │                              │        │                                │
+  │ Settings › Server sync       │        │  /api/v1/snapshot  POST │ GET  │
+  │   Sync now ──────────────────┼───────►│  /api/v1/edits     GET  │ POST │
+  │                              │        │  /*  the Flutter web build    │
+  └──────────────────────────────┘        │                                │
+                                          │  /data/users/<you>/devices/    │
+  ┌──────────────────────────────┐        │      <device>/snapshots/       │
+  │ PC BROWSER — same screens    │◄──────►│                                │
+  └──────────────────────────────┘        └────────────────────────────────┘
+```
+
+### It is the same UI, not a lookalike
+
+The browser renders the *same* `DashboardTab` and `TransactionsTab` widgets the phone
+does, deriving what to show with the same `deriveLedgerView`. There is one
+implementation of the charts, the filters, the sort order and the category colours.
+What differs is only what a browser cannot own: it has no SQLite and no SMS, so the
+ledger arrives as a snapshot rather than from a query.
+
+That is possible because `lib/` is split along a platform boundary:
+
+| | |
+|---|---|
+| `lib/src/core/` | Pure Dart. Models, the parser, ledger maths, the backup and snapshot codecs. No Flutter, no plugins. |
+| `lib/src/ui_shared/` | Widgets both targets render. Flutter, `fl_chart` and `intl` only. |
+| `lib/src/mobile/` | `AppDatabase`, the SMS source, the updater, and every screen that writes. |
+| `lib/src/web/` | The browser's session, API client and shell. |
+
+`test/purity_test.dart` enforces it. The first two directories may import nothing
+outside themselves plus a fixed allowlist of packages with web implementations, and
+every file in both is checked — so no import path of any length can reach sqflite or
+`dart:io`. It runs in seconds on every test run, and it fails at the import rather
+than at deploy time.
+
+### Each device keeps its own ledger
+
+Snapshots are stored per account **and per device**:
+
+```
+/data/users/jay/devices/<device-id>/snapshots/<timestamp>.json
+```
+
+This is not incidental. With a single slot, the last device to sync would overwrite
+every other device's ledger — so pointing a phone and an emulator at one server
+would destroy real data on the first sync. Each device also gets its own edit queue,
+because an edit naming transaction 47 means a different transaction on a different
+device.
+
+The last 30 snapshots per device are kept. That history *is* the backup: every push
+is a whole ledger, so recovering from a bad one means reading an older snapshot
+rather than merging anything.
+
+### Running it
+
+Build and start it:
+
+```bash
+docker compose up -d
+```
+
+Set `EXPENSE_ADMIN_PASSWORD` to something long first. It creates the first account
+on the first start and is ignored ever after, so leaving it in the compose file is
+harmless and a typo in it cannot reset a password. More accounts later:
+
+```bash
+docker exec -it tu-expense-server /app/server --add-user sam
+docker exec -it tu-expense-server /app/server --list-users
+docker exec -it tu-expense-server /app/server --set-password jay
+```
+
+On **ZimaOS or CasaOS**, install through *Apps → + → Custom Install → Import* and
+paste `docker-compose.yml`. The `x-casaos` block gives it a title, an icon and a
+working WebUI link rather than an anonymous container.
+
+The image itself is published by pushing a version tag:
+
+```bash
+git tag v1.2.0 && git push origin v1.2.0
+```
+
+That builds the signed APK and attaches it to a GitHub Release, and separately
+builds the `linux/amd64` image and pushes it to
+`ghcr.io/unstopablejay/tu-expense-server:1.2.0` and `:latest`.
+
+**One thing to do once, after the first tag.** A new GHCR package is private even
+when the repository is public, so ZimaOS pulling it gets `denied` — which reads
+like a wrong image name rather than a permissions problem. Make it public at
+*github.com/unstopablejay?tab=packages → tu-expense-server → Package settings →
+Change visibility*, or keep it private and run
+`docker login ghcr.io` on the box with a token that has `read:packages`.
+
+Then, on the phone: **Settings → Server sync**, enter the address
+(`http://192.168.1.99:8099`), sign in, and tap **Sync now**. In a browser, open the
+same address and sign in with the same account.
+
+### Environment
+
+| Variable | Default | |
+|---|---|---|
+| `EXPENSE_ADMIN_USER` | — | Creates the first account, if there are none. |
+| `EXPENSE_ADMIN_PASSWORD` | — | Its password. The server refuses to start with no accounts and no way to make one. |
+| `PORT` | `8099` | |
+| `DATA_DIR` | `/data` | |
+| `SNAPSHOT_KEEP` | `30` | Snapshots kept per device. |
+| `MAX_UPLOAD_BYTES` | `33554432` | 32 MB. |
+| `EDIT_EXPIRY_DAYS` | `30` | Drops an edit no phone came to collect. |
+
+### About the security of this
+
+Written down plainly, because self-hosting means these are your decisions:
+
+- **Plain HTTP.** Intended for a home LAN, or a WireGuard tunnel into it from
+  outside. Nothing needs forwarding on your router, and nothing should be.
+- **The password crosses the wire only at login**, and is exchanged for a session
+  token used thereafter. A token can be revoked; a password cannot. Still, on plain
+  HTTP that one request is readable by anything on the network, so use a password
+  unique to this app.
+- **Passwords are stored salted and hashed with Argon2id** (64 MiB, 3 iterations),
+  never in a reversible form. That is why signing in takes a second or two, on
+  purpose: it is what makes a stolen `users.json` expensive to attack.
+- **A wrong username and a wrong password are refused identically**, in the same
+  amount of time, so the server cannot be used to discover which accounts exist.
+- **The session token lives in `localStorage`** in the browser, readable by any
+  script on that origin. Acceptable for a private host serving only this app; **Sign
+  out** clears it.
+- **Every write is a temp file and a rename**, and the pointer to the current
+  snapshot is only written once the snapshot exists — so a container killed
+  mid-write leaves the previous snapshot current, never a half-written one.
+
+TLS is a reverse-proxy configuration away if you want it; ZimaOS already runs Caddy.
+
+### Editing from the browser
+
+The browser can edit, and does it by **queueing intent rather than writing**.
+Clicking a row offers four things — change the category, edit the note, split
+across categories, delete — and each one posts an edit that the phone applies on
+its next sync:
+
+```
+PC clicks "Grocery"  ──POST /api/v1/edits──▶  queued, seq 4
+                                                  │
+Phone: Settings › Sync now  ◀─────────────────────┘  pulls the queue
+   │  applies via setTransactionCategory(), the same method its own screens call
+   └──▶ pushes a fresh snapshot, then acknowledges what it did
+```
+
+That order is deliberate. Applying before pushing means the snapshot the server
+ends up holding already contains the edit, so a browser refresh shows it.
+Acknowledging *after* the push means a crash in between re-applies an edit rather
+than losing it — safe, because each one is idempotent by its `edit_id`.
+
+Because the phone applies edits through its own methods, every rule it already
+enforces still holds: split lines must sum to the transaction, a delete writes a
+tombstone so a later inbox scan cannot resurrect the row, and the denormalised
+category cache is refreshed in the same SQL transaction. No new write paths, no
+schema change, no conflict resolution.
+
+An edit names its transaction by **both** row id and natural key, and needs both
+to agree. Ids are per-device and change under a restore; the natural key alone
+cannot tell two identical charges apart. So an edit made against a row the phone
+has since deleted resolves to nothing and is reported as skipped — never applied
+to whatever now holds that id.
+
+Two things the browser deliberately cannot do. It cannot create a category, since
+that is not one of the four operations and a category no phone agreed to make
+could not be applied. And it has no multi-select: that exists to drive a bulk
+delete, which here would be one queued edit per row with no way to undo the set as
+a set.
 
 ## Limitations
 

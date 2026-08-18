@@ -1,0 +1,7 @@
+# Matches the app's lint posture, so the two halves of the repo read alike.
+include: package:lints/recommended.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-raw-types: true

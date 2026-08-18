@@ -1,0 +1,26 @@
+name: tu_expense_server
+description: >-
+  Self-hosted snapshot store for TU Expense Tracker. Keeps a per-device history
+  of whole-ledger snapshots pushed from the phone, queues edits made in the
+  browser for the phone to apply, and serves the Flutter web build.
+publish_to: 'none'
+version: 1.0.0
+
+environment:
+  sdk: ^3.13.0
+
+# Deliberately no dependency on the app package. The phone validates a snapshot
+# in full before uploading it, so the server needs no schema knowledge: it is a
+# versioned blob store, a queue and a static file server. Keeping the two apart
+# is what lets this compile to a single native binary with no Flutter in sight.
+dependencies:
+  shelf: ^1.4.2              # the HTTP pipeline
+  shelf_router: ^1.1.4       # routing
+  shelf_static: ^1.1.3       # serving the web bundle
+  pointycastle: ^4.0.0       # Argon2id for password hashing — never hand-rolled
+  crypto: ^3.0.7             # constant-time comparison, snapshot id hashing
+  args: ^2.7.0               # --add-user and friends
+
+dev_dependencies:
+  test: ^1.25.0
+  lints: ^6.0.0

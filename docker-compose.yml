@@ -1,0 +1,121 @@
+# TU Expense Tracker server, for ZimaOS / CasaOS.
+#
+# Install through ZimaOS: Apps -> "+" -> Custom Install -> Import, and paste this
+# file. Then set EXPENSE_ADMIN_PASSWORD to something long before the first start —
+# it is only used to create the first account, and only if there are none.
+#
+# Or plainly:
+#   docker compose up -d
+#
+# Nothing here exposes the server to the internet. It listens on one port on the
+# LAN; reaching it from elsewhere is what the WireGuard tunnel into the house is
+# for, and no port needs forwarding on the router.
+
+name: tu-expense-server
+
+services:
+  server:
+    # Published by the `Release` workflow when a v* tag is pushed.
+    #
+    # **A new GHCR package is private, even from a public repository.** Until it
+    # is made public, a pull from here fails with "denied" or "unauthorized" —
+    # which reads like a wrong image name rather than a permissions problem. Once,
+    # after the first tag:
+    #
+    #   github.com/unstopablejay?tab=packages -> tu-expense-server
+    #     -> Package settings -> Change visibility -> Public
+    #
+    # Or keep it private and authenticate on the box instead:
+    #   docker login ghcr.io -u unstopablejay -p <a PAT with read:packages>
+    image: ghcr.io/unstopablejay/tu-expense-server:latest
+    container_name: tu-expense-server
+    restart: unless-stopped
+
+    ports:
+      # host:container. Change only the left side if 8099 is taken; the app's
+      # sync settings need whatever the left side says.
+      - "8099:8099"
+
+    environment:
+      # Creates the first account on first start, and is ignored ever after —
+      # so leaving it here is harmless, and a typo cannot reset a password.
+      # Change the password before the first start.
+      EXPENSE_ADMIN_USER: "jay"
+      EXPENSE_ADMIN_PASSWORD: "change-me-to-something-long"
+
+      # How many snapshots to keep per device. This is the backup, not a cache:
+      # every push is a whole ledger, so recovering from a bad one means reading
+      # an older snapshot rather than merging anything.
+      SNAPSHOT_KEEP: "30"
+
+      # Refuse an upload larger than this. A few thousand transactions is a couple
+      # of megabytes, so 32 MB is generous.
+      MAX_UPLOAD_BYTES: "33554432"
+
+      # Drop an edit no phone ever came to collect, so a device that is never
+      # synced again cannot grow a queue forever.
+      EDIT_EXPIRY_DAYS: "30"
+
+      TZ: "Asia/Kolkata"
+
+    volumes:
+      # Everything the server keeps: accounts, sessions, snapshots and queues, all
+      # as plain JSON. Back this up by copying the directory.
+      - /DATA/AppData/tu-expense-server/data:/data
+
+    healthcheck:
+      # The binary asks itself, so the image needs no curl.
+      test: ["CMD", "/app/server", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+    # A JSON blob store and a static file server. The generous cap is for the
+    # transient cost of parsing a multi-megabyte snapshot, not for steady state.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+# Makes ZimaOS render this as a proper installed app with a working WebUI link,
+# rather than an anonymous container with no way in.
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: server
+  author: unstopablejay
+  category: Finance
+  description:
+    en_us: >-
+      Self-hosted store for TU Expense Tracker. Your phone pushes its whole
+      expense ledger here with one tap, and this serves the same dashboard and
+      transaction list to any browser on your network. Each device keeps its own
+      ledger, so a phone and an emulator never overwrite each other.
+  tagline:
+    en_us: Your expense ledger, on your own hardware
+  developer: unstopablejay
+  icon: https://raw.githubusercontent.com/unstopablejay/TU-Expense-Manager/main/assets/icon/app_icon.png
+  title:
+    en_us: TU Expense Tracker
+  index: /
+  port_map: "8099"
+  scheme: http
+  store_app_id: tu-expense-server
+  tips:
+    before_install:
+      en_us: >-
+        Set EXPENSE_ADMIN_PASSWORD to something long before starting. It creates
+        the first account and is then ignored. Sign in with it in the app under
+        Settings -> Server sync, and in a browser at this app's WebUI.
+  ports:
+    - container: "8099"
+      description:
+        en_us: The web interface and the sync API, on one port.
+  volumes:
+    - container: /data
+      description:
+        en_us: >-
+          Accounts and every snapshot your devices have pushed, as plain JSON.
+          This is the backup — copy the folder to keep it.
