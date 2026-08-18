@@ -9,6 +9,7 @@ library;
 import 'aliases.dart';
 import 'backup_data.dart';
 import 'constants.dart';
+import 'models.dart';
 
 /// Everything wrong with [data], as sentences fit to show the user. Empty means
 /// it is safe to import.
@@ -191,18 +192,11 @@ List<String> validateBackup(BackupData data, {required int appSchemaVersion}) {
   return problems;
 }
 
-/// The five columns that uniquely identify a transaction, as one comparable
-/// string. `toLowerCase` on the merchant because the real index is COLLATE
-/// NOCASE, and the amount through `toString` because that is round-trip exact.
-///
-/// The separator is NUL, which no field can contain, so no two different tuples
-/// can join to the same string. Written as `\u0000` rather than as the byte
-/// itself: a literal NUL is invisible in an editor, and it makes git treat a
-/// small source file as binary and stop diffing it.
-String _naturalKeyString(Map<String, Object?> row) => <String>[
-      (row['amount'] as double).toString(),
-      (row['merchant'] as String).toLowerCase(),
-      (row['date'] as int).toString(),
-      row['direction'] as String,
-      row['reference'] as String,
-    ].join('\u0000');
+/// [transactionNaturalKey] for a raw database row.
+String _naturalKeyString(Map<String, Object?> row) => transactionNaturalKey(
+      amount: row['amount'] as double,
+      merchant: row['merchant'] as String,
+      dateMillis: row['date'] as int,
+      direction: row['direction'] as String,
+      reference: row['reference'] as String,
+    );

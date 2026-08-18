@@ -16,6 +16,7 @@ export 'src/core/backup_data.dart';
 export 'src/core/backup_json.dart';
 export 'src/core/backup_validate.dart';
 export 'src/core/constants.dart';
+export 'src/core/edits.dart';
 export 'src/core/ledger.dart';
 export 'src/core/ledger_view.dart';
 export 'src/core/models.dart';

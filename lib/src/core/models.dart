@@ -126,6 +126,41 @@ class MerchantSummary {
 
 /// A row of `transactions` joined to its category name.
 /// (Named `ExpenseTxn` because sqflite already exports a `Transaction` type.)
+/// The five columns that uniquely identify a transaction, as one comparable
+/// string.
+///
+/// This tuple is the app's real identity for a transaction: it is what makes SMS
+/// ingestion idempotent, what `deleted_transactions` is keyed on, and the only
+/// identity that means the same thing on two devices — row ids do not.
+///
+/// [merchant] is lower-cased because the real index is `COLLATE NOCASE`, and
+/// must be the merchant **as stored**, never the merged spelling. See
+/// [ExpenseTxn.rawMerchant]. [amount] goes through `toString` because that is
+/// round-trip exact for a double.
+///
+/// The separator is NUL, which no field can contain, so no two different tuples
+/// can join to the same string. Written as an escape rather than as the byte
+/// itself: a literal NUL is invisible in an editor, and makes git treat a small
+/// source file as binary.
+///
+/// Not to be confused with [DeletedTxn.key], which is a different spelling of
+/// the same tuple used only for list selection inside one screen. This is the
+/// one that crosses a wire; the two are not interchangeable.
+String transactionNaturalKey({
+  required double amount,
+  required String merchant,
+  required int dateMillis,
+  required String direction,
+  required String reference,
+}) =>
+    <String>[
+      amount.toString(),
+      merchant.toLowerCase(),
+      dateMillis.toString(),
+      direction,
+      reference,
+    ].join('\u0000');
+
 class ExpenseTxn {
   const ExpenseTxn({
     required this.id,
@@ -211,6 +246,20 @@ class ExpenseTxn {
         splits: splits,
         rawMerchant: rawMerchant,
         rawPaymentType: rawPaymentType,
+      );
+
+  /// This row's [transactionNaturalKey], from the columns as stored.
+  ///
+  /// Uses [rawMerchant] rather than [merchant], so a key composed while looking
+  /// at a merged name still addresses the row the columns actually hold. Writing
+  /// the merged spelling would address nothing, and the caller would be told the
+  /// row had gone.
+  String get naturalKey => transactionNaturalKey(
+        amount: amount,
+        merchant: rawMerchant,
+        dateMillis: date.millisecondsSinceEpoch,
+        direction: direction.name,
+        reference: reference,
       );
 
   bool get isUncategorized => categoryName == kUncategorized;
