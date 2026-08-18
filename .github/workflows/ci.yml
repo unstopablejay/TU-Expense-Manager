@@ -1,0 +1,114 @@
+name: CI
+
+# Runs on every push and pull request, which `Release APK` deliberately does not —
+# that one only fires on a tag, so until this existed nothing checked an ordinary
+# commit. Three things are worth checking on every one:
+#
+#   * the app still analyses and its tests still pass
+#   * the web target still compiles, because nothing else would notice it rotting
+#   * the server package analyses and its tests pass
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch makes the previous run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: App and web build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Pinned to the same version as the release job and as the Dockerfile.
+      # Building the web bundle with a different Flutter than the APK is built
+      # with is the kind of skew that produces a bug nobody can reproduce.
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.0
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - run: flutter analyze
+
+      # Includes test/purity_test.dart, which asserts that lib/src/core and
+      # lib/src/ui_shared import nothing a browser cannot compile. It is seconds,
+      # and it fails at the import rather than at deploy time.
+      - run: flutter test
+
+      # --no-web-resources-cdn is not optional. Without it a release build fetches
+      # CanvasKit from gstatic.com at runtime, which is fatal on a self-hosted box
+      # with no internet and shows up as a blank page rather than an error.
+      - name: Build the web bundle
+        run: flutter build web --release --no-web-resources-cdn -t lib/main_web.dart
+
+      # Belt and braces on the line above: assert the wasm actually shipped, and
+      # that the generated config says to use the local copy. A flag that silently
+      # stopped working would otherwise only be discovered by a user offline.
+      - name: Check CanvasKit is local, not a CDN reference
+        run: |
+          test -f build/web/canvaskit/canvaskit.wasm \
+            || { echo 'canvaskit.wasm is missing from the bundle'; exit 1; }
+          grep -q '"useLocalCanvasKit":true' build/web/flutter_bootstrap.js \
+            || { echo 'the bundle would fetch CanvasKit from a CDN'; exit 1; }
+          echo "CanvasKit ships locally: $(du -h build/web/canvaskit/canvaskit.wasm | cut -f1)"
+
+  server:
+    name: Server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - run: dart pub get
+        working-directory: server
+
+      - run: dart analyze
+        working-directory: server
+
+      # Argon2id is deliberately expensive, so these are slow by design — a couple
+      # of minutes for the suite. Cheapening the hash to speed up CI would be
+      # testing something other than what ships.
+      - run: dart test
+        working-directory: server
+
+      # Proves the binary the image runs actually compiles, which `dart test`
+      # does not: tests run on the VM.
+      - run: dart compile exe bin/server.dart -o /tmp/server
+        working-directory: server
+
+  image:
+    name: Container image builds
+    runs-on: ubuntu-latest
+    # Manual runs only. This workflow triggers on `branches: ['**']`, and a tag
+    # push does not match a branch filter — so a `refs/tags/` condition here could
+    # never fire. `Release` is what builds the image on a tag; this is the button
+    # for checking the Dockerfile without cutting a version.
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      # amd64 only, and native. ZimaOS is x86_64, and a Flutter web compile under
+      # QEMU emulation is slow enough to be worth avoiding — which is the reason
+      # this is built here rather than on an Apple Silicon laptop.
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          tags: tu-expense-server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
