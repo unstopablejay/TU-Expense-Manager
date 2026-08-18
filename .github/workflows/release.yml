@@ -1,4 +1,4 @@
-name: Release APK
+name: Release
 
 # Tag a version to publish it:  git tag v1.1.0 && git push origin v1.1.0
 # The tag name becomes the APK's version, so that is the only place a version
@@ -107,3 +107,51 @@ jobs:
               --title "$GITHUB_REF_NAME" \
               --generate-notes
           fi
+
+  # The container image, published beside the APK so the two halves of a release
+  # carry the same version. The web bundle is built inside the image rather than
+  # here, so what ships is exactly what the Dockerfile produces.
+  image:
+    name: Publish container image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # to push to GHCR
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # Lower-cased because a GHCR repository name must be, and a GitHub username
+      # need not be — `unstopablejay` is fine but the rule bites anyone whose is
+      # not, and a 403 from a case mismatch is an unhelpful way to find out.
+      - name: Work out the image name and tags
+        id: meta
+        run: |
+          REPO="ghcr.io/$(echo '${{ github.repository_owner }}' | tr 'A-Z' 'a-z')/tu-expense-server"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF_NAME#[vV]}"
+            echo "tags=$REPO:$VERSION,$REPO:latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=$REPO:dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      # linux/amd64 only. ZimaOS is x86_64, and adding arm64 would double a build
+      # that already spends most of its time compiling a Flutter web bundle. Add
+      # it here if the server ever needs to run on a Pi.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false # CasaOS's image inspection dislikes the attestation manifest
