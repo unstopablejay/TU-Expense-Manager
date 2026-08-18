@@ -110,5 +110,7 @@ jobs:
           platforms: linux/amd64
           push: false
           tags: tu-expense-server:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No cache-from/cache-to: type=gha here. The Actions cache backend has
+          # broken across service versions more than once, it fails at the *start*
+          # of a build rather than at the end, and a caching layer that can fail a
+          # release is a bad trade for build minutes on a job that runs per tag.
