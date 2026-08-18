@@ -164,7 +164,7 @@ void main() {
       expect(out.transactions.single['amount'], 1200.0);
     });
 
-    test('without the coercion, an int amount would crash validateBackup', () {
+    test('without the coercion, an int amount would crash validateBackup', testOn: 'vm', () {
       // The negative control for this whole group, and the reason the codec
       // carries a per-column type table at all. Verified, not assumed: an int
       // where a double is expected throws
@@ -174,6 +174,12 @@ void main() {
       //
       // Two rows, because it is the duplicate-key comparison that reaches for
       // `as double`.
+      //
+      // testOn: 'vm' because this cannot fail in a browser: on the web an int
+      // and a double are the same JavaScript number, so `1200 as double` is
+      // simply true and no cast can throw. The coercion still earns its place —
+      // it is the *phone* that writes these values into typed SQLite columns,
+      // and the phone runs the VM.
       Map<String, Object?> txn(int id, Object amount, String merchant) =>
           <String, Object?>{
             'id': id,
