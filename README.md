@@ -5,7 +5,9 @@ incoming spend and credit alerts, stores them in a local SQLite database, and le
 merchant → category mapping so that categorizing a merchant once applies to every past
 *and* future transaction from that merchant.
 
-Everything stays on the device. There is no backend and no network call.
+Everything stays on the device by default. There is no backend and no network call
+unless you choose to run one — see [Self-hosting](#self-hosting-optional), which is
+entirely optional and off until you configure it.
 
 ## How it works
 
@@ -847,6 +849,143 @@ alone deliberately, since `getDatabasesPath()` resolves it under whatever the cu
 `applicationId` is. The `applicationId` itself moved from `com.example.expense_manager` to
 `com.tu.expense.manager`, so a device carrying the old build will show both apps side by
 side; uninstall the old one to drop its ledger.
+
+## Self-hosting (optional)
+
+Everything above works with no server at all, and nothing in this section changes
+that: with no server address configured, the app makes no network call and behaves
+exactly as it always has. This is an addition for anyone who wants their ledger on
+their own hardware — the same shape as Immich or Jellyfin.
+
+**One tap on the phone puts the whole ledger on a box you own, and the same screens
+then open in any browser on your network.**
+
+```
+        PHONE (owns the ledger)                 YOUR SERVER (Docker)
+  ┌──────────────────────────────┐        ┌────────────────────────────────┐
+  │ SMS ─► parser ─► SQLite      │        │  one container, one port       │
+  │                              │        │                                │
+  │ Settings › Server sync       │        │  /api/v1/snapshot  POST │ GET  │
+  │   Sync now ──────────────────┼───────►│  /api/v1/edits     GET  │ POST │
+  │                              │        │  /*  the Flutter web build    │
+  └──────────────────────────────┘        │                                │
+                                          │  /data/users/<you>/devices/    │
+  ┌──────────────────────────────┐        │      <device>/snapshots/       │
+  │ PC BROWSER — same screens    │◄──────►│                                │
+  └──────────────────────────────┘        └────────────────────────────────┘
+```
+
+### It is the same UI, not a lookalike
+
+The browser renders the *same* `DashboardTab` and `TransactionsTab` widgets the phone
+does, deriving what to show with the same `deriveLedgerView`. There is one
+implementation of the charts, the filters, the sort order and the category colours.
+What differs is only what a browser cannot own: it has no SQLite and no SMS, so the
+ledger arrives as a snapshot rather than from a query.
+
+That is possible because `lib/` is split along a platform boundary:
+
+| | |
+|---|---|
+| `lib/src/core/` | Pure Dart. Models, the parser, ledger maths, the backup and snapshot codecs. No Flutter, no plugins. |
+| `lib/src/ui_shared/` | Widgets both targets render. Flutter, `fl_chart` and `intl` only. |
+| `lib/src/mobile/` | `AppDatabase`, the SMS source, the updater, and every screen that writes. |
+| `lib/src/web/` | The browser's session, API client and shell. |
+
+`test/purity_test.dart` enforces it. The first two directories may import nothing
+outside themselves plus a fixed allowlist of packages with web implementations, and
+every file in both is checked — so no import path of any length can reach sqflite or
+`dart:io`. It runs in seconds on every test run, and it fails at the import rather
+than at deploy time.
+
+### Each device keeps its own ledger
+
+Snapshots are stored per account **and per device**:
+
+```
+/data/users/jay/devices/<device-id>/snapshots/<timestamp>.json
+```
+
+This is not incidental. With a single slot, the last device to sync would overwrite
+every other device's ledger — so pointing a phone and an emulator at one server
+would destroy real data on the first sync. Each device also gets its own edit queue,
+because an edit naming transaction 47 means a different transaction on a different
+device.
+
+The last 30 snapshots per device are kept. That history *is* the backup: every push
+is a whole ledger, so recovering from a bad one means reading an older snapshot
+rather than merging anything.
+
+### Running it
+
+Build and start it:
+
+```bash
+docker compose up -d
+```
+
+Set `EXPENSE_ADMIN_PASSWORD` to something long first. It creates the first account
+on the first start and is ignored ever after, so leaving it in the compose file is
+harmless and a typo in it cannot reset a password. More accounts later:
+
+```bash
+docker exec -it tu-expense-server /app/server --add-user sam
+docker exec -it tu-expense-server /app/server --list-users
+docker exec -it tu-expense-server /app/server --set-password jay
+```
+
+On **ZimaOS or CasaOS**, install through *Apps → + → Custom Install → Import* and
+paste `docker-compose.yml`. The `x-casaos` block gives it a title, an icon and a
+working WebUI link rather than an anonymous container.
+
+Then, on the phone: **Settings → Server sync**, enter the address
+(`http://192.168.1.99:8099`), sign in, and tap **Sync now**. In a browser, open the
+same address and sign in with the same account.
+
+### Environment
+
+| Variable | Default | |
+|---|---|---|
+| `EXPENSE_ADMIN_USER` | — | Creates the first account, if there are none. |
+| `EXPENSE_ADMIN_PASSWORD` | — | Its password. The server refuses to start with no accounts and no way to make one. |
+| `PORT` | `8099` | |
+| `DATA_DIR` | `/data` | |
+| `SNAPSHOT_KEEP` | `30` | Snapshots kept per device. |
+| `MAX_UPLOAD_BYTES` | `33554432` | 32 MB. |
+| `EDIT_EXPIRY_DAYS` | `30` | Drops an edit no phone came to collect. |
+
+### About the security of this
+
+Written down plainly, because self-hosting means these are your decisions:
+
+- **Plain HTTP.** Intended for a home LAN, or a WireGuard tunnel into it from
+  outside. Nothing needs forwarding on your router, and nothing should be.
+- **The password crosses the wire only at login**, and is exchanged for a session
+  token used thereafter. A token can be revoked; a password cannot. Still, on plain
+  HTTP that one request is readable by anything on the network, so use a password
+  unique to this app.
+- **Passwords are stored salted and hashed with Argon2id** (64 MiB, 3 iterations),
+  never in a reversible form. That is why signing in takes a second or two, on
+  purpose: it is what makes a stolen `users.json` expensive to attack.
+- **A wrong username and a wrong password are refused identically**, in the same
+  amount of time, so the server cannot be used to discover which accounts exist.
+- **The session token lives in `localStorage`** in the browser, readable by any
+  script on that origin. Acceptable for a private host serving only this app; **Sign
+  out** clears it.
+- **Every write is a temp file and a rename**, and the pointer to the current
+  snapshot is only written once the snapshot exists — so a container killed
+  mid-write leaves the previous snapshot current, never a half-written one.
+
+TLS is a reverse-proxy configuration away if you want it; ZimaOS already runs Caddy.
+
+### Editing from the browser
+
+The browser can read the ledger today. Editing it is queued rather than applied:
+the server holds the intent, and the phone applies it on its next sync through the
+same code paths its own screens use — so split sums, tombstones and the
+denormalised category cache stay enforced by the code that already enforces them.
+The wire format, the queue and the server side of this are built and tested; the
+browser's edit UI is the next piece of work.
 
 ## Limitations
 

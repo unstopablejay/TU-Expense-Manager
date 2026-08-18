@@ -38,6 +38,8 @@ export 'src/mobile/screens/split_screen.dart';
 export 'src/mobile/screens/transaction_actions_sheet.dart';
 export 'src/mobile/screens/update_dialog.dart';
 export 'src/mobile/sms_source.dart';
+export 'src/mobile/sync_client.dart';
+export 'src/mobile/sync_prefs.dart';
 export 'src/mobile/update_service.dart';
 export 'src/mobile/widgets/settings_header.dart';
 export 'src/ui_shared/dashboard_tab.dart';
