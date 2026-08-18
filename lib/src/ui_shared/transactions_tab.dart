@@ -87,6 +87,7 @@ class TransactionsTab extends StatelessWidget {
     required this.onTap,
     required this.onToggleSelected,
     required this.onDelete,
+    this.emptyDetail,
   });
 
   /// The rows to show: already filtered, already in order.
@@ -119,9 +120,23 @@ class TransactionsTab extends StatelessWidget {
   final ValueChanged<LedgerFilters> onFiltersChanged;
   final ValueChanged<LedgerSort> onSortChanged;
   final Future<void> Function() onRefresh;
-  final void Function(ExpenseTxn) onTap;
-  final void Function(ExpenseTxn) onToggleSelected;
-  final void Function(ExpenseTxn) onDelete;
+
+  /// The three ways this list writes. **Null means the list is read-only.**
+  ///
+  /// Nullable rather than a `readOnly` flag, because a flag would be a second
+  /// source of truth — what should `readOnly: true` with a non-null `onDelete`
+  /// do? — and because it is already this file's idiom for a tile that does not
+  /// act. Filtering, sorting and searching stay available either way: they are
+  /// local to the view and useful wherever it is shown.
+  final void Function(ExpenseTxn)? onTap;
+  final void Function(ExpenseTxn)? onToggleSelected;
+  final void Function(ExpenseTxn)? onDelete;
+
+  /// What to say under "No transactions yet" instead of the app's own advice.
+  ///
+  /// The default tells the reader to scan their SMS inbox, which is true on a
+  /// phone and nonsense in a browser.
+  final String? emptyDetail;
 
   /// Three filters and an order, two of which take several values at once, do
   /// not fit as dropdowns side by side — and Material has no multi-select one.
@@ -278,6 +293,7 @@ class TransactionsTab extends StatelessWidget {
                               onFiltersChanged(LedgerFilters.defaults(currentMonth)),
                           onShowAllMonths: () => onFiltersChanged(
                               filters.copyWith(months: const <YearMonth>{})),
+                          detailOverride: emptyDetail,
                         )
                       : ListView.builder(
                               // Bottom padding clears the FAB.
@@ -319,7 +335,10 @@ class TransactionsTab extends StatelessWidget {
       key: ValueKey<int>(txn.id),
       // Swipe is also off while marking, so a stray gesture can't delete
       // outside the selection flow.
-      direction: selecting || partial
+      // `.none` also covers a read-only list, where onDelete is null. With no
+      // direction, neither confirmDismiss nor onDismissed can fire, which is what
+      // makes the `!` below safe rather than hopeful.
+      direction: selecting || partial || onDelete == null
           ? DismissDirection.none
           : DismissDirection.endToStart,
       // Answered before the row animates out — a false springs it back, and
@@ -327,7 +346,7 @@ class TransactionsTab extends StatelessWidget {
       // scrolling list, and what it does outlives the snackbar that offers to
       // undo it.
       confirmDismiss: (_) => confirmDeleteTransactions(context, 1),
-      onDismissed: (_) => onDelete(txn),
+      onDismissed: (_) => onDelete!(txn),
       background: _DismissBackground(),
       child: _TransactionTile(
         txn: txn,
@@ -339,9 +358,17 @@ class TransactionsTab extends StatelessWidget {
         shownLines: entry.lines,
         selected: selected.contains(txn.id),
         selecting: selecting,
-        // While marking, a tap toggles rather than opens.
-        onTap: selecting ? () => onToggleSelected(txn) : () => onTap(txn),
-        onLongPress: () => onToggleSelected(txn),
+        // While marking, a tap toggles rather than opens. A null callback stays
+        // null, so the tile renders itself non-interactive — which it already
+        // knows how to do, and already says the right thing about.
+        onTap: switch ((selecting, onToggleSelected, onTap)) {
+          (true, final void Function(ExpenseTxn) toggle, _) => () => toggle(txn),
+          (false, _, final void Function(ExpenseTxn) open) => () => open(txn),
+          _ => null,
+        },
+        onLongPress: onToggleSelected == null
+            ? null
+            : () => onToggleSelected!(txn),
       ),
     );
   }
@@ -512,6 +539,7 @@ class _EmptyLedgerState extends StatelessWidget {
     required this.months,
     required this.onClear,
     required this.onShowAllMonths,
+    this.detailOverride,
   });
 
   final EmptyReason reason;
@@ -519,11 +547,17 @@ class _EmptyLedgerState extends StatelessWidget {
   final VoidCallback onClear;
   final VoidCallback onShowAllMonths;
 
+  /// Replaces the advice under the title where the caller knows better.
+  ///
+  /// The default tells the reader to scan their SMS inbox, which is right on a
+  /// phone and wrong anywhere the ledger arrived over a network.
+  final String? detailOverride;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    final (IconData icon, String title, String? detail) = switch (reason) {
+    final (IconData icon, String title, String? defaultDetail) = switch (reason) {
       EmptyReason.ledgerEmpty => (
           Icons.receipt_long_outlined,
           'No transactions yet',
@@ -545,6 +579,7 @@ class _EmptyLedgerState extends StatelessWidget {
           'Transactions appear here as your bank texts arrive.',
         ),
     };
+    final String? detail = detailOverride ?? defaultDetail;
 
     return ListView(
       // A scrollable child keeps pull-to-refresh working on an empty list.

@@ -31,6 +31,7 @@ class DashboardTab extends StatelessWidget {
     required this.loading,
     required this.onMonthsChanged,
     required this.onRefresh,
+    this.emptyDetail,
   });
 
   final List<ExpenseTxn> transactions;
@@ -39,6 +40,10 @@ class DashboardTab extends StatelessWidget {
   final YearMonth currentMonth;
   final NumberFormat money;
   final bool loading;
+
+  /// What to say when a period has nothing in it, where the default advice does
+  /// not apply — a browser has no way to add a transaction.
+  final String? emptyDetail;
   final ValueChanged<Set<YearMonth>> onMonthsChanged;
   final Future<void> Function() onRefresh;
 
@@ -73,7 +78,7 @@ class DashboardTab extends StatelessWidget {
                         money: money,
                       ),
                       if (byCategory.isEmpty)
-                        _NothingToChart(period: periodLabel(months))
+                        _NothingToChart(detail: emptyDetail, period: periodLabel(months))
                       // One month is a part-to-whole question and a donut
                       // answers it at a glance. Several months is a comparison,
                       // which a donut cannot answer at all — nobody can compare
@@ -438,9 +443,13 @@ class _MonthComparisonCard extends StatelessWidget {
 /// A period with no spend in it. Says so plainly rather than drawing an empty
 /// circle, which would read as a rendering failure.
 class _NothingToChart extends StatelessWidget {
-  const _NothingToChart({required this.period});
+  const _NothingToChart({required this.period, this.detail});
 
   final String period;
+
+  /// Replaces the advice under the title. The default points at the
+  /// Transactions tab's add button, which a read-only view does not have.
+  final String? detail;
 
   @override
   Widget build(BuildContext context) {
@@ -460,8 +469,9 @@ class _NothingToChart extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'Pick another month, or add a transaction from the '
-              'Transactions tab.',
+              detail ??
+                  'Pick another month, or add a transaction from the '
+                      'Transactions tab.',
               textAlign: TextAlign.center,
               style: theme.textTheme.bodySmall,
             ),

@@ -53,3 +53,6 @@ devtools_options.yaml
 # The server package resolves its own dependencies
 server/.dart_tool/
 server/pubspec.lock
+
+# The web build output
+/build/web/
