@@ -15,6 +15,7 @@
 library;
 
 import 'dart:convert';
+import 'dart:math';
 
 import 'models.dart';
 import 'splits.dart';
@@ -329,6 +330,29 @@ class EditQueue {
   final int unreadable;
 
   bool get isEmpty => edits.isEmpty;
+}
+
+/// A fresh id for an edit.
+///
+/// Time plus randomness. The timestamp keeps ids sortable and legible in the
+/// server's log; the random tail is what actually makes them unique, because
+/// `DateTime.now()` has only **millisecond** resolution on the web — two clicks
+/// in the same millisecond would otherwise collide on what is meant to be an
+/// idempotency key.
+///
+/// The random part is drawn one hex digit at a time from `nextInt(16)`.
+///
+/// **Never `nextInt(1 << 32)`.** On the web an int is a JavaScript number and
+/// shifts are 32-bit, so `1 << 32` evaluates to `0` and that call becomes
+/// `nextInt(0)`, which throws `RangeError`. This function exists because that is
+/// precisely what shipped: every edit made in a browser failed, silently, while
+/// the same code passed on the VM where `1 << 32` is 4294967296.
+String newEditId(DateTime now, Random random) {
+  const String hex = '0123456789abcdef';
+  final String tail = String.fromCharCodes(
+    Iterable<int>.generate(8, (_) => hex.codeUnitAt(random.nextInt(hex.length))),
+  );
+  return 'web-${now.millisecondsSinceEpoch}-$tail';
 }
 
 /// Composes an edit against [txn], for the browser to post.

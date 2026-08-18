@@ -43,6 +43,21 @@ jobs:
       # and it fails at the import rather than at deploy time.
       - run: flutter test
 
+      # The same suite, compiled to JavaScript and run in Chrome.
+      #
+      # This exists because a bug got past every other check here: the browser's
+      # edit id was built with `nextInt(1 << 32)`, and on the web an int is a
+      # JavaScript number with 32-bit shifts — so `1 << 32` is 0, the call became
+      # `nextInt(0)`, and it threw. Every edit made in a browser failed silently
+      # while this suite passed on the VM, `flutter analyze` was clean, the purity
+      # guard was clean and the web bundle built.
+      #
+      # Compiling for the web is not the same as running there. Tests that must
+      # stay on the VM say so with @TestOn('vm') or testOn: 'vm', and are skipped
+      # rather than failed.
+      - name: Run the tests as JavaScript, in a browser
+        run: flutter test --platform chrome
+
       # --no-web-resources-cdn is not optional. Without it a release build fetches
       # CanvasKit from gstatic.com at runtime, which is fatal on a self-hosted box
       # with no internet and shows up as a blank page rather than an error.
