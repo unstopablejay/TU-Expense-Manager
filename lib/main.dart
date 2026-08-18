@@ -23,6 +23,16 @@ import 'package:sqflite/sqflite.dart';
 // Gradle namespace and cannot build against AGP 8+.
 import 'package:another_telephony/telephony.dart';
 
+import 'src/ui_shared/formats.dart';
+import 'src/ui_shared/palette.dart';
+import 'src/ui_shared/shared_controls.dart';
+import 'src/ui_shared/theme.dart';
+
+export 'src/ui_shared/formats.dart';
+export 'src/ui_shared/palette.dart';
+export 'src/ui_shared/shared_controls.dart';
+export 'src/ui_shared/theme.dart';
+
 import 'src/core/aliases.dart';
 import 'src/core/backup_data.dart';
 import 'src/core/backup_validate.dart';
@@ -1773,17 +1783,8 @@ class TuExpenseTrackerApp extends StatelessWidget {
     return MaterialApp(
       title: 'TU Expense Tracker',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF00518F)),
-      ),
-      darkTheme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF00518F),
-          brightness: Brightness.dark,
-        ),
-      ),
+      theme: appTheme(Brightness.light),
+      darkTheme: appTheme(Brightness.dark),
       home: const HomeShell(),
     );
   }
@@ -2583,9 +2584,8 @@ class _HomeShellState extends State<HomeShell> {
   final AppDatabase _db = AppDatabase.instance;
   final SmsSource _sms = SmsSource();
 
-  final NumberFormat _money =
-      NumberFormat.currency(locale: 'en_IN', symbol: '₹', decimalDigits: 2);
-  final DateFormat _dateFormat = DateFormat('dd MMM yyyy · h:mm a');
+  final NumberFormat _money = appMoneyFormat();
+  final DateFormat _dateFormat = appDateFormat();
 
   List<ExpenseTxn> _transactions = <ExpenseTxn>[];
   List<ExpenseCategory> _categories = <ExpenseCategory>[];
@@ -3324,131 +3324,6 @@ class _HomeShellState extends State<HomeShell> {
               ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// SHARED CONTROLS — used by both the ledger and the charts
-// ---------------------------------------------------------------------------
-
-/// Lets the user tick several of [options] at once, returning the new selection
-/// or null if they backed out.
-///
-/// Top-level rather than a method on one tab, because both tabs ask this same
-/// question and a second copy would be a second thing to keep in step.
-Future<Set<T>?> chooseMany<T>(
-  BuildContext context, {
-  required String title,
-  required List<T> options,
-  required Set<T> selected,
-  required String Function(T) label,
-  Widget Function(T)? leading,
-}) =>
-    showModalBottomSheet<Set<T>>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (BuildContext context) => _MultiSelectSheet<T>(
-        title: title,
-        options: options,
-        selected: selected,
-        label: label,
-        leading: leading,
-      ),
-    );
-
-/// How many months may be compared at once. Past this the bars are too thin to
-/// read, and the legend longer than the chart.
-const int kMaxComparedMonths = 6;
-
-/// The period control: which months a screen is showing, and the two ways to
-/// change it.
-///
-/// Not a chip in the filter strip, for two reasons. The strip scrolls
-/// horizontally and its first chip can read "Amount: high to low", so a fifth
-/// item would sit past the fold — for the control that answers the very first
-/// question anyone has about the screen, and on which every total now depends.
-/// And a filter chip with nothing selected reads as "not filtering", which a
-/// month never is: there is always one in force.
-///
-/// The steppers are here because moving one month at a time is the common
-/// gesture and a modal sheet is a heavy way to do it. They are hidden rather
-/// than disabled in a multi-selection, where "the previous month" means nothing.
-class PeriodBar extends StatelessWidget {
-  const PeriodBar({
-    super.key,
-    required this.months,
-    required this.options,
-    required this.currentMonth,
-    required this.onChanged,
-  });
-
-  final Set<YearMonth> months;
-  final List<YearMonth> options;
-  final YearMonth currentMonth;
-  final ValueChanged<Set<YearMonth>> onChanged;
-
-  bool get _single => months.length == 1;
-
-  Future<void> _pick(BuildContext context) async {
-    final Set<YearMonth>? picked = await chooseMany<YearMonth>(
-      context,
-      title: 'Months',
-      options: options,
-      selected: months,
-      label: (YearMonth m) => m.label,
-    );
-    if (picked == null) return;
-    // Nothing ticked reads as "show me everything", which is what an empty set
-    // already means everywhere else.
-    onChanged(picked.length <= kMaxComparedMonths
-        ? picked
-        // Keep the most recent, since that is what anyone comparing wants.
-        : (picked.toList()
-              ..sort((YearMonth a, YearMonth b) => b.compareTo(a)))
-            .take(kMaxComparedMonths)
-            .toSet());
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final YearMonth? only = _single ? months.first : null;
-    // Offering the future is offering the empty.
-    final bool canGoForward = only != null && only.compareTo(currentMonth) < 0;
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-      child: Row(
-        children: <Widget>[
-          if (only != null)
-            IconButton(
-              tooltip: 'Previous month',
-              icon: const Icon(Icons.chevron_left),
-              onPressed: () => onChanged(<YearMonth>{only.plus(-1)}),
-            ),
-          Expanded(
-            child: OutlinedButton.icon(
-              onPressed: () => _pick(context),
-              icon: const Icon(Icons.calendar_month_outlined, size: 18),
-              label: Text(
-                periodLabel(months),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.labelLarge,
-              ),
-            ),
-          ),
-          if (only != null)
-            IconButton(
-              tooltip: 'Next month',
-              icon: const Icon(Icons.chevron_right),
-              onPressed:
-                  canGoForward ? () => onChanged(<YearMonth>{only.plus(1)}) : null,
-            ),
-        ],
       ),
     );
   }
@@ -4383,109 +4258,6 @@ class _FilterChip extends StatelessWidget {
   }
 }
 
-/// Ticks any number of [options] and returns the new selection on Apply, or
-/// null if it was dismissed.
-///
-/// Selection is held locally so backing out changes nothing — the filter only
-/// moves when Apply says so.
-class _MultiSelectSheet<T> extends StatefulWidget {
-  const _MultiSelectSheet({
-    super.key,
-    required this.title,
-    required this.options,
-    required this.selected,
-    required this.label,
-    this.leading,
-  });
-
-  final String title;
-  final List<T> options;
-  final Set<T> selected;
-  final String Function(T) label;
-  final Widget Function(T)? leading;
-
-  @override
-  State<_MultiSelectSheet<T>> createState() => _MultiSelectSheetState<T>();
-}
-
-class _MultiSelectSheetState<T> extends State<_MultiSelectSheet<T>> {
-  late Set<T> _selected = <T>{...widget.selected};
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 0, 12, 4),
-            child: Row(
-              children: <Widget>[
-                Expanded(
-                  child: Text(widget.title, style: theme.textTheme.titleLarge),
-                ),
-                if (_selected.isNotEmpty)
-                  TextButton(
-                    onPressed: () => setState(() => _selected = <T>{}),
-                    child: const Text('Clear'),
-                  ),
-              ],
-            ),
-          ),
-          Flexible(
-            child: widget.options.isEmpty
-                ? Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(
-                      'Nothing to choose from under the current filters.',
-                      style: theme.textTheme.bodyMedium,
-                    ),
-                  )
-                : ListView.builder(
-                    shrinkWrap: true,
-                    itemCount: widget.options.length,
-                    itemBuilder: (BuildContext context, int index) {
-                      final T option = widget.options[index];
-                      return CheckboxListTile(
-                        value: _selected.contains(option),
-                        secondary: widget.leading?.call(option),
-                        title: Text(
-                          widget.label(option),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        onChanged: (bool? on) => setState(() {
-                          if (on ?? false) {
-                            _selected.add(option);
-                          } else {
-                            _selected.remove(option);
-                          }
-                        }),
-                      );
-                    },
-                  ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 8, 20, 12),
-            child: Row(
-              children: <Widget>[
-                const Spacer(),
-                FilledButton(
-                  onPressed: () => Navigator.pop(context, _selected),
-                  child: const Text('Apply'),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// What a row slides away to reveal: the delete it is on its way to.
 class _DismissBackground extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
@@ -5142,12 +4914,6 @@ class _SummaryHeader extends StatelessWidget {
     );
   }
 }
-
-/// `ColorScheme` has no dependable green role, so money-in gets an explicit
-/// colour picked for contrast against the current brightness.
-Color creditColor(ThemeData theme) => theme.brightness == Brightness.dark
-    ? Colors.greenAccent.shade200
-    : Colors.green.shade800;
 
 class _TransactionTile extends StatelessWidget {
   const _TransactionTile({
@@ -5816,109 +5582,6 @@ class _CategoryPickerSheetState extends State<CategoryPickerSheet> {
       ),
     );
   }
-}
-
-IconData categoryIcon(String category) {
-  switch (category.toLowerCase()) {
-    case 'grocery':
-      return Icons.local_grocery_store_outlined;
-    case 'food':
-      return Icons.restaurant_outlined;
-    case 'fuel':
-      return Icons.local_gas_station_outlined;
-    case 'shopping':
-      return Icons.shopping_bag_outlined;
-    case 'bills & utilities':
-      return Icons.receipt_outlined;
-    case 'travel':
-      return Icons.flight_takeoff_outlined;
-    case 'entertainment':
-      return Icons.movie_outlined;
-    case 'health':
-      return Icons.medical_services_outlined;
-    case 'uncategorized':
-      return Icons.help_outline;
-    default:
-      return Icons.label_outline;
-  }
-}
-
-/// The eight categorical chart colours, light and dark.
-///
-/// A validated set rather than a pretty one: the order is the colour-blind
-/// safety mechanism, and the dark row is the same eight hues *re-stepped* for a
-/// dark surface — not the light row lightened programmatically, which is how
-/// palettes lose their separation.
-const List<Color> _chartHuesLight = <Color>[
-  Color(0xFF2A78D6), // blue
-  Color(0xFFEB6834), // orange
-  Color(0xFF1BAF7A), // aqua
-  Color(0xFFEDA100), // yellow
-  Color(0xFFE87BA4), // magenta
-  Color(0xFF008300), // green
-  Color(0xFF4A3AA7), // violet
-  Color(0xFFE34948), // red
-];
-
-const List<Color> _chartHuesDark = <Color>[
-  Color(0xFF3987E5),
-  Color(0xFFD95926),
-  Color(0xFF199E70),
-  Color(0xFFC98500),
-  Color(0xFFD55181),
-  Color(0xFF008300),
-  Color(0xFF9085E9),
-  Color(0xFFE66767),
-];
-
-/// The hues for [brightness]. The two lists are separate palettes rather than
-/// one lightened programmatically, so callers ask for a brightness and never
-/// have to know which list answered.
-List<Color> chartHues(Brightness brightness) =>
-    brightness == Brightness.dark ? _chartHuesDark : _chartHuesLight;
-
-/// The seeded categories' fixed slots. Everything else hashes its name.
-const Map<String, int> _seededCategorySlots = <String, int>{
-  'grocery': 0,
-  'food': 1,
-  'fuel': 2,
-  'shopping': 3,
-  'bills & utilities': 4,
-  'travel': 5,
-  'entertainment': 6,
-  'health': 7,
-};
-
-/// A stable colour for [category], in the given [brightness].
-///
-/// **Assigned from the name, never from the rank.** This is the whole point:
-/// were slots handed out by position in the sorted-by-spend list, Food would be
-/// blue in a month it led and orange in a month it did not, and the eye would
-/// read a colour change as a change in the data. A category keeps its colour
-/// across every month and every chart on the screen.
-///
-/// [kOtherCategory] and Uncategorized are deliberately grey — they are not a
-/// category anyone spent money "on", and giving them a hue would let the tail
-/// of the breakdown compete with the real answers.
-Color categoryColor(String category, Brightness brightness) {
-  final List<Color> hues = chartHues(brightness);
-  final String key = category.toLowerCase();
-  if (key == kOtherCategory.toLowerCase() ||
-      key == kUncategorized.toLowerCase()) {
-    return brightness == Brightness.dark
-        ? const Color(0xFF898781)
-        : const Color(0xFFC3C2B7);
-  }
-  final int? seeded = _seededCategorySlots[key];
-  if (seeded != null) return hues[seeded];
-  // `hashCode` on a String is stable within a run but not guaranteed across
-  // them, so spell the hash out — a category must not change colour when the
-  // app restarts.
-  var hash = 0;
-  for (final int unit in key.codeUnits) {
-    hash = (hash * 31 + unit) & 0x7fffffff;
-  }
-  return hues[hash % hues.length];
 }
 
 // ---------------------------------------------------------------------------
