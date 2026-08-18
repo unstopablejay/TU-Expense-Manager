@@ -29,6 +29,8 @@ tool
 *.iml
 .metadata
 .flutter-plugins-dependencies
-Dockerfile
-.dockerignore
 docker-compose.yml
+
+# Deliberately NOT excluded: Dockerfile and .dockerignore. Docker sends both to
+# the builder regardless of what this file says, and listing them here saves
+# nothing while giving a reader the impression that it does.
