@@ -980,12 +980,41 @@ TLS is a reverse-proxy configuration away if you want it; ZimaOS already runs Ca
 
 ### Editing from the browser
 
-The browser can read the ledger today. Editing it is queued rather than applied:
-the server holds the intent, and the phone applies it on its next sync through the
-same code paths its own screens use — so split sums, tombstones and the
-denormalised category cache stay enforced by the code that already enforces them.
-The wire format, the queue and the server side of this are built and tested; the
-browser's edit UI is the next piece of work.
+The browser can edit, and does it by **queueing intent rather than writing**.
+Clicking a row offers four things — change the category, edit the note, split
+across categories, delete — and each one posts an edit that the phone applies on
+its next sync:
+
+```
+PC clicks "Grocery"  ──POST /api/v1/edits──▶  queued, seq 4
+                                                  │
+Phone: Settings › Sync now  ◀─────────────────────┘  pulls the queue
+   │  applies via setTransactionCategory(), the same method its own screens call
+   └──▶ pushes a fresh snapshot, then acknowledges what it did
+```
+
+That order is deliberate. Applying before pushing means the snapshot the server
+ends up holding already contains the edit, so a browser refresh shows it.
+Acknowledging *after* the push means a crash in between re-applies an edit rather
+than losing it — safe, because each one is idempotent by its `edit_id`.
+
+Because the phone applies edits through its own methods, every rule it already
+enforces still holds: split lines must sum to the transaction, a delete writes a
+tombstone so a later inbox scan cannot resurrect the row, and the denormalised
+category cache is refreshed in the same SQL transaction. No new write paths, no
+schema change, no conflict resolution.
+
+An edit names its transaction by **both** row id and natural key, and needs both
+to agree. Ids are per-device and change under a restore; the natural key alone
+cannot tell two identical charges apart. So an edit made against a row the phone
+has since deleted resolves to nothing and is reported as skipped — never applied
+to whatever now holds that id.
+
+Two things the browser deliberately cannot do. It cannot create a category, since
+that is not one of the four operations and a category no phone agreed to make
+could not be applied. And it has no multi-select: that exists to drive a bulk
+delete, which here would be one queued edit per row with no way to undo the set as
+a set.
 
 ## Limitations
 
