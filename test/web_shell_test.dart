@@ -40,6 +40,9 @@ class StubServer {
   /// Overrides for a specific path, so a test can force a status.
   final Map<String, http.Response> canned = <String, http.Response>{};
 
+  /// Every edit posted to /api/v1/edits, decoded.
+  final List<Map<String, Object?>> queuedEdits = <Map<String, Object?>>[];
+
   http.Client get client => _StubClient(this);
 }
 
@@ -94,6 +97,18 @@ class _StubClient extends http.BaseClient {
         utf8.encode(body),
         200,
         headers: <String, String>{'content-type': 'application/json'},
+      ));
+    }
+
+    if (path == '/api/v1/edits' && request.method == 'POST') {
+      final String body = await (request as http.Request).finalize().bytesToString();
+      server.queuedEdits.add(jsonDecode(body) as Map<String, Object?>);
+      return _stream(http.Response(
+        jsonEncode(<String, Object?>{
+          'ok': true,
+          'pending': server.queuedEdits.length,
+        }),
+        201,
       ));
     }
 
@@ -172,6 +187,18 @@ String snapshotFor({
   ));
 }
 
+/// The nth TextField *inside the open dialog*.
+///
+/// Scoped deliberately: the transactions list behind the dialog has a search
+/// field of its own, so an unscoped `find.byType(TextField)` types into that and
+/// the test passes or fails for reasons that have nothing to do with the dialog.
+Finder _dialogField(int index) => find
+    .descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byType(TextField),
+    )
+    .at(index);
+
 Future<WebSession> signedInSession() async {
   SharedPreferences.setMockInitialValues(<String, Object>{});
   final WebSession session = WebSession();
@@ -225,10 +252,12 @@ void main() {
     expect(find.textContaining('DISTINCTIVEMERCHANT'), findsWidgets);
   });
 
-  testWidgets('the list is read-only: no delete, no tap-to-edit',
+  testWidgets('a row can be edited, but not multi-selected',
       (WidgetTester tester) async {
-    // Nullable callbacks rather than a flag, so this is what "read-only" means
-    // in practice — the tiles render themselves non-interactive.
+    // What the browser can and cannot do, stated as the callbacks it passes.
+    // Multi-select stays null because it exists to drive a bulk delete, and a
+    // bulk delete would be one queued edit per row with no way to undo the set
+    // as a set.
     final StubServer server = StubServer()
       ..devices['phone'] = "Jay's Pixel"
       ..snapshots['phone'] = snapshotFor(merchant: 'SWIGGY');
@@ -237,14 +266,215 @@ void main() {
     await tester.tap(find.text('Transactions'));
     await tester.pumpAndSettle();
 
-    final TransactionsTab tab =
-        tester.widget<TransactionsTab>(find.byType(TransactionsTab, skipOffstage: false));
-    expect(tab.onTap, isNull);
-    expect(tab.onDelete, isNull);
+    final TransactionsTab tab = tester.widget<TransactionsTab>(
+        find.byType(TransactionsTab, skipOffstage: false));
+    expect(tab.onTap, isNotNull);
+    expect(tab.onDelete, isNotNull);
     expect(tab.onToggleSelected, isNull);
-    // But the view controls still work: they are local and useful anywhere.
     expect(tab.onFiltersChanged, isNotNull);
     expect(tab.onSortChanged, isNotNull);
+  });
+
+  group('editing from the browser', () {
+    Future<void> openFirstRow(WidgetTester tester, StubServer server) async {
+      await pumpShell(tester, server);
+      await tester.tap(find.text('Transactions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('SWIGGY').first);
+      await tester.pumpAndSettle();
+    }
+
+    StubServer withLedger() => StubServer()
+      ..devices['phone'] = "Jay's Pixel"
+      ..snapshots['phone'] = snapshotFor(merchant: 'SWIGGY');
+
+    testWidgets('tapping a row offers the four queued operations',
+        (WidgetTester tester) async {
+      await openFirstRow(tester, withLedger());
+
+      expect(find.text('Change category'), findsOneWidget);
+      expect(find.textContaining('note'), findsWidgets);
+      expect(find.textContaining('Split'), findsWidgets);
+      expect(find.text('Delete'), findsOneWidget);
+      // Says what will happen, rather than pretending it already has.
+      expect(find.textContaining('next time that phone syncs'), findsOneWidget);
+    });
+
+    testWidgets('changing a category queues an edit', (WidgetTester tester) async {
+      final StubServer server = withLedger();
+      await openFirstRow(tester, server);
+
+      await tester.tap(find.text('Change category'));
+      await tester.pumpAndSettle();
+      // The transaction is on Grocery, so Uncategorized is a real change.
+      await tester.tap(find.text(kUncategorized).last);
+      await tester.pumpAndSettle();
+
+      expect(server.queuedEdits.length, 1);
+      expect(server.queuedEdits.single['op'], 'set_category');
+      expect(
+        (server.queuedEdits.single['payload']! as Map<String, Object?>)['category_id'],
+        1,
+      );
+      expect(find.textContaining('Queued'), findsOneWidget);
+    });
+
+    testWidgets('the queued edit addresses the row by id and natural key',
+        (WidgetTester tester) async {
+      // Both halves, so a stale edit resolves to nothing rather than to whatever
+      // now holds that id.
+      final StubServer server = withLedger();
+      await openFirstRow(tester, server);
+      await tester.tap(find.text('Change category'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(kUncategorized).last);
+      await tester.pumpAndSettle();
+
+      final Map<String, Object?> edit = server.queuedEdits.single;
+      expect(edit['txn_id'], isA<int>());
+      expect(edit['natural_key'], isA<String>());
+      expect(edit['natural_key'], contains('swiggy'),
+          reason: 'the key is built from the merchant as stored, lower-cased');
+      expect(edit['edit_id'], isA<String>());
+    });
+
+    testWidgets('editing a note queues it, and cancelling does not',
+        (WidgetTester tester) async {
+      final StubServer server = withLedger();
+      await openFirstRow(tester, server);
+
+      await tester.tap(find.text('Add a note'));
+      await tester.pumpAndSettle();
+      await tester.enterText(_dialogField(0), 'dinner with sam');
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(server.queuedEdits.length, 1);
+      expect(server.queuedEdits.single['op'], 'set_note');
+      expect(
+        (server.queuedEdits.single['payload']! as Map<String, Object?>)['note'],
+        'dinner with sam',
+      );
+    });
+
+    testWidgets('cancelling a note queues nothing', (WidgetTester tester) async {
+      final StubServer server = withLedger();
+      await openFirstRow(tester, server);
+
+      await tester.tap(find.text('Add a note'));
+      await tester.pumpAndSettle();
+      await tester.enterText(_dialogField(0), 'typed then abandoned');
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(server.queuedEdits, isEmpty);
+    });
+
+    testWidgets('a split has to add up before it can be saved',
+        (WidgetTester tester) async {
+      // The invariant saveSplits enforces on the phone, enforced here too — with
+      // the same core arithmetic, so the two cannot disagree.
+      final StubServer server = withLedger();
+      await openFirstRow(tester, server);
+
+      await tester.tap(find.textContaining('Split'));
+      await tester.pumpAndSettle();
+
+      // Opens balanced: the whole amount on its own category, plus an empty line.
+      expect(find.text('Adds up.'), findsOneWidget);
+
+      // Take some off the first line without putting it anywhere.
+      await tester.enterText(_dialogField(0), '500');
+      await tester.pumpAndSettle();
+      expect(find.textContaining('still to allocate'), findsOneWidget);
+
+      final FilledButton save = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Save'),
+      );
+      expect(save.onPressed, isNull,
+          reason: 'refusing now is better than the phone refusing at next sync');
+    });
+
+    testWidgets('Balance puts the remainder on the last line',
+        (WidgetTester tester) async {
+      final StubServer server = withLedger();
+      await openFirstRow(tester, server);
+      await tester.tap(find.textContaining('Split'));
+      await tester.pumpAndSettle();
+
+      await tester.enterText(_dialogField(0), '500');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Balance'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Adds up.'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+
+      final Map<String, Object?> edit = server.queuedEdits.single;
+      expect(edit['op'], 'save_splits');
+      final List<Object?> lines =
+          (edit['payload']! as Map<String, Object?>)['lines']! as List<Object?>;
+      expect(lines.length, 2);
+      // 1200 total, 500 typed, so 700 lands on the last line.
+      expect((lines.last! as Map<String, Object?>)['amount'], 700.0);
+    });
+
+    testWidgets('deleting asks first, and says the rescan will not undo it',
+        (WidgetTester tester) async {
+      final StubServer server = withLedger();
+      await openFirstRow(tester, server);
+
+      await tester.tap(find.text('Delete'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('will not bring it back'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+
+      expect(server.queuedEdits.single['op'], 'delete_txn');
+    });
+
+    testWidgets('cancelling a delete queues nothing', (WidgetTester tester) async {
+      final StubServer server = withLedger();
+      await openFirstRow(tester, server);
+      await tester.tap(find.text('Delete'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(server.queuedEdits, isEmpty);
+    });
+
+    testWidgets('the pending banner appears once something is queued',
+        (WidgetTester tester) async {
+      final StubServer server = withLedger();
+      await openFirstRow(tester, server);
+      await tester.tap(find.text('Change category'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(kUncategorized).last);
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('waiting'), findsOneWidget);
+    });
+
+    testWidgets('a refused queue attempt says so and claims nothing',
+        (WidgetTester tester) async {
+      final StubServer server = withLedger()
+        ..canned['/api/v1/edits'] = http.Response(
+          '{"ok":false,"error":"That edit was not accepted."}',
+          400,
+        );
+      await openFirstRow(tester, server);
+      await tester.tap(find.text('Change category'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(kUncategorized).last);
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('not accepted'), findsOneWidget);
+      expect(find.textContaining('waiting'), findsNothing,
+          reason: 'nothing is pending, so nothing should claim to be');
+    });
   });
 
   testWidgets('filtering and sorting still work without a server round trip',

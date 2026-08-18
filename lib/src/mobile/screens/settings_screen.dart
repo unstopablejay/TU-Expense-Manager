@@ -262,125 +262,25 @@ class _SettingsScreenState extends State<SettingsScreen> {
     required String initial,
     required String? Function(String) validate,
     TextInputType? keyboardType,
-  }) async {
-    final TextEditingController controller =
-        TextEditingController(text: initial);
-    // Selection at the end rather than the whole field selected, so typing after
-    // the port number does not wipe the address.
-    controller.selection =
-        TextSelection.collapsed(offset: controller.text.length);
-
-    final String? result = await showDialog<String>(
-      context: context,
-      builder: (BuildContext dialogContext) {
-        String? problem;
-        return StatefulBuilder(
-          builder: (BuildContext context, StateSetter rebuild) => AlertDialog(
-            title: Text(title),
-            content: TextField(
-              controller: controller,
-              autofocus: true,
-              keyboardType: keyboardType,
-              decoration: InputDecoration(
-                hintText: hint,
-                errorText: problem,
-                border: const OutlineInputBorder(),
-              ),
-              onSubmitted: (String value) {
-                final String? bad = validate(value);
-                if (bad == null) {
-                  Navigator.pop(dialogContext, value);
-                } else {
-                  rebuild(() => problem = bad);
-                }
-              },
-            ),
-            actions: <Widget>[
-              TextButton(
-                onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('Cancel'),
-              ),
-              FilledButton(
-                onPressed: () {
-                  final String? bad = validate(controller.text);
-                  if (bad == null) {
-                    Navigator.pop(dialogContext, controller.text);
-                  } else {
-                    rebuild(() => problem = bad);
-                  }
-                },
-                child: const Text('Save'),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-    controller.dispose();
-    return result;
-  }
+  }) =>
+      showDialog<String>(
+        context: context,
+        builder: (BuildContext dialogContext) => _TextPromptDialog(
+          title: title,
+          hint: hint,
+          initial: initial,
+          validate: validate,
+          keyboardType: keyboardType,
+        ),
+      );
 
   /// Username and password together, since one without the other is no use.
   Future<(String, String)?> _askForCredentials() async {
-    final TextEditingController username =
-        TextEditingController(text: _syncUser ?? '');
-    final TextEditingController password = TextEditingController();
-
     final (String, String)? result = await showDialog<(String, String)>(
       context: context,
-      builder: (BuildContext dialogContext) => AlertDialog(
-        title: const Text('Sign in to your server'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            TextField(
-              controller: username,
-              autofocus: true,
-              textInputAction: TextInputAction.next,
-              decoration: const InputDecoration(
-                labelText: 'Username',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: password,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: 'Password',
-                border: OutlineInputBorder(),
-              ),
-              onSubmitted: (_) => Navigator.pop(
-                dialogContext,
-                (username.text, password.text),
-              ),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Signing in can take a few seconds: the server hashes your '
-              'password deliberately slowly.',
-              style: TextStyle(fontSize: 11),
-            ),
-          ],
-        ),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(
-              dialogContext,
-              (username.text, password.text),
-            ),
-            child: const Text('Sign in'),
-          ),
-        ],
-      ),
+      builder: (BuildContext dialogContext) =>
+          _CredentialsDialog(username: _syncUser ?? ''),
     );
-    username.dispose();
-    password.dispose();
-
     if (result == null) return null;
     if (result.$1.trim().isEmpty || result.$2.isEmpty) {
       _say('Both a username and a password are needed.');
@@ -776,4 +676,149 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ],
             );
   }
+}
+
+/// A single validated text field in a dialog.
+///
+/// Stateful so that it owns its controller. A controller created beside
+/// `showDialog` and disposed once it awaits is disposed too early: showDialog
+/// completes when the route *starts* closing, while the dialog is still being
+/// built through its exit animation, which throws "A TextEditingController was
+/// used after being disposed". A State's dispose runs when the route is gone.
+class _TextPromptDialog extends StatefulWidget {
+  const _TextPromptDialog({
+    required this.title,
+    required this.hint,
+    required this.initial,
+    required this.validate,
+    this.keyboardType,
+  });
+
+  final String title;
+  final String hint;
+  final String initial;
+  final String? Function(String) validate;
+  final TextInputType? keyboardType;
+
+  @override
+  State<_TextPromptDialog> createState() => _TextPromptDialogState();
+}
+
+class _TextPromptDialogState extends State<_TextPromptDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initial,
+    // Caret at the end rather than the whole field selected, so typing after a
+    // port number does not wipe the address.
+  )..selection = TextSelection.collapsed(offset: widget.initial.length);
+
+  String? _problem;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit(String value) {
+    final String? bad = widget.validate(value);
+    if (bad == null) {
+      Navigator.pop(context, value);
+    } else {
+      setState(() => _problem = bad);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: Text(widget.title),
+        content: TextField(
+          controller: _controller,
+          autofocus: true,
+          keyboardType: widget.keyboardType,
+          decoration: InputDecoration(
+            hintText: widget.hint,
+            errorText: _problem,
+            border: const OutlineInputBorder(),
+          ),
+          onSubmitted: _submit,
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => _submit(_controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      );
+}
+
+/// Username and password, asked for together.
+class _CredentialsDialog extends StatefulWidget {
+  const _CredentialsDialog({required this.username});
+
+  final String username;
+
+  @override
+  State<_CredentialsDialog> createState() => _CredentialsDialogState();
+}
+
+class _CredentialsDialogState extends State<_CredentialsDialog> {
+  late final TextEditingController _username =
+      TextEditingController(text: widget.username);
+  final TextEditingController _password = TextEditingController();
+
+  @override
+  void dispose() {
+    _username.dispose();
+    _password.dispose();
+    super.dispose();
+  }
+
+  void _submit() =>
+      Navigator.pop(context, (_username.text, _password.text));
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('Sign in to your server'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            TextField(
+              controller: _username,
+              autofocus: true,
+              textInputAction: TextInputAction.next,
+              decoration: const InputDecoration(
+                labelText: 'Username',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _password,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Password',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (_) => _submit(),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Signing in can take a few seconds: the server hashes your '
+              'password deliberately slowly.',
+              style: TextStyle(fontSize: 11),
+            ),
+          ],
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(onPressed: _submit, child: const Text('Sign in')),
+        ],
+      );
 }

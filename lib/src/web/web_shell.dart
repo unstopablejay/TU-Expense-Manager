@@ -9,16 +9,22 @@
 /// so an edit here is queued for the phone to apply rather than written.
 library;
 
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../core/edits.dart';
 import '../core/ledger.dart';
 import '../core/ledger_view.dart';
+import '../core/models.dart';
 import '../core/snapshot_store.dart';
+import '../core/splits.dart';
 import '../ui_shared/dashboard_tab.dart';
 import '../ui_shared/formats.dart';
 import '../ui_shared/transactions_tab.dart';
 import 'api_client.dart';
+import 'edit_sheets.dart';
 import 'session.dart';
 
 /// How stale a snapshot may be before it is called out.
@@ -60,6 +66,12 @@ class _WebShellState extends State<WebShell> {
 
   /// Edits queued from here that the phone has not applied yet.
   int _pendingEdits = 0;
+
+  /// Which snapshot the on-screen ledger came from, carried on every edit so the
+  /// phone can tell how stale the ids in it are.
+  String? _snapshotId;
+
+  final Random _random = Random();
 
   @override
   void initState() {
@@ -108,6 +120,7 @@ class _WebShellState extends State<WebShell> {
       _devices = devices.value!;
       _device = chosen;
       _store = snapshot.value;
+      _snapshotId = snapshot.value!.meta['snapshot_id'];
       _pendingEdits = devices.value!
           .firstWhere(
             (RemoteDevice d) => d.id == chosen,
@@ -131,6 +144,100 @@ class _WebShellState extends State<WebShell> {
       if (message.contains('expired')) _store = null;
     });
     if (message.contains('expired')) widget.session.signOut();
+  }
+
+  /// A row was clicked: offer what can be done to it, then queue it.
+  Future<void> _editTransaction(ExpenseTxn txn) async {
+    final SnapshotStore? store = _store;
+    if (store == null) return;
+
+    final WebTxnAction? action =
+        await showWebTxnActions(context, txn, _money);
+    if (action == null || !mounted) return;
+
+    switch (action) {
+      case WebTxnAction.setCategory:
+        final int? categoryId = await pickWebCategory(
+          context,
+          categories: store.categories,
+          selectedId: txn.categoryId,
+        );
+        if (categoryId == null || categoryId == txn.categoryId) return;
+        await _queue(EditOp.setCategory, txn, categoryId: categoryId);
+
+      case WebTxnAction.setNote:
+        final String? note = await editWebNote(context, txn);
+        // Null is cancelled; empty is a note being removed. Different answers.
+        if (note == null || note == txn.note) return;
+        await _queue(EditOp.setNote, txn, note: note);
+
+      case WebTxnAction.split:
+        final List<TxnSplit>? lines = await editWebSplits(
+          context,
+          txn: txn,
+          categories: store.categories,
+          money: _money,
+        );
+        if (lines == null) return;
+        await _queue(EditOp.saveSplits, txn, lines: lines);
+
+      case WebTxnAction.delete:
+        await _deleteTransaction(txn);
+    }
+  }
+
+  /// The swipe and the sheet both land here.
+  Future<void> _deleteTransaction(ExpenseTxn txn) async {
+    if (!await confirmWebDelete(context, txn)) return;
+    await _queue(EditOp.deleteTxn, txn);
+  }
+
+  /// Records the intent on the server, and says what will happen to it.
+  ///
+  /// The natural key comes from [ExpenseTxn.naturalKey], which reads the merchant
+  /// as *stored* rather than as merged — a key written from a merged spelling
+  /// would address a row that does not exist, and the phone would skip it for no
+  /// visible reason.
+  Future<void> _queue(
+    EditOp op,
+    ExpenseTxn txn, {
+    int? categoryId,
+    String? note,
+    List<TxnSplit> lines = const <TxnSplit>[],
+  }) async {
+    final String? device = _device;
+    if (device == null) return;
+
+    final LedgerEdit edit = composeEdit(
+      // Time and randomness together: the time keeps ids readable in the
+      // server's log, and the random tail stops two clicks in the same
+      // millisecond colliding on what is meant to be an idempotency key.
+      editId: 'web-${DateTime.now().microsecondsSinceEpoch}-'
+          '${_random.nextInt(1 << 32).toRadixString(16)}',
+      op: op,
+      txn: txn,
+      now: DateTime.now().toUtc(),
+      snapshotId: _snapshotId,
+      categoryId: categoryId,
+      note: note,
+      lines: lines,
+    );
+
+    final ApiResult<int> result =
+        await widget.api.queueEdit(edit, device: device);
+    if (!mounted) return;
+    if (result.failed) {
+      _toast(result.error!);
+      return;
+    }
+    setState(() => _pendingEdits = result.value!);
+    _toast('Queued. It will be applied the next time that phone syncs.');
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override
@@ -235,12 +342,12 @@ class _WebShellState extends State<WebShell> {
           onFiltersChanged: (LedgerFilters f) => setState(() => _filters = f),
           onSortChanged: (LedgerSort s) => setState(() => _sort = s),
           onRefresh: () => _load(),
-          // Editing from a browser is a later step; the callbacks are nullable
-          // precisely so that a read-only list is expressible rather than merely
-          // undocumented.
-          onTap: null,
+          onTap: _editTransaction,
+          onDelete: _deleteTransaction,
+          // Still null: multi-select exists to drive a bulk delete, and a bulk
+          // delete would be one queued edit per row with no way to undo the set
+          // as a set. One row at a time here.
           onToggleSelected: null,
-          onDelete: null,
           emptyDetail: 'Transactions are added on your phone, from bank SMS '
               'alerts. This view reads what it last synced.',
         ),
