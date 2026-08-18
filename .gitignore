@@ -49,3 +49,7 @@ app.*.map.json
 
 # Dart & Flutter DevTools settings, written by the tooling on demand
 devtools_options.yaml
+
+# The server package resolves its own dependencies
+server/.dart_tool/
+server/pubspec.lock
