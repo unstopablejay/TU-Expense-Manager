@@ -11,6 +11,16 @@ include: package:flutter_lints/flutter.yaml
 
 analyzer:
   exclude:
+    # server/ is a separate Dart package with its own pubspec and its own
+    # analysis_options.yaml. `flutter analyze` here would recurse into it and
+    # report every import as unresolved, because this package's `pub get` never
+    # resolves that one's dependencies — 481 errors from code that is fine.
+    #
+    # It passed locally only because a `dart pub get` inside server/ had left a
+    # .dart_tool behind that a fresh checkout does not have, so CI was the first
+    # place to see the truth. The `Server` job in ci.yml analyses it properly,
+    # from inside its own package.
+    - server/**
     - build/**
     - android/**
     - ios/**
