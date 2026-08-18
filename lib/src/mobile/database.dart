@@ -329,6 +329,13 @@ class AppDatabase {
     return ExpenseCategory.fromMap(rows.first);
   }
 
+  /// The whole ledger, newest first, merged names applied.
+  ///
+  /// **`SnapshotStore.fromBackup` in `lib/src/core/snapshot_store.dart` is the
+  /// same join without the SQL**, for the web build, which has no SQLite. The two
+  /// have to agree — a difference between them shows up as the phone and the PC
+  /// disagreeing about what the same ledger says — so neither should be changed
+  /// without the other.
   Future<List<ExpenseTxn>> transactions() async {
     final db = await database;
     final rows = await db.rawQuery('''
