@@ -1,3 +1,9 @@
+// VM only: this walks lib/ with dart:io to read import directives, which a
+// browser cannot do. `flutter test --platform chrome` skips it by this
+// annotation rather than failing to compile it.
+@TestOn('vm')
+library;
+
 // Guards the boundary the web build depends on.
 //
 // `lib/src/core/` is pure Dart and `lib/src/ui_shared/` is Flutter plus two
