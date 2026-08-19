@@ -1,6 +1,7 @@
 /// Settings: categorization, cleanup, data and updates.
 library;
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -13,8 +14,10 @@ import '../../core/aliases.dart';
 import '../../core/backup_data.dart';
 import '../../core/backup_validate.dart';
 import '../../core/constants.dart';
+import '../auto_sync.dart';
 import '../backup_dialogs.dart';
 import '../backup_files.dart';
+import '../connection_monitor.dart';
 import '../database.dart';
 import '../sync_client.dart';
 import '../sync_prefs.dart';
@@ -71,6 +74,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   DateTime? _lastPushed;
   String? _syncStatus;
   bool _autoAfterScan = false;
+  bool _auto = true;
+  int _autoMinutes = kDefaultAutoSyncMinutes;
 
   /// The release a check on this screen turned up, kept so the Install button
   /// survives dismissing the dialog.
@@ -98,6 +103,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final DateTime? lastPushed = await sync.lastPushed();
     final String? lastResult = await sync.lastResult();
     final bool autoAfterScan = await sync.autoAfterScan();
+    final bool autoSync = await sync.auto();
+    final int autoMinutes = await sync.autoMinutes();
 
     if (!mounted) return;
     setState(() {
@@ -111,6 +118,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _lastPushed = lastPushed;
       _syncStatus = lastResult;
       _autoAfterScan = autoAfterScan;
+      _auto = autoSync;
+      _autoMinutes = autoMinutes;
       _loading = false;
     });
   }
@@ -167,6 +176,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _syncing = true);
     try {
       final SyncOutcome result = await SyncClient.instance.testConnection(base);
+      // Whatever this found is what the light should be showing, immediately —
+      // testing the connection is the one action whose whole purpose is to
+      // answer that question.
+      unawaited(ConnectionMonitor.instance.check(force: true));
       if (!mounted) return;
       setState(() => _syncStatus =
           result.failed ? result.error : 'The server answered. Sign in next.');
@@ -204,9 +217,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
       if (!mounted) return;
       setState(() {
         _syncUser = user;
-        _syncStatus = 'Signed in. Tap Sync now to upload.';
+        _syncStatus = _auto
+            ? 'Signed in. Syncing now, and automatically from here on.'
+            : 'Signed in. Tap Sync now to upload.';
       });
       _say('Signed in as $user.');
+      // Signing in is the moment sync becomes possible, and the timer was armed
+      // before there was a session for it to use. Not awaited: the first upload
+      // is a whole ledger, and nothing on this screen should wait for it.
+      if (_auto) unawaited(AutoSync.instance.resume());
     } finally {
       if (mounted) setState(() => _syncing = false);
     }
@@ -236,6 +255,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         // ledger moved underneath it.
         onChanged: widget.onChanged,
       );
+      // The light in the app bar is looking at the same server this just spoke
+      // to, and a manual sync is the strongest evidence there is about it.
+      ConnectionMonitor.instance.record(result);
       if (!mounted) return;
       final DateTime? pushed = await SyncPrefs.instance.lastPushed();
       if (!mounted) return;
@@ -253,6 +275,52 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _setAutoAfterScan(bool value) async {
     setState(() => _autoAfterScan = value);
     await SyncPrefs.instance.setAutoAfterScan(value);
+  }
+
+  /// Turns automatic syncing on or off, and makes it so immediately.
+  ///
+  /// [AutoSync.resume] rather than waiting for the next launch: a switch that
+  /// takes effect later is a switch the user will flick twice trying to work out
+  /// whether it did anything.
+  Future<void> _setAuto(bool value) async {
+    setState(() => _auto = value);
+    await SyncPrefs.instance.setAuto(value);
+    if (value) {
+      await AutoSync.instance.resume();
+    } else {
+      AutoSync.instance.pause();
+    }
+  }
+
+  /// Asks how often, from a short list rather than a number field.
+  Future<void> _editAutoMinutes() async {
+    final int? chosen = await showDialog<int>(
+      context: context,
+      builder: (BuildContext dialogContext) => SimpleDialog(
+        title: const Text('Sync how often?'),
+        children: <Widget>[
+          for (final int minutes in kAutoSyncChoices)
+            ListTile(
+              // The tick marks the current choice without a radio group, which
+              // in a dialog that closes on the first tap would only ever be
+              // seen mid-dismissal.
+              leading: Icon(
+                minutes == _autoMinutes
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_unchecked,
+              ),
+              title: Text(describeSyncInterval(minutes)),
+              onTap: () => Navigator.of(dialogContext).pop(minutes),
+            ),
+        ],
+      ),
+    );
+    if (chosen == null) return;
+
+    setState(() => _autoMinutes = chosen);
+    await SyncPrefs.instance.setAutoMinutes(chosen);
+    // The running timer is on the old interval until it is rebuilt.
+    await AutoSync.instance.resume();
   }
 
   /// One text field in a dialog, validated before it closes.
@@ -602,12 +670,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         ),
                 ),
                 SwitchListTile(
+                  value: _auto,
+                  onChanged: _syncUser == null ? null : _setAuto,
+                  title: const Text('Sync automatically'),
+                  subtitle: Text(
+                    'While the app is open: on opening it, when you come back '
+                    'to it, ${describeSyncInterval(_autoMinutes).toLowerCase()}, '
+                    'and shortly after you change something. This is what '
+                    'applies edits made in a browser.',
+                  ),
+                ),
+                if (_auto)
+                  ListTile(
+                    leading: const Icon(Icons.schedule_outlined),
+                    title: const Text('How often'),
+                    subtitle: Text(describeSyncInterval(_autoMinutes)),
+                    enabled: _syncUser != null,
+                    onTap: _editAutoMinutes,
+                  ),
+                SwitchListTile(
                   value: _autoAfterScan,
                   onChanged: _syncUser == null ? null : _setAutoAfterScan,
                   title: const Text('Sync after each inbox scan'),
                   subtitle: const Text(
-                    'Uploads automatically when a scan finds something new. '
-                    'Off by default.',
+                    'Uploads as soon as a scan finds something, without waiting '
+                    'for the next automatic sync. Off by default.',
                   ),
                 ),
                 const Divider(height: 32),

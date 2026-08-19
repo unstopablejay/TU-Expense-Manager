@@ -135,8 +135,9 @@ class MerchantSummary {
 ///
 /// [merchant] is lower-cased because the real index is `COLLATE NOCASE`, and
 /// must be the merchant **as stored**, never the merged spelling. See
-/// [ExpenseTxn.rawMerchant]. [amount] goes through `toString` because that is
-/// round-trip exact for a double.
+/// [ExpenseTxn.rawMerchant]. [amount] goes through [canonicalAmountKey] rather
+/// than `toString`, because `toString` is round-trip exact on both of this
+/// app's targets but does not spell a double the same way on each — see there.
 ///
 /// The separator is NUL, which no field can contain, so no two different tuples
 /// can join to the same string. Written as an escape rather than as the byte
@@ -154,12 +155,40 @@ String transactionNaturalKey({
   required String reference,
 }) =>
     <String>[
-      amount.toString(),
+      canonicalAmountKey(amount),
       merchant.toLowerCase(),
       dateMillis.toString(),
       direction,
       reference,
     ].join('\u0000');
+
+/// A double spelled the same way on the phone and in a browser.
+///
+/// `double.toString()` is round-trip exact on both of this app's targets but
+/// **not identical between them**. On the Dart VM an integral double prints as
+/// `500.0`; on the web a double *is* a JavaScript number, and the same value
+/// prints as `500`. A natural key is composed in a browser and matched on a
+/// phone, so that one character decides whether an edit lands or comes back as
+/// "no longer matched" — which is precisely what shipped. Every browser edit to
+/// a whole-rupee transaction vanished, while one ending in paise worked, which
+/// is what made it look intermittent rather than broken.
+///
+/// The VM's spelling is the one kept, because the phone's keys are already
+/// written into `deleted_transactions` and changing them would orphan every
+/// tombstone: append `.0` when the shortest representation carries no decimal
+/// point and no exponent. `test/natural_key_test.dart` pins the values this was
+/// checked against on both runtimes.
+String canonicalAmountKey(double amount) {
+  final String plain = amount.toString();
+  for (int i = 0; i < plain.length; i++) {
+    final int unit = plain.codeUnitAt(i);
+    // '.', 'e' or 'E' — a decimal point, or an exponent, which both targets
+    // already spell identically. `NaN` and `Infinity` fall through to the
+    // suffix; neither is an amount any transaction can hold.
+    if (unit == 0x2e || unit == 0x65 || unit == 0x45) return plain;
+  }
+  return '$plain.0';
+}
 
 class ExpenseTxn {
   const ExpenseTxn({
