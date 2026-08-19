@@ -36,6 +36,7 @@ class RemoteDevice {
     this.transactions,
     this.pendingEdits = 0,
     this.snapshotId,
+    this.syncMinutes,
   });
 
   factory RemoteDevice.fromJson(Map<String, Object?> json) {
@@ -50,6 +51,7 @@ class RemoteDevice {
       lastSeen: DateTime.tryParse(json['last_seen'] as String? ?? ''),
       transactions: int.tryParse('${counts?['transactions'] ?? ''}'),
       pendingEdits: (json['pending_edits'] as num?)?.toInt() ?? 0,
+      syncMinutes: (json['sync_interval_minutes'] as num?)?.toInt(),
       snapshotId: latest is Map<String, Object?> ? latest['id'] as String? : null,
     );
   }
@@ -65,6 +67,13 @@ class RemoteDevice {
 
   final int pendingEdits;
   final String? snapshotId;
+
+  /// How often that device says it syncs, in minutes — null if it has not said,
+  /// or if it syncs only when somebody presses the button.
+  ///
+  /// This is what lets the connection light tell "gone quiet" from "between
+  /// syncs" without guessing at an interval.
+  final int? syncMinutes;
 
   bool get hasSynced => snapshotId != null;
 }

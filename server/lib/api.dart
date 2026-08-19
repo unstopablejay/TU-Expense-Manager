@@ -26,6 +26,14 @@ import 'snapshots.dart';
 const String kDeviceHeader = 'X-Expense-Device';
 const String kDeviceLabelHeader = 'X-Expense-Device-Label';
 
+/// How often the client says it syncs, in minutes.
+///
+/// Advisory, and the server never acts on it. It is recorded so the browser can
+/// tell a phone that has gone quiet from one that is merely between syncs — the
+/// difference between a red light that means something and one that means the
+/// user chose a long interval.
+const String kSyncIntervalHeader = 'X-Expense-Sync-Interval';
+
 /// Everything the routes need.
 class Api {
   Api({
@@ -110,6 +118,7 @@ class Api {
         user: session.username,
         device: device.trim(),
         label: request.headers[kDeviceLabelHeader] ?? '',
+        syncIntervalMinutes: _syncInterval(request),
       );
     }
 
@@ -192,6 +201,7 @@ class Api {
       device: device,
       label: request.headers[kDeviceLabelHeader] ?? '',
       body: body,
+      syncIntervalMinutes: _syncInterval(request),
     );
     return _json(<String, Object?>{'ok': true, ...info.toJson()}, status: 201);
   }
@@ -294,6 +304,13 @@ class Api {
   Future<Response> _pendingEdits(Request request, String user) async {
     final String? device = _device(request);
     if (device == null) return _missingDevice();
+    // Every sync starts here, whether or not it goes on to upload anything, so
+    // this is the one request that reliably says "that phone is still with us".
+    await snapshots.touchDevice(
+      user: user,
+      device: device,
+      syncIntervalMinutes: _syncInterval(request),
+    );
     return _json(<String, Object?>{
       'ok': true,
       'edits': await edits.pending(user: user, device: device),
@@ -379,6 +396,18 @@ class Api {
     final String header = request.headers['authorization'] ?? '';
     if (!header.toLowerCase().startsWith('bearer ')) return '';
     return header.substring(7).trim();
+  }
+
+  /// The client's sync interval in minutes, if it sent a sane one.
+  ///
+  /// Anything unreadable, zero, negative or longer than a week is dropped rather
+  /// than stored: this is only ever used to work out how long a device may stay
+  /// quiet, and a nonsense value there would make the browser's light lie in one
+  /// direction or the other.
+  int? _syncInterval(Request request) {
+    final int? minutes = int.tryParse(request.headers[kSyncIntervalHeader] ?? '');
+    if (minutes == null || minutes <= 0 || minutes > 7 * 24 * 60) return null;
+    return minutes;
   }
 
   String? _device(Request request) {

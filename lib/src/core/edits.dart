@@ -221,7 +221,8 @@ class LedgerEdit {
   /// reported as [EditOutcome.skippedMissingRow] rather than applied to the
   /// wrong row.
   bool matches(ExpenseTxn txn) =>
-      txn.id == txnId && txn.naturalKey == naturalKey;
+      txn.id == txnId &&
+      canonicalNaturalKey(txn.naturalKey) == canonicalNaturalKey(naturalKey);
 
   /// [txn] if this edit still describes something in [ledger], else null.
   ///
@@ -229,10 +230,15 @@ class LedgerEdit {
   /// back to the natural key for a row whose id has moved — which is what a
   /// restore from backup does to a whole ledger.
   ExpenseTxn? resolve(Iterable<ExpenseTxn> ledger) {
+    // Hoisted: this key is the same for every row, and canonicalising it inside
+    // the loop would do the work once per transaction in the ledger.
+    final String wanted = canonicalNaturalKey(naturalKey);
     ExpenseTxn? byKey;
     for (final ExpenseTxn txn in ledger) {
-      if (matches(txn)) return txn;
-      if (byKey == null && txn.naturalKey == naturalKey) byKey = txn;
+      final String key = canonicalNaturalKey(txn.naturalKey);
+      if (key != wanted) continue;
+      if (txn.id == txnId) return txn;
+      byKey ??= txn;
     }
     return byKey;
   }
@@ -330,6 +336,34 @@ class EditQueue {
   final int unreadable;
 
   bool get isEmpty => edits.isEmpty;
+}
+
+/// The amount field of a natural key, as it appears at the front of one.
+///
+/// The fields are NUL-separated and the amount is the first, so the run of
+/// characters a number can be spelled with ends exactly where the separator
+/// begins. Matching the prefix rather than splitting keeps this function from
+/// having to name the separator — and from being a second place that has to be
+/// changed if it ever moves.
+final RegExp _amountField = RegExp(r'^[-+0-9.eE]+');
+
+/// [key] with its amount spelled the way this app spells one.
+///
+/// An edit composed in a browser before [canonicalAmountKey] existed carries
+/// `500` where the phone writes `500.0`, and the two would not compare equal —
+/// so every such edit already sitting in a queue would come back as
+/// [EditOutcome.skippedMissingRow] the moment the phone was updated. Running
+/// both sides of the comparison through here applies those edits instead of
+/// quietly discarding a week of them.
+///
+/// Anything this cannot read is returned unchanged, so a key in some shape
+/// nobody anticipated still compares byte for byte as it always did.
+String canonicalNaturalKey(String key) {
+  final Match? amount = _amountField.matchAsPrefix(key);
+  if (amount == null) return key;
+  final double? value = double.tryParse(amount.group(0)!);
+  if (value == null) return key;
+  return '${canonicalAmountKey(value)}${key.substring(amount.end)}';
 }
 
 /// A fresh id for an edit.

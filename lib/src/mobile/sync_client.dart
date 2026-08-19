@@ -24,6 +24,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart' show compute;
 import 'package:http/http.dart' as http;
 
@@ -54,6 +55,7 @@ class SyncOutcome {
     this.editsApplied = 0,
     this.editsSkipped = 0,
     this.editsRejected = 0,
+    this.pushed = true,
   })  : error = null,
         signedOut = false;
 
@@ -61,7 +63,8 @@ class SyncOutcome {
       : transactions = 0,
         editsApplied = 0,
         editsSkipped = 0,
-        editsRejected = 0;
+        editsRejected = 0,
+        pushed = false;
 
   final String? error;
 
@@ -74,6 +77,14 @@ class SyncOutcome {
   final int editsSkipped;
   final int editsRejected;
 
+  /// Whether the ledger was actually uploaded.
+  ///
+  /// False when an automatic sync found the ledger identical to the copy the
+  /// server already holds. The alternative — pushing every quarter of an hour
+  /// regardless — would fill the server's thirty-snapshot history with thirty
+  /// identical copies inside a day, and the history is the backup.
+  final bool pushed;
+
   bool get failed => error != null;
 
   int get editsSeen => editsApplied + editsSkipped + editsRejected;
@@ -82,7 +93,9 @@ class SyncOutcome {
   String describe() {
     if (error != null) return error!;
     final StringBuffer out = StringBuffer(
-      'Pushed $transactions transaction${transactions == 1 ? '' : 's'}',
+      pushed
+          ? 'Pushed $transactions transaction${transactions == 1 ? '' : 's'}'
+          : 'Already up to date',
     );
     if (editsApplied > 0) {
       out.write(', applied $editsApplied edit${editsApplied == 1 ? '' : 's'}');
@@ -154,6 +167,7 @@ class SyncClient {
               'Content-Type': 'application/json; charset=utf-8',
               'X-Expense-Device': device,
               'X-Expense-Device-Label': await _prefs.deviceLabel(),
+              ...await _intervalHeader(),
             },
             body: jsonEncode(<String, Object?>{
               'username': username.trim().toLowerCase(),
@@ -212,7 +226,17 @@ class SyncClient {
   /// [onChanged] is called if the ledger was actually modified, so the shell can
   /// reload — a background write it does not know about would otherwise leave
   /// stale rows on screen.
-  Future<SyncOutcome> syncNow({VoidCallback? onChanged}) async {
+  ///
+  /// [force] is what the Sync button means: upload whatever happens, because a
+  /// person who pressed it is entitled to see a new snapshot on the other end.
+  /// An automatic sync passes false and skips the upload when the ledger is
+  /// byte-for-byte the copy the server already holds — see [_shouldPush]. The
+  /// pull, the apply and the acknowledgement all still happen either way; it is
+  /// only the megabytes that are conditional.
+  Future<SyncOutcome> syncNow({
+    VoidCallback? onChanged,
+    bool force = true,
+  }) async {
     final Uri? base = await _prefs.baseUrl();
     final String? token = await _prefs.token();
     if (base == null) {
@@ -252,41 +276,75 @@ class SyncClient {
 
       // Off the UI isolate, exactly as the workbook writer does it: a few
       // thousand transactions is enough encoding to drop a frame.
-      final String body = await compute(encodeBackupJson, data);
-      final http.Response push = await _client
-          .post(
-            _url(base, '/api/v1/snapshot'),
-            headers: <String, String>{
-              'Authorization': 'Bearer $token',
-              'Content-Type': 'application/json; charset=utf-8',
-              'X-Expense-Device': await _prefs.deviceId(),
-              'X-Expense-Device-Label': await _prefs.deviceLabel(),
-            },
-            body: body,
-          )
-          .timeout(kSyncPushTimeout);
+      final ({String body, String fingerprint}) snapshot =
+          await compute(encodeSnapshotForPush, data);
+      final String device = await _prefs.deviceId();
 
-      if (push.statusCode == 401) {
-        await _prefs.clearSession();
-        return const SyncOutcome.failed(
-          'That session has expired. Sign in again.',
-          signedOut: true,
-        );
-      }
-      if (push.statusCode != 201) {
-        return SyncOutcome.failed(
-          _errorFrom(push) ?? 'The upload failed (${push.statusCode}).',
-        );
+      final bool uploading = force ||
+          applied.changedLedger ||
+          await _shouldPush(
+            base: base,
+            token: token,
+            device: device,
+            fingerprint: snapshot.fingerprint,
+          );
+
+      if (uploading) {
+        final http.Response push = await _client
+            .post(
+              _url(base, '/api/v1/snapshot'),
+              headers: <String, String>{
+                'Authorization': 'Bearer $token',
+                'Content-Type': 'application/json; charset=utf-8',
+                'X-Expense-Device': device,
+                'X-Expense-Device-Label': await _prefs.deviceLabel(),
+                ...await _intervalHeader(),
+              },
+              body: snapshot.body,
+            )
+            .timeout(kSyncPushTimeout);
+
+        if (push.statusCode == 401) {
+          await _prefs.clearSession();
+          return const SyncOutcome.failed(
+            'That session has expired. Sign in again.',
+            signedOut: true,
+          );
+        }
+        if (push.statusCode != 201) {
+          return SyncOutcome.failed(
+            _errorFrom(push) ?? 'The upload failed (${push.statusCode}).',
+          );
+        }
+
+        // Remembered only now it is on the other end, and with the id the server
+        // filed it under. Written before the acknowledgement for the same reason
+        // the acknowledgement comes last: the worst a crash here can cost is one
+        // extra upload next time.
+        final Object? id = _decode(push.body)['id'];
+        if (id is String && id.isNotEmpty) {
+          await _prefs.setLastPush(PushMemory(
+            fingerprint: snapshot.fingerprint,
+            snapshotId: id,
+            target: pushTarget(base, device),
+          ));
+        }
       }
 
       // 4 — acknowledge, only now the push has succeeded. A crash before this
       // re-applies an edit next time, which is harmless; acknowledging first and
       // then failing to push would lose it.
+      //
+      // Reached with nothing uploaded only when the ledger did not move, which
+      // means every edit in this batch was skipped or refused. Those outcomes
+      // are worth reporting even though nothing was written — and leaving them
+      // unacknowledged would hand them back on every sync forever.
       if (applied.acks.isNotEmpty) {
         await _acknowledge(base, token, applied.acks);
       }
 
       final SyncOutcome outcome = SyncOutcome.ok(
+        pushed: uploading,
         transactions: data.transactions.length,
         editsApplied: applied.count(EditOutcome.applied),
         editsSkipped: applied.count(EditOutcome.skippedMissingRow),
@@ -301,6 +359,68 @@ class SyncClient {
     }
   }
 
+  /// Whether an automatic sync has to upload, given a ledger that matches
+  /// [fingerprint].
+  ///
+  /// Three of the answers need nobody asked. Nothing was ever pushed from here;
+  /// what was pushed was a different ledger; or it went somewhere else — a
+  /// second server, or this device under a new id after a reinstall. Trusting a
+  /// fingerprint across any of those would skip the one push that mattered.
+  ///
+  /// The fourth needs the server, and is the interesting one: the ledger has not
+  /// changed, but the server no longer holds what was sent. A restored volume, a `forgetDevice`,
+  /// a data directory that was moved and half-copied — in every case the phone
+  /// is the only copy left, and a fingerprint match would have it sit on that
+  /// copy indefinitely. Asking costs one small request, and only on the syncs
+  /// that were about to upload nothing at all.
+  Future<bool> _shouldPush({
+    required Uri base,
+    required String token,
+    required String device,
+    required String fingerprint,
+  }) async {
+    final PushMemory? last = await _prefs.lastPush();
+    if (last == null) return true;
+    if (last.fingerprint != fingerprint) return true;
+    if (last.target != pushTarget(base, device)) return true;
+
+    final String? remote = await _latestSnapshotId(base, token, device);
+    // Unreadable, unreachable, or not what we sent: push. A failed probe
+    // becomes a failed upload, which is reported — where treating it as "no
+    // need" would report a sync that never happened as a success.
+    return remote != last.snapshotId;
+  }
+
+  /// The id of the snapshot the server currently holds for [device], or null if
+  /// it cannot be read.
+  Future<String?> _latestSnapshotId(
+    Uri base,
+    String token,
+    String device,
+  ) async {
+    try {
+      final http.Response response = await _client
+          .get(
+            _url(base, '/api/v1/devices'),
+            headers: <String, String>{'Authorization': 'Bearer $token'},
+          )
+          .timeout(kSyncQuickTimeout);
+      if (response.statusCode != 200) return null;
+
+      final Object? devices = _decode(response.body)['devices'];
+      if (devices is! List) return null;
+      for (final Object? entry in devices) {
+        if (entry is! Map<String, Object?> || entry['id'] != device) continue;
+        final Object? latest = entry['latest'];
+        return latest is Map<String, Object?> ? latest['id'] as String? : null;
+      }
+      // A device the server has never heard of has nothing of ours on it.
+      return null;
+    } on Object {
+      return null;
+    }
+  }
+
   /// Fetches the queue and applies each edit in sequence order.
   Future<_Applied> _drainAndApply(Uri base, String token) async {
     final http.Response response;
@@ -311,6 +431,10 @@ class SyncClient {
             headers: <String, String>{
               'Authorization': 'Bearer $token',
               'X-Expense-Device': await _prefs.deviceId(),
+              // The server treats this request as the phone checking in, so the
+              // interval has to travel with it — otherwise a phone that never
+              // has anything to upload never tells the browser its schedule.
+              ...await _intervalHeader(),
             },
           )
           .timeout(kSyncQuickTimeout);
@@ -444,6 +568,22 @@ class SyncClient {
     }
   }
 
+  /// How often this device syncs, for the server to pass on to the browser.
+  ///
+  /// Sent on login and on every push — the two moments the server updates what
+  /// it knows about a device — so changing the interval in Settings reaches the
+  /// browser at the next sync rather than needing a step of its own.
+  ///
+  /// Empty when automatic sync is off. The device is then reachable only when
+  /// somebody presses Sync, and there is no interval that would describe it: the
+  /// browser is better off saying nothing than implying a schedule.
+  Future<Map<String, String>> _intervalHeader() async {
+    if (!await _prefs.auto()) return const <String, String>{};
+    return <String, String>{
+      'X-Expense-Sync-Interval': '${await _prefs.autoMinutes()}',
+    };
+  }
+
   Uri _url(Uri base, String path) => base.replace(
         path: '${base.path.replaceFirst(RegExp(r'/+$'), '')}$path',
         query: null,
@@ -482,6 +622,50 @@ class SyncClient {
         _ => 'The sync failed: $error',
       };
 }
+
+/// The snapshot to upload, and a fingerprint of what is in it.
+///
+/// Runs in a background isolate through `compute`, so it must be top level.
+///
+/// The fingerprint deliberately covers a *second* encoding of the same data
+/// with `exported_at` taken out, rather than the body that is actually sent.
+/// The body carries the instant it was taken, so hashing it would make every
+/// ledger look different from the last one and the whole point would be lost.
+/// Everything else in the meta block is derived from the rows — the counts, the
+/// schema version — so a change to any of it is a change worth pushing.
+///
+/// Two encodes of a few megabytes rather than one, which is a few tens of
+/// milliseconds off the UI isolate, and buys a guarantee worth more than that:
+/// what is hashed is what is sent, so no write path can be added to the
+/// database that this fails to notice.
+({String body, String fingerprint}) encodeSnapshotForPush(BackupData data) {
+  final BackupData stable = BackupData(
+    categories: data.categories,
+    merchantMappings: data.merchantMappings,
+    transactions: data.transactions,
+    splits: data.splits,
+    deleted: data.deleted,
+    aliases: data.aliases,
+    appMeta: data.appMeta,
+    meta: <String, String>{
+      for (final MapEntry<String, String> entry in data.meta.entries)
+        if (entry.key != 'exported_at') entry.key: entry.value,
+    },
+  );
+  return (
+    body: encodeBackupJson(data),
+    fingerprint: snapshotFingerprint(encodeBackupJson(stable)),
+  );
+}
+
+/// A ledger's fingerprint, as hex.
+///
+/// SHA-256 because it is already in the dependency tree and settles the
+/// question. A cheaper hash would do the job until the day two ledgers collided
+/// and one of them was never uploaded — a failure that would look like the app
+/// losing a day's transactions, and be all but impossible to reproduce.
+String snapshotFingerprint(String body) =>
+    sha256.convert(utf8.encode(body)).toString();
 
 /// What the drain step did.
 class _Applied {
