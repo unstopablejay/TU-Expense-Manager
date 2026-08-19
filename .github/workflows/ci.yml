@@ -62,7 +62,9 @@ jobs:
       # CanvasKit from gstatic.com at runtime, which is fatal on a self-hosted box
       # with no internet and shows up as a blank page rather than an error.
       - name: Build the web bundle
-        run: flutter build web --release --no-web-resources-cdn -t lib/main_web.dart
+        # Both flags match the Dockerfile: the bundle CI checks has to be the
+        # bundle the image ships, or these assertions are about something else.
+        run: flutter build web --release --no-web-resources-cdn --pwa-strategy=none -t lib/main_web.dart
 
       # Belt and braces on the line above: assert the wasm actually shipped, and
       # that the generated config says to use the local copy. A flag that silently

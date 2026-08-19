@@ -81,7 +81,23 @@ COPY --chown=builder:builder server ./server
 # that means a permanently blank page that looks exactly like a broken app. With
 # it, the wasm ships in build/web/canvaskit/ and the generated buildConfig carries
 # "useLocalCanvasKit":true, which is what makes the bundled copy the one used.
-RUN flutter build web --release --no-web-resources-cdn -t lib/main_web.dart
+#
+# --pwa-strategy=none is the second load-bearing flag, for the opposite reason.
+#
+# By default the build generates a service worker and registers it. That caches
+# the app shell in the browser, so the next visit is served the *previous* build
+# until the worker updates in the background — and then usually needs another
+# reload before the new code runs. For an app upgraded by pulling a new image,
+# that turns "deploy" into "deploy, then explain to everyone why nothing
+# changed". It cost exactly that once already.
+#
+# Nothing is given up. A service worker buys offline use, and this app cannot work
+# offline by construction: the ledger is a snapshot fetched over HTTP from the
+# same server that served the page. If that server is unreachable there is no
+# ledger to render, cached shell or not. Flutter deprecated its worker anyway, and
+# says so in the bootstrap it generates.
+RUN flutter build web --release --no-web-resources-cdn --pwa-strategy=none \
+      -t lib/main_web.dart
 
 # A native binary rather than `dart run`: it starts in milliseconds, needs no SDK
 # in the runtime image, and cannot be affected by a stray pub cache.

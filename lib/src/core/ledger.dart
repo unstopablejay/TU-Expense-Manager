@@ -290,6 +290,28 @@ Map<YearMonth, Map<String, double>> spendByCategoryPerMonth(
       MapEntry<YearMonth, Map<String, double>>(m, spendByCategory(rows)));
 }
 
+/// Spend by day-of-month, per month — what the trend chart plots.
+///
+/// Same rule as [spendByCategory]: credits are left out. The inner key is the
+/// day of month (1–31), not a `DateTime`, so a trend line can be drawn
+/// against a fixed day axis independent of which months were picked, and two
+/// months can share an axis without their calendar dates lining up.
+Map<YearMonth, Map<int, double>> spendByDayPerMonth(
+  List<LedgerEntry> entries,
+) {
+  final Map<YearMonth, Map<int, double>> byMonth =
+      <YearMonth, Map<int, double>>{};
+  for (final LedgerEntry entry in entries) {
+    if (entry.txn.isCredit) continue;
+    final YearMonth month = YearMonth.fromDate(entry.txn.date);
+    final Map<int, double> byDay =
+        byMonth.putIfAbsent(month, () => <int, double>{});
+    final int day = entry.txn.date.day;
+    byDay[day] = (byDay[day] ?? 0) + entry.amount;
+  }
+  return byMonth;
+}
+
 /// Spent, received and the row count in one pass, so the header card and the
 /// charts on the same screen cannot disagree about the totals.
 ///
