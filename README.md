@@ -576,8 +576,9 @@ key that finds the row again.
 ### Settings
 
 The second destination on the navigation bar: **Merchants & defaults**, the **Cleanup**
-merge screens, the update controls (automatic check, check now, install), and version
-information. Leaving it reloads the ledger, because a default changed there can be
+merge screens, **Server sync** (address, device name, sign in, sync now, sync
+automatically and how often), the update controls (automatic check, check now,
+install), and version information. Leaving it reloads the ledger, because a default changed there can be
 backfilled over history — without the reload the rows behind it would keep showing the
 categories they had on the way in.
 
@@ -1005,7 +1006,7 @@ its next sync:
 ```
 PC clicks "Grocery"  ──POST /api/v1/edits──▶  queued, seq 4
                                                   │
-Phone: Settings › Sync now  ◀─────────────────────┘  pulls the queue
+Phone syncs (on its own)  ◀───────────────────────┘  pulls the queue
    │  applies via setTransactionCategory(), the same method its own screens call
    └──▶ pushes a fresh snapshot, then acknowledges what it did
 ```
@@ -1027,6 +1028,80 @@ cannot tell two identical charges apart. So an edit made against a row the phone
 has since deleted resolves to nothing and is reported as skipped — never applied
 to whatever now holds that id.
 
+#### The phone syncs on its own
+
+The queue is only half an editor if nothing drains it, so the app syncs without
+being asked: when it opens, when you come back to it, every 15 minutes while it
+is open (5, 30 or 60 on request), and about 20 seconds after you change something
+on the phone. **Settings › Sync automatically**, on by default and inert until a
+server is configured and signed into.
+
+It is **foreground only** — nothing runs while the app is closed. Android will
+not run a Flutter isolate on a timer without a background worker, and one of
+those brings a plugin, a service notification on some builds, and a
+battery-optimisation setting per manufacturer that silently switches it off. So
+an edit made on a PC lands the next time the app is open, and **Sync now** is
+still there for when that is not soon enough.
+
+An automatic sync uploads only if the ledger actually changed. It fingerprints
+the snapshot it would send — SHA-256 over the same encoding, minus the export
+timestamp, so only real changes count — and skips the upload when that matches
+what it last pushed *and* the server still holds that snapshot. Without it,
+polling every quarter of an hour would fill the 30-snapshot history with 30
+identical copies inside a day, and that history is the backup. Pressing **Sync
+now** uploads regardless, because someone who pressed a button is owed a
+snapshot.
+
+#### The connection light
+
+Top right of every app bar, on the phone and in the browser, and it is the same
+widget in both: a dot, green when this device and the server are in touch, red
+when they are not, grey when there is nothing to say — no server configured, or
+no phone has ever synced. Hover or long-press it for the reason; tap it to check
+again now. Solid for green and a ring for red, because roughly one man in twelve
+cannot tell those two hues apart and a light whose whole meaning is a hue is a
+light he cannot read.
+
+The two ends know different things, so they ask different questions:
+
+| | green means | red means |
+|---|---|---|
+| **Phone** | `/api/health` answered, or a sync just succeeded | the server did not answer — wrong address, server down, VPN not connected |
+| **Browser** | that phone has reported within twice its own sync interval | that phone has gone quiet for longer than that, or this browser cannot reach the server either |
+
+"Twice its own interval" is why the phone sends `X-Expense-Sync-Interval` on login
+and on every sync. Without it the browser would have to guess at a schedule, and
+be wrong for anybody who moved the setting: forty minutes of silence is a fault
+at fifteen-minute syncing and unremarkable at hourly. Doubling it means missing
+one sync — a lift, a VPN reconnecting — does not turn the light red, because a
+light that cries wolf is one nobody looks at.
+
+**Pulling the edit queue is the heartbeat.** `last_seen` used to move only when a
+snapshot was pushed, and an automatic sync deliberately does not push an
+unchanged ledger — so a phone syncing perfectly every quarter of an hour, on a
+day with no new transactions, went quiet as far as the server could tell and the
+browser called it disconnected. Every sync starts by pulling the queue, so that
+is the request the server treats as checking in. It only ever touches a device it
+already knows: a heartbeat must not be a way to create devices, or a typo in a
+header would fill the device picker with entries that have no ledger behind them.
+
+#### One character, and every edit vanished
+
+Worth recording, because it survived a clean `flutter analyze`, a passing test
+suite and a working build. The natural key spells the amount with
+`double.toString()`, and that is round-trip exact on both targets but **not
+identical between them**: on the VM `500.0` prints as `500.0`, while on the web a
+double is a JavaScript number and the same value prints as `500`. The key is
+composed in a browser and matched on a phone.
+
+So every browser edit to a whole-rupee transaction addressed a row the phone
+could not find, and came back as "skipped, no longer matched" — while an amount
+ending in paise worked, which made it look intermittent rather than broken.
+`canonicalAmountKey` now pins the VM's spelling on both, the comparison
+canonicalises both sides so edits queued by older browser builds still apply, and
+`test/natural_key_test.dart` asserts the characters — which only means anything
+because CI runs the suite in Chrome as well as on the VM.
+
 Two things the browser deliberately cannot do. It cannot create a category, since
 that is not one of the four operations and a category no phone agreed to make
 could not be applied. And it has no multi-select: that exists to drive a bulk
@@ -1040,6 +1115,10 @@ a set.
   catches up automatically, so the gap is invisible unless you never open the app.
   Background delivery needs a top-level `@pragma('vm:entry-point')` handler with its own
   database connection.
+- **Sync runs only while the app is open.** Automatic sync is a foreground timer, so
+  an edit made in a browser waits until the app is next opened. Making it work with
+  the app closed needs a background worker (`workmanager` or the like), which brings a
+  per-manufacturer battery setting that can silently disable it.
 - **Six of the ten templates are unconfirmed.** Everything under the "Unconfirmed"
   table was written from wording common across issuers rather than from a real message,
   so the exact phrasing may be wrong. A template that doesn't match simply means the

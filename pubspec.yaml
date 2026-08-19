@@ -37,6 +37,9 @@ dependencies:
   another_telephony: ^0.4.1
   # The self-update feature, which reads GitHub Releases and sideloads the APK.
   http: ^1.6.0                # To query the GitHub releases API and fetch the APK
+  # Already in the tree through http; named here because sync_client hashes the
+  # ledger with it to tell an unchanged snapshot from one worth uploading.
+  crypto: ^3.0.6
   package_info_plus: ^10.2.1  # To read the running build's version at runtime
   shared_preferences: ^2.5.5  # To remember the toggle and the last-checked time
   path_provider: ^2.1.6       # To pick the directory the APK downloads into
