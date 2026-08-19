@@ -1,12 +1,19 @@
 /// The app, in a browser.
 ///
-/// The same [DashboardTab] and [TransactionsTab] the phone renders, fed from a
-/// snapshot instead of from SQLite, and deriving their view with the same
-/// [deriveLedgerView] the phone's shell calls. That is what makes "the same
-/// screens on the PC" a fact about the code rather than a resemblance.
+/// The same [DashboardTab] the phone renders, fed from a snapshot instead of from
+/// SQLite, and deriving its view with the same [deriveLedgerView] the phone's
+/// shell calls. One implementation of the charts, the filters, the sort orders and
+/// the category colours.
 ///
-/// What differs is only what a browser cannot own: it has no database and no SMS,
-/// so an edit here is queued for the phone to apply rather than written.
+/// The ledger itself is the exception, and deliberately so. [WebTransactionsView]
+/// draws it as a table on a window wide enough for one, because a column of cards
+/// is right on a phone and wasteful on a desktop — and falls back to the phone's
+/// own [TransactionsTab] below [kWideLayoutBreakpoint]. What is shared there is
+/// the *logic*: it is handed the rows [deriveLedgerView] already filtered and
+/// ordered, and it totals them with the same functions.
+///
+/// What else differs is only what a browser cannot own: it has no database and no
+/// SMS, so an edit here is queued for the phone to apply rather than written.
 library;
 
 import 'dart:async';
@@ -25,10 +32,10 @@ import '../core/splits.dart';
 import '../ui_shared/connection_dot.dart';
 import '../ui_shared/dashboard_tab.dart';
 import '../ui_shared/formats.dart';
-import '../ui_shared/transactions_tab.dart';
 import 'api_client.dart';
 import 'edit_sheets.dart';
 import 'session.dart';
+import 'transactions_table.dart';
 
 /// How stale a snapshot may be before it is called out.
 ///
@@ -414,7 +421,15 @@ class _WebShellState extends State<WebShell> {
           emptyDetail: 'Transactions are added on your phone, from bank SMS '
               'alerts. This view reads what it last synced.',
         ),
-        TransactionsTab(
+        // The browser's own transactions screen: a table on a real window, and
+        // the phone's card list below [kWideLayoutBreakpoint]. It decides which
+        // internally, so this call site says nothing about width.
+        //
+        // Multi-select is not among its props at all. It exists to drive a bulk
+        // delete, and a bulk delete would be one queued edit per row with no way
+        // to undo the set as a set — so the browser has always passed null, and
+        // a prop with one possible value is not a prop.
+        WebTransactionsView(
           entries: view.visible,
           filters: view.filters,
           sort: _sort,
@@ -427,16 +442,11 @@ class _WebShellState extends State<WebShell> {
           dateFormat: _dateFormat,
           loading: _loading,
           ledgerIsEmpty: store.transactions.isEmpty,
-          selected: const <int>{},
           onFiltersChanged: (LedgerFilters f) => setState(() => _filters = f),
           onSortChanged: (LedgerSort s) => setState(() => _sort = s),
           onRefresh: () => _load(),
           onTap: _editTransaction,
           onDelete: _deleteTransaction,
-          // Still null: multi-select exists to drive a bulk delete, and a bulk
-          // delete would be one queued edit per row with no way to undo the set
-          // as a set. One row at a time here.
-          onToggleSelected: null,
           emptyDetail: 'Transactions are added on your phone, from bank SMS '
               'alerts. This view reads what it last synced.',
         ),

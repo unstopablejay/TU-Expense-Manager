@@ -26,7 +26,7 @@ import '../core/models.dart';
 import '../core/splits.dart';
 import '../ui_shared/palette.dart';
 
-/// What the user picked out of the actions sheet.
+/// What the user picked out of the actions dialog.
 enum WebTxnAction { setCategory, setNote, split, delete }
 
 /// The actions a row offers in a browser.
@@ -34,68 +34,94 @@ enum WebTxnAction { setCategory, setNote, split, delete }
 /// The phone's sheet also offers merging merchants and cards, which are standing
 /// rules over the whole ledger rather than edits to one row — they are not one of
 /// the queued operations and are left to the phone.
+///
+/// A centred dialog rather than the bottom sheet this used to be. A sheet rising
+/// from the bottom edge of a 1080px browser window is a phone gesture answered by
+/// a phone shape, and the row it belongs to is a thousand pixels away from it.
+/// Every caller and every one of the four handlers is unchanged — this returns the
+/// same [WebTxnAction], so only the shape of the question moved.
 Future<WebTxnAction?> showWebTxnActions(
   BuildContext context,
   ExpenseTxn txn,
   NumberFormat money,
 ) =>
-    showModalBottomSheet<WebTxnAction>(
+    showDialog<WebTxnAction>(
       context: context,
-      showDragHandle: true,
-      builder: (BuildContext sheetContext) => SafeArea(
-        // Scrollable, because a bottom sheet's default ceiling is a fraction of
-        // the window and five rows plus a footnote is taller than that in a short
-        // browser window — where a plain Column overflows rather than scrolling.
-        child: SingleChildScrollView(
-          child: Column(
+      builder: (BuildContext dialogContext) => AlertDialog(
+        // Zero, because the content is a column of ListTiles and each brings its
+        // own padding. The dialog's default would inset them all again and the
+        // tap targets would stop reaching the edges.
+        contentPadding: EdgeInsets.zero,
+        title: Text(txn.merchant),
+        content: ConstrainedBox(
+          // Wide enough for a long category name beside an amount, narrow enough
+          // that the four options still read as one short list rather than a
+          // page. Dialogs get no width from their content otherwise.
+          constraints: const BoxConstraints(maxWidth: 420),
+          // Scrollable for the same reason the sheet was: five rows plus a
+          // footnote is taller than a short browser window, where a plain Column
+          // overflows rather than scrolling.
+          child: SingleChildScrollView(
+            child: Column(
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
-              ListTile(
-              title: Text(txn.merchant),
-              subtitle: Text(
-                '${money.format(txn.amount)} · ${txn.categoryName}',
-              ),
-              ),
-              const Divider(height: 1),
-              ListTile(
-              leading: const Icon(Icons.label_outline),
-              title: const Text('Change category'),
-              onTap: () =>
-                  Navigator.pop(sheetContext, WebTxnAction.setCategory),
-              ),
-              ListTile(
-              leading: const Icon(Icons.notes_outlined),
-              title: Text(txn.note.isEmpty ? 'Add a note' : 'Edit the note'),
-              subtitle: txn.note.isEmpty ? null : Text(txn.note),
-              onTap: () => Navigator.pop(sheetContext, WebTxnAction.setNote),
-              ),
-              ListTile(
-              leading: const Icon(Icons.call_split),
-              title: Text(
-                txn.splits.isEmpty
-                    ? 'Split across categories'
-                    : 'Edit the split',
-              ),
-              onTap: () => Navigator.pop(sheetContext, WebTxnAction.split),
-              ),
-              ListTile(
-              leading: const Icon(Icons.delete_outline),
-              title: const Text('Delete'),
-              onTap: () => Navigator.pop(sheetContext, WebTxnAction.delete),
-              ),
-            const SizedBox(height: 8),
-              const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: Text(
-                'Changes are queued, and applied on that phone next sync — '
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
+                  child: Text(
+                    '${money.format(txn.amount)} · ${txn.categoryName}',
+                    style: Theme.of(dialogContext).textTheme.bodyMedium,
+                  ),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.label_outline),
+                  title: const Text('Change category'),
+                  onTap: () =>
+                      Navigator.pop(dialogContext, WebTxnAction.setCategory),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.notes_outlined),
+                  title: Text(txn.note.isEmpty ? 'Add a note' : 'Edit the note'),
+                  subtitle: txn.note.isEmpty ? null : Text(txn.note),
+                  onTap: () => Navigator.pop(dialogContext, WebTxnAction.setNote),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.call_split),
+                  title: Text(
+                    txn.splits.isEmpty
+                        ? 'Split across categories'
+                        : 'Edit the split',
+                  ),
+                  onTap: () => Navigator.pop(dialogContext, WebTxnAction.split),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.delete_outline),
+                  title: const Text('Delete'),
+                  onTap: () => Navigator.pop(dialogContext, WebTxnAction.delete),
+                ),
+                const Divider(height: 1),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(24, 12, 24, 4),
+                  child: Text(
+                    'Changes are queued, and applied on that phone next sync — '
                     'which it does by itself while its app is open.',
-                style: TextStyle(fontSize: 11),
-              ),
-              ),
-              const SizedBox(height: 8),
+                    style: TextStyle(fontSize: 11),
+                  ),
+                ),
               ],
+            ),
           ),
         ),
+        actions: <Widget>[
+          // A dialog needs a way out that is not the Escape key or a click on the
+          // scrim — neither of which announces itself. The sheet had its drag
+          // handle for this.
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+        ],
       ),
     );
 

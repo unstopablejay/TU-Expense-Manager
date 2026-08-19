@@ -426,6 +426,11 @@ Everything that happened, spend and received together, filtered, sorted and edit
 place. Under the period row and the search box is a scrolling row of chips, each opening a
 sheet.
 
+This section describes the phone. The browser shows the same ledger, with the same
+filters and the same orders, as a sortable table with the filters as dropdowns — see
+[One ledger, two layouts](#one-ledger-two-layouts). Everything below about *what* a
+filter or an order means holds in both; only the controls differ.
+
 #### Sorting
 
 The first chip names the current order rather than saying "Sort", since an order is always
@@ -876,13 +881,30 @@ then open in any browser on your network.**
   └──────────────────────────────┘        └────────────────────────────────┘
 ```
 
-### It is the same UI, not a lookalike
+### One ledger, two layouts
 
-The browser renders the *same* `DashboardTab` and `TransactionsTab` widgets the phone
-does, deriving what to show with the same `deriveLedgerView`. There is one
-implementation of the charts, the filters, the sort order and the category colours.
-What differs is only what a browser cannot own: it has no SQLite and no SMS, so the
-ledger arrives as a snapshot rather than from a query.
+The browser renders the *same* `DashboardTab` the phone does, and derives what to show
+with the same `deriveLedgerView`. There is one implementation of the charts, the
+filters, the sort orders and the category colours. What differs is only what a browser
+cannot own: it has no SQLite and no SMS, so the ledger arrives as a snapshot rather
+than from a query.
+
+The transactions list is the deliberate exception, and it used to be shared too. A
+column of cards is right on a phone and wasteful on a desktop: one short line of text
+per transaction stretched across a 1920px window, with the filters behind a
+horizontally scrolling strip of chips that each opened a bottom sheet — a touch idiom
+being pointed at with a mouse. So above 900px the browser draws the ledger as
+`WebTransactionsView`: a sortable table with the filters as real dropdown menus across
+the top. Below 900px — a phone browser, a narrow window — it falls back to the phone's
+own `TransactionsTab`, unchanged.
+
+**What is shared there is the logic, not the pixels.** The table is handed rows
+`deriveLedgerView` has already filtered and ordered, totals them with the same
+`periodTotals` and `spendByCategory`, blames the same `emptyReason` for an empty list,
+and colours categories with the same `categoryColor`. Nothing in it decides what the
+ledger says; it only decides how it is drawn. That is the line that keeps the two
+targets from disagreeing about a total — a second implementation of the *arithmetic* is
+what would, and there isn't one.
 
 That is possible because `lib/` is split along a platform boundary:
 
@@ -999,9 +1021,13 @@ TLS is a reverse-proxy configuration away if you want it; ZimaOS already runs Ca
 ### Editing from the browser
 
 The browser can edit, and does it by **queueing intent rather than writing**.
-Clicking a row offers four things — change the category, edit the note, split
-across categories, delete — and each one posts an edit that the phone applies on
-its next sync:
+Clicking a row of the table opens a dialog offering four things — change the
+category, edit the note, split across categories, delete — and each one posts an
+edit that the phone applies on its next sync. (A delete is also on each row
+directly, appearing on hover: a mouse cannot swipe, which is how the phone offers
+it.) The dialog is a dialog rather than a bottom sheet for the same reason the list
+is a table — a sheet rising from the bottom edge of a desktop window is a phone
+answering a question nobody asked it:
 
 ```
 PC clicks "Grocery"  ──POST /api/v1/edits──▶  queued, seq 4
