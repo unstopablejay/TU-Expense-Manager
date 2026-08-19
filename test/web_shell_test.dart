@@ -19,6 +19,8 @@ import 'package:tu_expense_tracker/src/core/backup_data.dart';
 import 'package:tu_expense_tracker/src/core/backup_json.dart';
 import 'package:tu_expense_tracker/src/core/constants.dart';
 import 'package:tu_expense_tracker/src/core/ledger.dart';
+import 'package:tu_expense_tracker/src/core/link_state.dart';
+import 'package:tu_expense_tracker/src/ui_shared/connection_dot.dart';
 import 'package:tu_expense_tracker/src/ui_shared/dashboard_tab.dart';
 import 'package:tu_expense_tracker/src/ui_shared/transactions_tab.dart';
 import 'package:tu_expense_tracker/src/web/api_client.dart';
@@ -36,6 +38,13 @@ class StubServer {
 
   /// device id -> label, in the order the device list should report them.
   final Map<String, String> devices = <String, String>{};
+
+  /// device id -> when it last reported. Absent means "a moment ago".
+  final Map<String, DateTime> lastSeen = <String, DateTime>{};
+
+  /// device id -> the sync interval it reports, in minutes. Absent means it is
+  /// a build old enough not to report one.
+  final Map<String, int> syncMinutes = <String, int>{};
 
   /// Overrides for a specific path, so a test can force a status.
   final Map<String, http.Response> canned = <String, http.Response>{};
@@ -68,7 +77,10 @@ class _StubClient extends http.BaseClient {
               <String, Object?>{
                 'id': e.key,
                 'label': e.value,
-                'last_seen': DateTime.now().toUtc().toIso8601String(),
+                'last_seen': (server.lastSeen[e.key] ?? DateTime.now())
+                    .toUtc()
+                    .toIso8601String(),
+                'sync_interval_minutes': server.syncMinutes[e.key],
                 'pending_edits': 0,
                 'latest': server.snapshots.containsKey(e.key)
                     ? <String, Object?>{
@@ -297,7 +309,7 @@ void main() {
       expect(find.textContaining('Split'), findsWidgets);
       expect(find.text('Delete'), findsOneWidget);
       // Says what will happen, rather than pretending it already has.
-      expect(find.textContaining('next time that phone syncs'), findsOneWidget);
+      expect(find.textContaining('next sync'), findsOneWidget);
     });
 
     testWidgets('changing a category queues an edit', (WidgetTester tester) async {
@@ -693,5 +705,65 @@ void main() {
 
     expect(session.signedIn, isFalse);
     expect(api.token, isNull);
+  });
+
+  group('the connection light', () {
+    LinkState lightIn(WidgetTester tester) =>
+        tester.widget<ConnectionDot>(find.byType(ConnectionDot)).state;
+
+    testWidgets('is green while the phone is in touch',
+        (WidgetTester tester) async {
+      final StubServer server = StubServer()
+        ..devices['phone'] = "Jay's Pixel"
+        ..snapshots['phone'] = snapshotFor(merchant: 'SWIGGY')
+        ..syncMinutes['phone'] = 15
+        ..lastSeen['phone'] = DateTime.now().subtract(const Duration(minutes: 3));
+
+      await pumpShell(tester, server);
+
+      expect(lightIn(tester), LinkState.connected);
+    });
+
+    testWidgets('is red once the phone has gone quiet for longer than its '
+        'own interval explains', (WidgetTester tester) async {
+      final StubServer server = StubServer()
+        ..devices['phone'] = "Jay's Pixel"
+        ..snapshots['phone'] = snapshotFor(merchant: 'SWIGGY')
+        ..syncMinutes['phone'] = 15
+        ..lastSeen['phone'] = DateTime.now().subtract(const Duration(hours: 4));
+
+      await pumpShell(tester, server);
+
+      expect(lightIn(tester), LinkState.disconnected);
+    });
+
+    testWidgets('does not call a phone on a long interval disconnected for '
+        'being slow', (WidgetTester tester) async {
+      // The reason the phone reports its interval at all. Forty minutes of
+      // silence is a fault at fifteen-minute syncing and entirely normal at
+      // hourly, and a light that could not tell them apart would be red all day
+      // for anyone who moved the setting.
+      final StubServer server = StubServer()
+        ..devices['phone'] = "Jay's Pixel"
+        ..snapshots['phone'] = snapshotFor(merchant: 'SWIGGY')
+        ..syncMinutes['phone'] = 60
+        ..lastSeen['phone'] = DateTime.now().subtract(const Duration(minutes: 40));
+
+      await pumpShell(tester, server);
+
+      expect(lightIn(tester), LinkState.connected);
+    });
+
+    testWidgets('is red when the server does not answer this browser either',
+        (WidgetTester tester) async {
+      final StubServer server = StubServer()
+        ..devices['phone'] = "Jay's Pixel"
+        ..snapshots['phone'] = snapshotFor(merchant: 'SWIGGY')
+        ..canned['/api/v1/devices'] = http.Response('nope', 500);
+
+      await pumpShell(tester, server);
+
+      expect(lightIn(tester), LinkState.disconnected);
+    });
   });
 }

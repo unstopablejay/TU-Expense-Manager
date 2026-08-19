@@ -89,6 +89,7 @@ class DeviceInfo {
     required this.lastSeen,
     this.latest,
     this.pendingEdits = 0,
+    this.syncIntervalMinutes,
   });
 
   final String id;
@@ -105,6 +106,15 @@ class DeviceInfo {
 
   final int pendingEdits;
 
+  /// How often this device says it syncs, in minutes, or null if it has not
+  /// said — a build from before it was reported.
+  ///
+  /// The server does nothing with it. It exists so the browser can tell a phone
+  /// that has gone quiet from one that is simply between syncs: without it, the
+  /// connection light would have to guess at an interval, and be wrong for
+  /// anybody who changed the setting.
+  final int? syncIntervalMinutes;
+
   Map<String, Object?> toJson() => <String, Object?>{
         'id': id,
         'label': label,
@@ -112,6 +122,7 @@ class DeviceInfo {
         'last_seen': lastSeen.toIso8601String(),
         'latest': latest?.toJson(),
         'pending_edits': pendingEdits,
+        'sync_interval_minutes': syncIntervalMinutes,
       };
 }
 
@@ -169,6 +180,7 @@ class SnapshotStore {
     required String device,
     required String label,
     required String body,
+    int? syncIntervalMinutes,
   }) =>
       lock.synchronized(() async {
         final DateTime now = DateTime.now().toUtc();
@@ -203,7 +215,7 @@ class SnapshotStore {
         // The pointer is written after the snapshot it names exists, never
         // before. A reader that finds a pointer can rely on the file being there.
         await paths.latest(user, device).write(info.toJson());
-        await _rememberDevice(user, device, label, now);
+        await _rememberDevice(user, device, label, now, syncIntervalMinutes);
         await _prune(user, device);
         return info;
       });
@@ -281,6 +293,7 @@ class SnapshotStore {
         lastSeen: DateTime.tryParse(meta['last_seen'] as String? ?? '') ?? fallback,
         latest: latest,
         pendingEdits: await _pendingCount(user, id),
+        syncIntervalMinutes: (meta['sync_interval_minutes'] as num?)?.toInt(),
       ));
     }
     out.sort((DeviceInfo a, DeviceInfo b) => b.lastSeen.compareTo(a.lastSeen));
@@ -293,9 +306,43 @@ class SnapshotStore {
     required String user,
     required String device,
     required String label,
+    int? syncIntervalMinutes,
   }) =>
-      lock.synchronized(() =>
-          _rememberDevice(user, device, label, DateTime.now().toUtc()));
+      lock.synchronized(() => _rememberDevice(
+            user,
+            device,
+            label,
+            DateTime.now().toUtc(),
+            syncIntervalMinutes,
+          ));
+
+  /// Records that [device] is still there, without storing anything.
+  ///
+  /// **This is what makes the browser's connection light true.** `last_seen`
+  /// used to move only when a snapshot was pushed, and an automatic sync does
+  /// not push a ledger that has not changed — so a phone syncing perfectly well
+  /// every quarter of an hour, with no new transactions, went quiet as far as
+  /// the server could tell and the light went red. Every sync pulls the edit
+  /// queue, so that is the heartbeat.
+  ///
+  /// Only for a device already known. A heartbeat must not be a way to create
+  /// devices: a typo in a header would otherwise litter the picker with entries
+  /// that have no ledger behind them.
+  Future<void> touchDevice({
+    required String user,
+    required String device,
+    int? syncIntervalMinutes,
+  }) =>
+      lock.synchronized(() async {
+        if (!paths.deviceMeta(user, device).exists) return;
+        await _rememberDevice(
+          user,
+          device,
+          '',
+          DateTime.now().toUtc(),
+          syncIntervalMinutes,
+        );
+      });
 
   /// Removes a device and everything under it.
   ///
@@ -314,8 +361,9 @@ class SnapshotStore {
     String user,
     String device,
     String label,
-    DateTime now,
-  ) async {
+    DateTime now, [
+    int? syncIntervalMinutes,
+  ]) async {
     final Object? raw = await paths.deviceMeta(user, device).read();
     final Map<String, Object?> before =
         raw is Map<String, Object?> ? raw : <String, Object?>{};
@@ -325,6 +373,11 @@ class SnapshotStore {
       'label': label.trim().isEmpty
           ? (before['label'] as String? ?? device)
           : label.trim(),
+      // Same rule, and it matters more here: a client that says nothing must
+      // leave the last known interval in place, or the browser's connection
+      // light would fall back to a guess every time an older build checked in.
+      'sync_interval_minutes':
+          syncIntervalMinutes ?? (before['sync_interval_minutes'] as num?)?.toInt(),
       'first_seen': before['first_seen'] ?? now.toIso8601String(),
       'last_seen': now.toIso8601String(),
     });

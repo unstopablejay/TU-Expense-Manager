@@ -87,7 +87,8 @@ Future<WebTxnAction?> showWebTxnActions(
               const Padding(
               padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
               child: Text(
-                'Changes are queued and applied the next time that phone syncs.',
+                'Changes are queued, and applied on that phone next sync — '
+                    'which it does by itself while its app is open.',
                 style: TextStyle(fontSize: 11),
               ),
               ),

@@ -15,12 +15,16 @@ import '../core/aliases.dart';
 import '../core/constants.dart';
 import '../core/ledger.dart';
 import '../core/ledger_view.dart';
+import '../core/link_state.dart';
 import '../core/models.dart';
 import '../core/parser.dart';
+import '../ui_shared/connection_dot.dart';
 import '../ui_shared/dashboard_tab.dart';
 import '../ui_shared/formats.dart';
 import '../ui_shared/theme.dart';
 import '../ui_shared/transactions_tab.dart';
+import 'auto_sync.dart';
+import 'connection_monitor.dart';
 import 'database.dart';
 import 'screens/category_picker_sheet.dart';
 import 'screens/deleted_screen.dart';
@@ -152,7 +156,40 @@ class _HomeShellState extends State<HomeShell> {
     _load();
     _startSms();
     _checkForUpdates();
+    // Applies whatever was edited in a browser, and pushes whatever changed
+    // here, without anyone having to remember to. Inert until a server is
+    // configured and signed into.
+    unawaited(AutoSync.instance.start(onChanged: _load));
+    // The light in the corner. Separate from the sync itself because it has to
+    // stay current between syncs, which are a quarter of an hour apart.
+    unawaited(ConnectionMonitor.instance.start());
   }
+
+  @override
+  void dispose() {
+    AutoSync.instance.stop();
+    ConnectionMonitor.instance.stop();
+    super.dispose();
+  }
+
+  /// The connection light, in the corner of every app bar.
+  ///
+  /// The same widget on all three tabs and in the same place, because a status
+  /// light that moves when you switch tabs is one you have to look for. It is
+  /// the last action, so it is genuinely in the corner — which is why the
+  /// Transactions bar's overflow menu sits to its left rather than the other way
+  /// round.
+  Widget _connectionDot() => ValueListenableBuilder<LinkStatus>(
+        valueListenable: ConnectionMonitor.instance.status,
+        builder: (BuildContext context, LinkStatus status, Widget? _) =>
+            ConnectionDot(
+          state: status.state,
+          tooltip: status.detail,
+          // Tapping asks again rather than waiting for the next check, which is
+          // what anyone does with a light they have just noticed is red.
+          onTap: () => ConnectionMonitor.instance.check(force: true),
+        ),
+      );
 
   Future<void> _load() async {
     final results = await Future.wait(<Future<Object>>[
@@ -169,6 +206,18 @@ class _HomeShellState extends State<HomeShell> {
       _currentMonth = YearMonth.current();
       _loading = false;
     });
+
+    // Every mutation in this app is followed by a reload — that is how the shell
+    // is written, and it is why this one line is enough to make every local
+    // change reach the server. Hooking each write path instead would work until
+    // somebody added the fifteenth one and forgot.
+    //
+    // It costs a debounced check after the handful of reloads that changed
+    // nothing (a launch, a month rollover, coming back from Settings), and an
+    // unchanged ledger is not uploaded — so the cost of being wrong here is one
+    // small request, while the cost of missing a write path is a transaction
+    // that never leaves the phone.
+    AutoSync.instance.nudge();
   }
 
   // -------------------------------------------------------------------------
@@ -745,6 +794,7 @@ class _HomeShellState extends State<HomeShell> {
             ),
           ],
         ),
+        _connectionDot(),
       ],
     );
   }
@@ -780,11 +830,17 @@ class _HomeShellState extends State<HomeShell> {
         appBar: selecting
             ? _selectionAppBar(view.visible)
             : switch (_tab) {
-                HomeTab.dashboard => AppBar(title: const Text('Dashboard')),
+                HomeTab.dashboard => AppBar(
+                    title: const Text('Dashboard'),
+                    actions: <Widget>[_connectionDot()],
+                  ),
                 // The scan and Deleted actions live here and only here. Two
                 // entry points to a mutating action on two screens is a footgun.
                 HomeTab.transactions => _normalAppBar(),
-                HomeTab.settings => AppBar(title: const Text('Settings')),
+                HomeTab.settings => AppBar(
+                    title: const Text('Settings'),
+                    actions: <Widget>[_connectionDot()],
+                  ),
               },
         // IndexedStack rather than a swap, so switching tabs keeps the ledger's
         // scroll position and Settings' loaded state.

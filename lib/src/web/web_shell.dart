@@ -9,6 +9,7 @@
 /// so an edit here is queued for the phone to apply rather than written.
 library;
 
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -17,9 +18,11 @@ import 'package:intl/intl.dart';
 import '../core/edits.dart';
 import '../core/ledger.dart';
 import '../core/ledger_view.dart';
+import '../core/link_state.dart';
 import '../core/models.dart';
 import '../core/snapshot_store.dart';
 import '../core/splits.dart';
+import '../ui_shared/connection_dot.dart';
 import '../ui_shared/dashboard_tab.dart';
 import '../ui_shared/formats.dart';
 import '../ui_shared/transactions_tab.dart';
@@ -32,6 +35,14 @@ import 'session.dart';
 /// The single most useful thing this screen can do is stop someone reading a
 /// week-old number as today's.
 const Duration kStaleAfter = Duration(hours: 24);
+
+/// How often to re-read the device list, for the connection light and the count
+/// of edits still waiting.
+///
+/// A few hundred bytes on a LAN. Deliberately only the device list: re-fetching
+/// the ledger on a timer would pull a megabyte behind the user's back and move
+/// the page under them while they were reading it.
+const Duration kLinkPollInterval = Duration(seconds: 30);
 
 class WebShell extends StatefulWidget {
   const WebShell({super.key, required this.api, required this.session});
@@ -71,6 +82,15 @@ class _WebShellState extends State<WebShell> {
   /// phone can tell how stale the ids in it are.
   String? _snapshotId;
 
+  /// Whether the phone whose ledger is on screen is in touch with the server.
+  ///
+  /// Two ways to be red, and the tooltip says which: the server did not answer
+  /// this browser, or it did and that phone has not reported for longer than its
+  /// own sync interval explains.
+  LinkStatus _link = const LinkStatus(LinkState.unknown, 'Not checked yet.');
+
+  Timer? _poll;
+
   final Random _random = Random();
 
   @override
@@ -78,6 +98,71 @@ class _WebShellState extends State<WebShell> {
     super.initState();
     _filters = LedgerFilters(months: <YearMonth>{_currentMonth});
     _load();
+    // Only the device list, and only every half minute: a few hundred bytes, and
+    // it is what keeps the light and the pending-edits banner from being as old
+    // as the tab has been open. The ledger is deliberately not re-fetched —
+    // pulling a megabyte behind the user's back is a different thing entirely.
+    _poll = Timer.periodic(kLinkPollInterval, (Timer _) => unawaited(_refreshLink()));
+  }
+
+  @override
+  void dispose() {
+    _poll?.cancel();
+    super.dispose();
+  }
+
+  /// Re-reads the device list and updates the light and the pending count.
+  Future<void> _refreshLink() async {
+    final ApiResult<List<RemoteDevice>> devices = await widget.api.devices();
+    if (!mounted) return;
+
+    if (devices.failed) {
+      setState(() => _link = LinkStatus(LinkState.disconnected, devices.error!));
+      return;
+    }
+
+    setState(() {
+      _devices = devices.value!;
+      final RemoteDevice? device = _shown(devices.value!);
+      if (device != null) _pendingEdits = device.pendingEdits;
+      _link = _statusFor(device);
+    });
+  }
+
+  /// The device whose ledger is on screen, out of [devices].
+  RemoteDevice? _shown(List<RemoteDevice> devices) {
+    final String? chosen = _device;
+    if (chosen == null) return null;
+    for (final RemoteDevice device in devices) {
+      if (device.id == chosen) return device;
+    }
+    return null;
+  }
+
+  /// What the light should say about [device].
+  LinkStatus _statusFor(RemoteDevice? device) {
+    if (device == null) {
+      return const LinkStatus(
+        LinkState.unknown,
+        'No phone has synced to this account yet.',
+      );
+    }
+    final LinkState state = deviceLinkState(
+      lastSeen: device.lastSeen,
+      syncMinutes: device.syncMinutes,
+      now: DateTime.now(),
+    );
+    return LinkStatus(
+      state,
+      switch (state) {
+        LinkState.connected =>
+          '${device.label} is in touch — last synced ${_ago(device.lastSeen)}.',
+        LinkState.disconnected =>
+          '${device.label} has not synced since ${_ago(device.lastSeen)}. '
+              'Open the app on that phone.',
+        LinkState.unknown => '${device.label} has never synced.',
+      },
+    );
   }
 
   Future<void> _load({String? device}) async {
@@ -89,6 +174,10 @@ class _WebShellState extends State<WebShell> {
     final ApiResult<List<RemoteDevice>> devices = await widget.api.devices();
     if (!mounted) return;
     if (devices.failed) {
+      // This browser could not reach the server at all, which is the one failure
+      // on this screen that the light is genuinely about. A snapshot that fails
+      // to decode further down is a different problem and leaves it alone.
+      setState(() => _link = LinkStatus(LinkState.disconnected, devices.error!));
       return _fail(devices.error!);
     }
 
@@ -121,13 +210,9 @@ class _WebShellState extends State<WebShell> {
       _device = chosen;
       _store = snapshot.value;
       _snapshotId = snapshot.value!.meta['snapshot_id'];
-      _pendingEdits = devices.value!
-          .firstWhere(
-            (RemoteDevice d) => d.id == chosen,
-            orElse: () => const RemoteDevice(
-                id: '', label: '', lastSeen: null),
-          )
-          .pendingEdits;
+      final RemoteDevice? shown = _shown(devices.value!);
+      _pendingEdits = shown?.pendingEdits ?? 0;
+      _link = _statusFor(shown);
       // Recomputed on every load rather than read in build, for the same reason
       // the phone does it: a DateTime.now() per build would roll the answer over
       // mid-frame at midnight and be unpinnable in a test.
@@ -227,7 +312,8 @@ class _WebShellState extends State<WebShell> {
       return;
     }
     setState(() => _pendingEdits = result.value!);
-    _toast('Queued. It will be applied the next time that phone syncs.');
+    _toast('Queued. That phone applies it on its next sync, which it does by '
+        'itself while the app is open there.');
   }
 
   void _toast(String message) {
@@ -270,6 +356,13 @@ class _WebShellState extends State<WebShell> {
               widget.session.signOut();
             },
             icon: const Icon(Icons.logout),
+          ),
+          // Last, so it is in the corner — the same place the phone puts it, and
+          // the same widget, saying the same thing about the same link.
+          ConnectionDot(
+            state: _link.state,
+            tooltip: _link.detail,
+            onTap: _refreshLink,
           ),
         ],
       ),
@@ -359,10 +452,9 @@ class _WebShellState extends State<WebShell> {
           padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
           child: Text(
             _pendingEdits == 1
-                ? '1 edit waiting — it will be applied the next time that phone '
-                    'syncs.'
-                : '$_pendingEdits edits waiting — they will be applied the next '
-                    'time that phone syncs.',
+                ? '1 edit waiting — that phone applies it on its next sync.'
+                : '$_pendingEdits edits waiting — that phone applies them on '
+                    'its next sync.',
             style: TextStyle(
               color: Theme.of(context).colorScheme.onTertiaryContainer,
               fontSize: 12,

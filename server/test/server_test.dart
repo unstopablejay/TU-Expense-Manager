@@ -67,6 +67,7 @@ class Harness {
     String? token,
     String? device,
     String? label,
+    String? syncInterval,
   }) async =>
       handler(Request(
         method,
@@ -75,6 +76,7 @@ class Harness {
           if (token != null) 'Authorization': 'Bearer $token',
           if (device case final String d) kDeviceHeader: d,
           if (label case final String l) kDeviceLabelHeader: l,
+          if (syncInterval case final String s) kSyncIntervalHeader: s,
           if (body != null) 'Content-Type': 'application/json',
         },
         body: body is String ? body : (body == null ? null : jsonEncode(body)),
@@ -507,6 +509,98 @@ void main() {
       expect(devices.length, 2);
       expect((devices.first! as Map<String, Object?>)['id'], 'phone');
       expect((devices.first! as Map<String, Object?>)['label'], 'Jays Pixel');
+    });
+
+    test('a device says how often it syncs, so the browser can tell quiet from '
+        'broken', () async {
+      // Recorded and handed back, never acted on. It is what lets the browser's
+      // connection light judge a phone by its own schedule instead of guessing
+      // at one — and be wrong for anybody who changed the setting.
+      await h.send('POST', '/api/v1/snapshot',
+          body: snapshotBody(1),
+          token: token,
+          device: 'phone',
+          syncInterval: '60');
+
+      final Map<String, Object?> body =
+          await h.json(await h.send('GET', '/api/v1/devices', token: token));
+      final Map<String, Object?> phone =
+          (body['devices']! as List<Object?>).first! as Map<String, Object?>;
+      expect(phone['sync_interval_minutes'], 60);
+    });
+
+    test('an interval already known survives a client that sends none', () async {
+      // An older build checking in must not wipe what a newer one reported, or
+      // the light would fall back to a guess for no reason the user could see.
+      await h.send('POST', '/api/v1/snapshot',
+          body: snapshotBody(1),
+          token: token,
+          device: 'phone',
+          syncInterval: '30');
+      await h.send('POST', '/api/v1/snapshot',
+          body: snapshotBody(2), token: token, device: 'phone');
+
+      final Map<String, Object?> body =
+          await h.json(await h.send('GET', '/api/v1/devices', token: token));
+      final Map<String, Object?> phone =
+          (body['devices']! as List<Object?>).first! as Map<String, Object?>;
+      expect(phone['sync_interval_minutes'], 30);
+    });
+
+    test('pulling the edit queue counts as checking in', () async {
+      // The bug this exists to prevent: last_seen used to move only on a push,
+      // and an automatic sync does not push an unchanged ledger. A phone syncing
+      // perfectly every quarter of an hour looked dead to the browser as soon as
+      // it had a quiet afternoon.
+      await h.send('POST', '/api/v1/snapshot',
+          body: snapshotBody(1), token: token, device: 'phone');
+      final Map<String, Object?> before =
+          await h.json(await h.send('GET', '/api/v1/devices', token: token));
+      final String pushedAt = ((before['devices']! as List<Object?>).first!
+          as Map<String, Object?>)['last_seen']! as String;
+
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      await h.send('GET', '/api/v1/edits',
+          token: token, device: 'phone', syncInterval: '15');
+
+      final Map<String, Object?> after =
+          await h.json(await h.send('GET', '/api/v1/devices', token: token));
+      final Map<String, Object?> phone =
+          (after['devices']! as List<Object?>).first! as Map<String, Object?>;
+      expect(
+        DateTime.parse(phone['last_seen']! as String)
+            .isAfter(DateTime.parse(pushedAt)),
+        isTrue,
+      );
+      expect(phone['sync_interval_minutes'], 15);
+    });
+
+    test('checking in does not invent a device nobody has synced', () async {
+      // A heartbeat must not be a way to create devices, or a typo in a header
+      // would fill the browser's picker with entries that have no ledger.
+      await h.send('GET', '/api/v1/edits', token: token, device: 'ghost');
+
+      final Map<String, Object?> body =
+          await h.json(await h.send('GET', '/api/v1/devices', token: token));
+      expect(body['devices'], isEmpty);
+    });
+
+    test('a nonsense interval is dropped rather than stored', () async {
+      // Zero would mean "quiet for no time at all is already too long", and the
+      // light would be red for a phone that had just synced.
+      for (final String bad in <String>['0', '-5', 'soon', '999999']) {
+        await h.send('POST', '/api/v1/snapshot',
+            body: snapshotBody(1),
+            token: token,
+            device: 'phone',
+            syncInterval: bad);
+
+        final Map<String, Object?> body =
+            await h.json(await h.send('GET', '/api/v1/devices', token: token));
+        final Map<String, Object?> phone =
+            (body['devices']! as List<Object?>).first! as Map<String, Object?>;
+        expect(phone['sync_interval_minutes'], isNull, reason: 'for "$bad"');
+      }
     });
 
     test('a browser naming no device gets the one that synced last', () async {
