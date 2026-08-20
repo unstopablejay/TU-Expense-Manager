@@ -26,6 +26,7 @@ import '../ui_shared/transactions_tab.dart';
 import 'auto_sync.dart';
 import 'connection_monitor.dart';
 import 'database.dart';
+import 'screens/add_transaction_screen.dart';
 import 'screens/category_picker_sheet.dart';
 import 'screens/deleted_screen.dart';
 import 'screens/merge_names_screen.dart';
@@ -706,6 +707,22 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  Future<void> _openAddTransaction() async {
+    final view = _derive();
+    final bool? added = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => AddTransactionScreen(
+          categories: _categories,
+          merchants: view.merchants,
+        ),
+      ),
+    );
+    if (added == true) {
+      await _load();
+      _toast('Transaction added');
+    }
+  }
+
   void _toast(String message) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
@@ -777,6 +794,8 @@ class _HomeShellState extends State<HomeShell> {
         PopupMenuButton<String>(
           onSelected: (String value) {
             switch (value) {
+              case 'paste_sms':
+                _addSmsManually();
               case 'rescan':
                 _scanFromToolbar(full: true);
               case 'deleted':
@@ -784,6 +803,10 @@ class _HomeShellState extends State<HomeShell> {
             }
           },
           itemBuilder: (_) => const <PopupMenuEntry<String>>[
+            PopupMenuItem<String>(
+              value: 'paste_sms',
+              child: Text('Paste SMS'),
+            ),
             PopupMenuItem<String>(
               value: 'deleted',
               child: Text('Deleted transactions'),
@@ -899,9 +922,9 @@ class _HomeShellState extends State<HomeShell> {
         ),
         floatingActionButton: onLedger && !selecting
             ? FloatingActionButton.extended(
-                onPressed: _addSmsManually,
-                icon: const Icon(Icons.content_paste_outlined),
-                label: const Text('Paste an SMS'),
+                onPressed: _openAddTransaction,
+                icon: const Icon(Icons.add),
+                label: const Text('Add Transaction'),
               )
             : null,
         bottomNavigationBar: NavigationBar(
