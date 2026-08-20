@@ -602,7 +602,7 @@ class _EmptyLedgerState extends StatelessWidget {
           ),
         ],
         const SizedBox(height: 20),
-        // An empty ledger gets no button: the "Paste an SMS" FAB is already on
+        // An empty ledger gets no button: the "Add Transaction" FAB is already on
         // screen and the toolbar offers the inbox scan. An empty *month* gets
         // "Show all months" rather than "Clear filters", because clearing would
         // reset to the very month that is empty — a button that visibly does

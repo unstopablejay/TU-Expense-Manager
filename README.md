@@ -1,13 +1,9 @@
 # TU Expense Tracker
 
-An Android app that turns bank SMS alerts into a categorized expense ledger. It parses
-incoming spend and credit alerts, stores them in a local SQLite database, and learns a
-merchant → category mapping so that categorizing a merchant once applies to every past
-*and* future transaction from that merchant.
+An Android app that turns bank SMS alerts into a categorized expense ledger, and supports manually adding transactions (such as cash/manual entries). It parses incoming spend and credit alerts, stores them in a local SQLite database, and learns a merchant → category mapping so that categorizing a merchant once applies to every past *and* future transaction from that merchant.
 
-Everything stays on the device by default. There is no backend and no network call
-unless you choose to run one — see [Self-hosting](#self-hosting-optional), which is
-entirely optional and off until you configure it.
+Everything stays on the device by default. There is no backend and no network call unless you choose to run one — see [Self-hosting](#self-hosting-optional), which is entirely optional and off until you configure it.
+
 
 ## How it works
 

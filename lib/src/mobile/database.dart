@@ -12,6 +12,7 @@ import 'package:sqflite/sqflite.dart';
 import '../core/aliases.dart';
 import '../core/backup_data.dart';
 import '../core/constants.dart';
+import '../core/ledger.dart';
 import '../core/models.dart';
 import '../core/parser.dart';
 import '../core/splits.dart';
@@ -822,6 +823,63 @@ class AppDatabase {
       },
       conflictAlgorithm: ConflictAlgorithm.ignore,
     );
+  }
+
+  /// Inserts a transaction created by hand — for cash entries and manual logging.
+  ///
+  /// If [splits] are provided, the dominant category is denormalised into the
+  /// transaction row and the split lines are inserted into `transaction_splits`.
+  /// Returns the new row id, or 0 on error/conflict.
+  Future<int> insertManualTransaction({
+    required double amount,
+    required String merchant,
+    required DateTime date,
+    required int categoryId,
+    String paymentType = 'Cash',
+    TxnDirection direction = TxnDirection.debit,
+    String reference = '',
+    String note = '',
+    List<TxnSplit> splits = const <TxnSplit>[],
+  }) async {
+    final db = await database;
+    return db.transaction<int>((txn) async {
+      final int dominantCategoryId = splits.isNotEmpty
+          ? splits
+              .reduce((TxnSplit a, TxnSplit b) => b.amount > a.amount ? b : a)
+              .categoryId
+          : categoryId;
+
+      final id = await txn.insert(
+        'transactions',
+        <String, Object?>{
+          'amount': amount,
+          'payment_type':
+              paymentType.trim().isEmpty ? 'Cash' : paymentType.trim(),
+          'merchant': merchant.trim(),
+          'date': date.millisecondsSinceEpoch,
+          'category_id': dominantCategoryId,
+          'direction': direction.name,
+          'reference': reference.trim(),
+          'note': cleanNote(note),
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+
+      if (id == 0) return 0;
+
+      if (splits.isNotEmpty) {
+        for (var i = 0; i < splits.length; i++) {
+          await txn.insert('transaction_splits', <String, Object?>{
+            'transaction_id': id,
+            'category_id': splits[i].categoryId,
+            'amount': splits[i].amount,
+            'position': i,
+          });
+        }
+      }
+
+      return id;
+    });
   }
 
   // -------------------------------------------------------------------------
