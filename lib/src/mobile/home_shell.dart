@@ -41,7 +41,14 @@ import 'update_service.dart';
 
 
 class TuExpenseTrackerApp extends StatelessWidget {
-  const TuExpenseTrackerApp({super.key});
+  const TuExpenseTrackerApp({
+    super.key,
+    this.database,
+    this.smsSource,
+  });
+
+  final AppDatabase? database;
+  final SmsSource? smsSource;
 
   @override
   Widget build(BuildContext context) {
@@ -50,7 +57,7 @@ class TuExpenseTrackerApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: appTheme(Brightness.light),
       darkTheme: appTheme(Brightness.dark),
-      home: const HomeShell(),
+      home: HomeShell(database: database, smsSource: smsSource),
     );
   }
 }
@@ -94,15 +101,22 @@ enum HomeTab {
 /// sort, categorise, split and delete — and Settings. This shell owns the data
 /// and the view over it; the tabs only render what they are handed.
 class HomeShell extends StatefulWidget {
-  const HomeShell({super.key});
+  const HomeShell({
+    super.key,
+    this.database,
+    this.smsSource,
+  });
+
+  final AppDatabase? database;
+  final SmsSource? smsSource;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
 }
 
-class _HomeShellState extends State<HomeShell> {
-  final AppDatabase _db = AppDatabase.instance;
-  final SmsSource _sms = SmsSource();
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
+  late final AppDatabase _db = widget.database ?? AppDatabase.instance;
+  late final SmsSource _sms = widget.smsSource ?? SmsSource();
 
   final NumberFormat _money = appMoneyFormat();
   final DateFormat _dateFormat = appDateFormat();
@@ -111,6 +125,7 @@ class _HomeShellState extends State<HomeShell> {
   List<ExpenseCategory> _categories = <ExpenseCategory>[];
   bool _loading = true;
   bool _scanning = false;
+  bool _smsListening = false;
   HomeTab _tab = HomeTab.dashboard;
 
   /// The month the app considers "now". Refreshed on every load rather than
@@ -145,6 +160,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // The `IndexedStack` in `build` is written out by hand while the
     // `NavigationBar` is generated from the enum, so a destination added
     // without a child would silently show the wrong screen. Fail loudly here
@@ -168,9 +184,24 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     AutoSync.instance.stop();
     ConnectionMonitor.instance.stop();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _onAppResumed();
+    }
+  }
+
+  Future<void> _onAppResumed() async {
+    if (!_sms.isSupported) return;
+    _ensureSmsListening();
+    final since = await _db.lastScannedSmsDate();
+    await _scan(since: since);
   }
 
   /// The connection light, in the corner of every app bar.
@@ -225,6 +256,35 @@ class _HomeShellState extends State<HomeShell> {
   // SMS INTAKE
   // -------------------------------------------------------------------------
 
+  void _ensureSmsListening() {
+    if (_smsListening) return;
+    _smsListening = true;
+    _sms.listen(_handleIncomingSms);
+  }
+
+  /// Handles incoming SMS in real time while the app is in the foreground.
+  Future<void> _handleIncomingSms(InboxSms sms) async {
+    final parsed = SmsParser.parse(sms.body, receivedAt: sms.receivedAt);
+    if (parsed == null) return; // not a transaction alert
+
+    final id = await _db.insertParsed(parsed);
+    if (id == 0) return; // already recorded or deleted
+
+    final at = sms.receivedAt ?? parsed.date;
+    final current = await _db.lastScannedSmsDate();
+    if (current == null || at.isAfter(current)) {
+      await _db.setLastScannedSmsDate(at);
+    }
+
+    await _load();
+
+    final verb = parsed.isCredit ? 'Received' : 'Added';
+    _toast('$verb ${_money.format(parsed.amount)} · ${parsed.merchant}'
+        '${_outOfViewSuffix(parsed.date)}');
+
+    unawaited(_autoSync());
+  }
+
   /// Asks for the permission, registers the foreground listener, then catches
   /// up on the inbox — the whole of it on the very first run, and only what has
   /// arrived since on every run after that.
@@ -233,12 +293,7 @@ class _HomeShellState extends State<HomeShell> {
     final granted = await _sms.requestPermission();
     if (!granted) return;
 
-    _sms.listen((InboxSms sms) async {
-      final parsed = SmsParser.parse(sms.body, receivedAt: sms.receivedAt);
-      if (parsed == null) return; // not a transaction alert
-      await _db.insertParsed(parsed);
-      await _load();
-    });
+    _ensureSmsListening();
 
     final since = await _db.lastScannedSmsDate();
     final result = await _scan(since: since);
@@ -332,6 +387,8 @@ class _HomeShellState extends State<HomeShell> {
       _toast('SMS permission denied.');
       return;
     }
+
+    _ensureSmsListening();
 
     final since = full ? null : await _db.lastScannedSmsDate();
     final result = await _scan(since: since);

@@ -22,7 +22,12 @@ class InboxSms {
 }
 
 class SmsSource {
-  final Telephony _telephony = Telephony.instance;
+  SmsSource({this.telephony});
+
+  final Telephony? telephony;
+  Telephony get _telephonyInstance => telephony ?? Telephony.instance;
+
+  void Function(InboxSms sms)? _listener;
 
   bool get isSupported => defaultTargetPlatform == TargetPlatform.android;
 
@@ -34,9 +39,10 @@ class SmsSource {
 
   /// Live listener for new alerts while the app is in the foreground.
   void listen(void Function(InboxSms sms) onMessage) {
+    _listener = onMessage;
     if (!isSupported) return;
     try {
-      _telephony.listenIncomingSms(
+      _telephonyInstance.listenIncomingSms(
         onNewMessage: (SmsMessage message) {
           final body = message.body;
           if (body != null) onMessage(InboxSms(body, _timestampOf(message)));
@@ -48,6 +54,11 @@ class SmsSource {
     }
   }
 
+  /// Simulates an incoming SMS message for testing or previewing.
+  void simulateIncomingSms(InboxSms sms) {
+    _listener?.call(sms);
+  }
+
   /// Reads the inbox. With [since] the query is narrowed to messages newer than
   /// that instant, which is what turns every scan after the first into a cheap
   /// look at only what has arrived. The filter is a real `WHERE` on the SMS
@@ -55,7 +66,7 @@ class SmsSource {
   Future<List<InboxSms>> readInbox({DateTime? since}) async {
     if (!isSupported) return const <InboxSms>[];
     try {
-      final messages = await _telephony.getInboxSms(
+      final messages = await _telephonyInstance.getInboxSms(
         columns: <SmsColumn>[SmsColumn.ADDRESS, SmsColumn.BODY, SmsColumn.DATE],
         filter: since == null
             ? null
