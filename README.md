@@ -464,30 +464,22 @@ list.
 
 #### Filtering
 
-Three facets, as chips that open a sheet:
+Four facets, accessible via modern filter trigger buttons with count badges and active filter token chips:
 
-- **Category** — take as many as you like. Only categories something actually falls under,
-  so a choice can never filter to nothing. The category *picker* still offers the full
-  list; it has to, since assigning is how a category first gets used.
-- **Merchant** — likewise multi-select, one entry per distinct merchant.
-- **Card / account** — one entry per distinct `payment_type`, e.g. `YES BANK Card
-  X2858`, `HDFC Bank A/C *0444`.
+- **Date / Month** — multi-select months, or quickly step through months with the chevron buttons.
+- **Category** — multi-select checkboxes. Only categories something actually falls under given the other active filters, so a choice can never filter to nothing.
+- **Merchant** — multi-select checkboxes with instant search filtering for long lists.
+- **Card / account** — multi-select checkboxes across all `payment_type`s (e.g. `YES BANK Card X2858`, `HDFC Bank A/C *0444`).
 
-All three lists are derived from the loaded transactions rather than queried, so they stay
-in step for free. **Category and merchant constrain each other**: pick Amazon and the
-category chip offers only Amazon's categories; pick Grocery and the merchant chip offers
-only merchants with grocery spend.
+**Interlinked Facets**: All facet lists are dynamically derived from loaded transactions. **Category, merchant, and card/account constrain each other**:
+- Picking a merchant narrows available categories and cards to that merchant's transactions.
+- Picking a card narrows categories and merchants to charges made on that card.
+- Each facet computes its options with every filter applied *except its own*. This allows mutual constraint without any facet collapsing or emptying itself out.
 
-Each facet computes its options with every filter applied *except its own*. That is the
-whole trick, and skipping it reintroduces an old bug: narrowing to one card must not empty
-the category list underneath a selection already made in it, and by the same token picking
-one merchant must not leave the merchant list holding only that merchant.
-
-Selections that stop being available are dropped rather than filtered on. The facets are
-ANDed and the summary totals reflect them; a split contributes only the lines that matched,
-so a Grocery-filtered view of a ₹2,000 Amazon order shows ₹1,200 and totals ₹1,200. When
-the filters exclude everything, a **Clear filters** button appears (distinct from the empty
-state shown when there are no transactions at all).
+**Active Filter Tokens & Quick Dismissal**:
+- Active selections appear in an `ActiveFiltersBar` row as individual chip tokens with a `✕` button to remove them one by one.
+- A **Clear all** button quickly restores the ledger back to the default current month view.
+- When filters match no transactions, a dedicated **Clear filters** action is offered.
 
 #### Editing
 
@@ -975,7 +967,7 @@ Change visibility*, or keep it private and run
 `docker login ghcr.io` on the box with a token that has `read:packages`.
 
 Then, on the phone: **Settings → Server sync**, enter the address
-(`http://192.168.1.99:8099`), sign in, and tap **Sync now**. In a browser, open the
+(`http://192.168.1.99:8099`), sign in (with an eye icon button to toggle password visibility), and tap **Sync now**. In a browser, open the
 same address and sign in with the same account.
 
 ### Environment

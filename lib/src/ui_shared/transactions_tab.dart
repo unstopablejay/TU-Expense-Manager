@@ -143,40 +143,15 @@ class TransactionsTab extends StatelessWidget {
   /// A scrolling row of chips that each open a sheet does fit, and matches how
   /// the rest of the app asks for a choice.
   Widget _chipStrip(BuildContext context) {
-    // Offered against the resting state rather than against `isEmpty`: a user
-    // who widened to *all* months has an empty filter set and very much wants a
-    // way back to this month.
-    final bool atRest = filters.isDefaultFor(currentMonth);
-
     return SizedBox(
-      height: 56,
+      height: 48,
       child: ListView(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
         children: <Widget>[
-          // First in the strip, because this is the way out of a filter set that
-          // has narrowed the ledger to nothing and it cannot be the thing that
-          // needs scrolling to. Behind the four facet chips it was reachable only
-          // by scrolling past the very chips that caused the problem.
-          //
-          // Dead rather than absent when there is nothing to clear, for the same
-          // reason the merge screen's app bar keeps its button: a chip that comes
-          // and goes reshuffles everything behind it, and this one sits in front
-          // of all four. It also has to be visible before it is needed, or
-          // nobody learns it is there.
-          ActionChip(
-            avatar: const Icon(Icons.filter_alt_off_outlined, size: 18),
-            label: const Text('Clear all'),
-            onPressed: atRest
-                ? null
-                : () => onFiltersChanged(LedgerFilters.defaults(currentMonth)),
-          ),
-          const SizedBox(width: 8),
-          ActionChip(
-            avatar: const Icon(Icons.swap_vert, size: 18),
-            // The order is always in force, so the chip names the current one
-            // rather than saying "Sort" and leaving it to be guessed at.
-            label: Text(sort.label),
+          FilterTriggerButton(
+            label: 'Sort: ${sort.label}',
+            active: false,
             onPressed: () async {
               final LedgerSort? picked = await showModalBottomSheet<LedgerSort>(
                 context: context,
@@ -186,8 +161,8 @@ class TransactionsTab extends StatelessWidget {
               if (picked != null) onSortChanged(picked);
             },
           ),
-          const SizedBox(width: 8),
-          _FilterChip(
+          const SizedBox(width: 6),
+          FilterTriggerButton(
             label: 'Category',
             count: filters.categoryIds.length,
             onPressed: () async {
@@ -211,8 +186,8 @@ class TransactionsTab extends StatelessWidget {
               }
             },
           ),
-          const SizedBox(width: 8),
-          _FilterChip(
+          const SizedBox(width: 6),
+          FilterTriggerButton(
             label: 'Merchant',
             count: filters.merchants.length,
             onPressed: () async {
@@ -228,22 +203,21 @@ class TransactionsTab extends StatelessWidget {
               }
             },
           ),
-          const SizedBox(width: 8),
-          _FilterChip(
-            label: filters.paymentType ?? 'Card / account',
-            count: filters.paymentType == null ? 0 : 1,
+          const SizedBox(width: 6),
+          FilterTriggerButton(
+            label: 'Card / account',
+            count: filters.paymentTypes.length,
             onPressed: () async {
               final Set<String>? picked = await chooseMany<String>(
                 context,
                 title: 'Card / account',
                 options: paymentTypeChoices,
-                selected: <String>{?filters.paymentType},
+                selected: filters.paymentTypes,
                 label: (String t) => t,
               );
-              if (picked == null) return;
-              onFiltersChanged(picked.isEmpty
-                  ? filters.copyWith(clearPaymentType: true)
-                  : filters.copyWith(paymentType: picked.first));
+              if (picked != null) {
+                onFiltersChanged(filters.copyWith(paymentTypes: picked));
+              }
             },
           ),
         ],
@@ -278,6 +252,15 @@ class TransactionsTab extends StatelessWidget {
             ),
           ),
           _chipStrip(context),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+            child: ActiveFiltersBar(
+              filters: filters,
+              currentMonth: currentMonth,
+              categoryChoices: categoryChoices,
+              onFiltersChanged: onFiltersChanged,
+            ),
+          ),
         ],
         Expanded(
           child: loading
@@ -477,32 +460,6 @@ class _SortSheet extends StatelessWidget {
           const SizedBox(height: 12),
         ],
       ),
-    );
-  }
-}
-
-/// A filter's entry point: its name, how many values are picked, and a tap that
-/// opens the sheet to change them.
-class _FilterChip extends StatelessWidget {
-  const _FilterChip({
-    required this.label,
-    required this.count,
-    required this.onPressed,
-  });
-
-  final String label;
-  final int count;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) {
-    final bool active = count > 0;
-    return FilterChip(
-      selected: active,
-      showCheckmark: false,
-      label: Text(count > 1 ? '$label · $count' : label),
-      avatar: active ? null : const Icon(Icons.arrow_drop_down, size: 20),
-      onSelected: (_) => onPressed(),
     );
   }
 }

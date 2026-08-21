@@ -856,6 +856,7 @@ class _CredentialsDialogState extends State<_CredentialsDialog> {
   late final TextEditingController _username =
       TextEditingController(text: widget.username);
   final TextEditingController _password = TextEditingController();
+  bool _obscurePassword = true;
 
   @override
   void dispose() {
@@ -885,10 +886,21 @@ class _CredentialsDialogState extends State<_CredentialsDialog> {
             const SizedBox(height: 12),
             TextField(
               controller: _password,
-              obscureText: true,
-              decoration: const InputDecoration(
+              obscureText: _obscurePassword,
+              decoration: InputDecoration(
                 labelText: 'Password',
-                border: OutlineInputBorder(),
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                    _obscurePassword
+                        ? Icons.visibility_outlined
+                        : Icons.visibility_off_outlined,
+                  ),
+                  tooltip:
+                      _obscurePassword ? 'Show password' : 'Hide password',
+                  onPressed: () =>
+                      setState(() => _obscurePassword = !_obscurePassword),
+                ),
               ),
               onSubmitted: (_) => _submit(),
             ),
