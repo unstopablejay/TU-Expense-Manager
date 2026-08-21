@@ -23,8 +23,10 @@ import 'package:tu_expense_tracker/src/core/ledger.dart';
 import 'package:tu_expense_tracker/src/core/link_state.dart';
 import 'package:tu_expense_tracker/src/ui_shared/connection_dot.dart';
 import 'package:tu_expense_tracker/src/ui_shared/dashboard_tab.dart';
+import 'package:tu_expense_tracker/src/ui_shared/shared_controls.dart';
 import 'package:tu_expense_tracker/src/ui_shared/transactions_tab.dart';
 import 'package:tu_expense_tracker/src/web/api_client.dart';
+import 'package:tu_expense_tracker/src/web/login_screen.dart';
 import 'package:tu_expense_tracker/src/web/session.dart';
 import 'package:tu_expense_tracker/src/web/transactions_table.dart';
 import 'package:tu_expense_tracker/src/web/web_shell.dart';
@@ -685,8 +687,8 @@ void main() {
             .widget<WebTransactionsView>(
                 find.byType(WebTransactionsView, skipOffstage: false))
             .filters
-            .paymentType,
-        kTestPaymentType,
+            .paymentTypes,
+        <String>{kTestPaymentType},
       );
 
       // Escape rather than a tap outside: a tap would land on whatever is under
@@ -702,8 +704,8 @@ void main() {
             .widget<WebTransactionsView>(
                 find.byType(WebTransactionsView, skipOffstage: false))
             .filters
-            .paymentType,
-        isNull,
+            .paymentTypes,
+        isEmpty,
       );
     });
 
@@ -827,6 +829,133 @@ void main() {
         ),
         findsOneWidget,
       );
+    });
+
+    testWidgets('selecting facets shows count badge and active filter tokens with close buttons',
+        (WidgetTester tester) async {
+      final StubServer server = withLedger();
+      await openTable(tester, server);
+
+      // Open Category dropdown and pick Grocery
+      await tester.tap(find.text('Category'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.descendant(
+        of: find.byType(ListTile),
+        matching: find.text('Grocery'),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+
+      // Count badge 1 should be visible on the Category trigger
+      expect(
+        find.descendant(
+          of: find.byType(FilterTriggerButton),
+          matching: find.text('1'),
+        ),
+        findsOneWidget,
+      );
+
+      // Active token chip for Grocery should be visible
+      expect(find.text('Grocery'), findsWidgets);
+      final Finder closeIcon = find.descendant(
+        of: find.byType(ActiveFilterChipToken),
+        matching: find.byIcon(Icons.close),
+      );
+      expect(closeIcon, findsOneWidget);
+
+      // Tap the close button on the Grocery token chip
+      await tester.tap(closeIcon);
+      await tester.pumpAndSettle();
+
+      // Active chip should be gone and count badge gone
+      expect(find.byType(ActiveFilterChipToken), findsNothing);
+      expect(
+        tester
+            .widget<WebTransactionsView>(
+                find.byType(WebTransactionsView, skipOffstage: false))
+            .filters
+            .categoryIds,
+        isEmpty,
+      );
+    });
+
+    testWidgets('search query creates active filter chip and can be dismissed',
+        (WidgetTester tester) async {
+      final StubServer server = withLedger();
+      await openTable(tester, server);
+
+      await tester.enterText(find.byType(TextField).first, 'SWIGGY');
+      await tester.pumpAndSettle();
+
+      // Active chip with quotes should be displayed
+      expect(find.text('"SWIGGY"'), findsOneWidget);
+
+      final Finder closeIcon = find.descendant(
+        of: find.byType(ActiveFilterChipToken),
+        matching: find.byIcon(Icons.close),
+      );
+      expect(closeIcon, findsOneWidget);
+
+      await tester.tap(closeIcon);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ActiveFilterChipToken), findsNothing);
+      expect(
+        tester
+            .widget<WebTransactionsView>(
+                find.byType(WebTransactionsView, skipOffstage: false))
+            .filters
+            .query,
+        isEmpty,
+      );
+    });
+
+    testWidgets('interlinked facet filtering: selecting merchant restricts cards and preserves selections on reopening',
+        (WidgetTester tester) async {
+      final StubServer server = withLedger();
+      await openTable(tester, server);
+
+      // Open Merchant dropdown and pick SWIGGY
+      await tester.tap(find.text('Merchant'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.descendant(
+        of: find.byType(ListTile),
+        matching: find.text('SWIGGY'),
+      ));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+
+      Finder cardTrigger() => find.descendant(
+            of: find.byType(FilterTriggerButton),
+            matching: find.text('Card / account'),
+          );
+
+      // Open Card / account dropdown
+      await tester.tap(cardTrigger());
+      await tester.pumpAndSettle();
+
+      // Card option should be offered in the menu
+      final Finder cardTile = find.descendant(
+        of: find.byType(ListTile),
+        matching: find.text(kTestPaymentType),
+      );
+      expect(cardTile, findsOneWidget);
+
+      // Pick the card
+      await tester.tap(cardTile);
+      await tester.pumpAndSettle();
+
+      // Checkbox is active
+      expect(find.byIcon(Icons.check_box), findsOneWidget);
+
+      // Both SWIGGY and Card token chips should be visible
+      expect(find.text('SWIGGY'), findsWidgets);
+      expect(find.text(kTestPaymentType), findsWidgets);
     });
   });
 
@@ -1085,6 +1214,43 @@ void main() {
       await pumpShell(tester, server);
 
       expect(lightIn(tester), LinkState.disconnected);
+    });
+  });
+
+  group('LoginScreen', () {
+    testWidgets('toggles password visibility with eye icon button',
+        (WidgetTester tester) async {
+      final StubServer server = StubServer();
+      final ApiClient api = ApiClient(
+        base: Uri.parse('http://localhost:8099'),
+        client: server.client,
+      );
+      final WebSession session = WebSession();
+
+      await tester.pumpWidget(MaterialApp(
+        home: LoginScreen(api: api, session: session),
+      ));
+
+      // Initially password text is obscured
+      final Finder passwordField = find.byWidgetPredicate(
+        (Widget w) => w is TextField && w.obscureText == true,
+      );
+      expect(passwordField, findsOneWidget);
+      expect(find.byIcon(Icons.visibility_outlined), findsOneWidget);
+
+      // Tap the eye toggle button
+      await tester.tap(find.byIcon(Icons.visibility_outlined));
+      await tester.pumpAndSettle();
+
+      // Now password text is visible
+      final Finder visibleField = find.byWidgetPredicate(
+        (Widget w) =>
+            w is TextField &&
+            w.decoration?.labelText == 'Password' &&
+            w.obscureText == false,
+      );
+      expect(visibleField, findsOneWidget);
+      expect(find.byIcon(Icons.visibility_off_outlined), findsOneWidget);
     });
   });
 }

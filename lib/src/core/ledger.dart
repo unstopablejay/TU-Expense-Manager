@@ -118,7 +118,7 @@ class LedgerFilters {
     this.months = const <YearMonth>{},
     this.categoryIds = const <int>{},
     this.merchants = const <String>{},
-    this.paymentType,
+    this.paymentTypes = const <String>{},
     this.query = '',
   });
 
@@ -138,19 +138,17 @@ class LedgerFilters {
 
   final Set<int> categoryIds;
   final Set<String> merchants;
-
-  /// One card or account at a time, unlike the other two.
-  final String? paymentType;
+  final Set<String> paymentTypes;
 
   /// What is typed in the search box. Empty means "not searching" — and because
-  /// it is never null, it needs no companion flag the way [paymentType] does.
+  /// it is never null, it needs no companion flag the way [paymentType] did.
   final String query;
 
   bool get isEmpty =>
       months.isEmpty &&
       categoryIds.isEmpty &&
       merchants.isEmpty &&
-      paymentType == null &&
+      paymentTypes.isEmpty &&
       query.isEmpty;
 
   /// Whether this is the resting state — this month and nothing else — which is
@@ -164,41 +162,36 @@ class LedgerFilters {
   bool isDefaultFor(YearMonth current) =>
       categoryIds.isEmpty &&
       merchants.isEmpty &&
-      paymentType == null &&
+      paymentTypes.isEmpty &&
       query.isEmpty &&
       months.length == 1 &&
       months.contains(current);
 
-  /// `clearPaymentType` because passing `paymentType: null` cannot say whether
-  /// it means "leave it" or "drop it". [months] needs no such flag: a set says
-  /// "none" with `{}`.
   LedgerFilters copyWith({
     Set<YearMonth>? months,
     Set<int>? categoryIds,
     Set<String>? merchants,
-    String? paymentType,
+    Set<String>? paymentTypes,
     String? query,
-    bool clearPaymentType = false,
   }) =>
       LedgerFilters(
         months: months ?? this.months,
         categoryIds: categoryIds ?? this.categoryIds,
         merchants: merchants ?? this.merchants,
-        paymentType:
-            clearPaymentType ? null : (paymentType ?? this.paymentType),
+        paymentTypes: paymentTypes ?? this.paymentTypes,
         query: query ?? this.query,
       );
 }
 
-/// Narrows the ledger to any combination of months, categories, merchants, one
-/// card/account and a search term, and projects each surviving transaction down
+/// Narrows the ledger to any combination of months, categories, merchants,
+/// cards/accounts and a search term, and projects each surviving transaction down
 /// to the split lines that matched. A null or empty filter means "everything".
 ///
 /// [query] is matched case-insensitively, as a substring, against the note and
 /// the merchant — the only free text a transaction has, one written by the user
 /// and one sent by the bank.
 ///
-/// [months] and [query] and the two name facets all decide which *transactions*
+/// [months] and [query] and the name facets all decide which *transactions*
 /// survive and never which lines do. Only the category filter narrows lines,
 /// because it is the only one that says anything about a category: a split that
 /// matches on its month still reports its whole breakdown.
@@ -209,12 +202,13 @@ List<LedgerEntry> applyFilters(
   Set<YearMonth>? months,
   Set<int>? categoryIds,
   Set<String>? merchants,
-  String? paymentType,
+  Set<String>? paymentTypes,
   String? query,
 }) {
   final bool byMonth = months != null && months.isNotEmpty;
   final bool byCategory = categoryIds != null && categoryIds.isNotEmpty;
   final bool byMerchant = merchants != null && merchants.isNotEmpty;
+  final bool byPaymentType = paymentTypes != null && paymentTypes.isNotEmpty;
   final String needle = (query ?? '').trim().toLowerCase();
 
   final List<LedgerEntry> entries = <LedgerEntry>[];
@@ -222,7 +216,7 @@ List<LedgerEntry> applyFilters(
     // First because a month is now nearly always in force, and it is both the
     // cheapest test and by far the most selective one.
     if (byMonth && !months.contains(YearMonth.fromDate(t.date))) continue;
-    if (paymentType != null && t.paymentType != paymentType) continue;
+    if (byPaymentType && !paymentTypes.contains(t.paymentType)) continue;
     if (byMerchant && !merchants.contains(t.merchant)) continue;
     if (needle.isNotEmpty &&
         !t.note.toLowerCase().contains(needle) &&
@@ -417,13 +411,13 @@ List<String> merchantOptions(
   List<ExpenseTxn> all, {
   Set<YearMonth>? months,
   Set<int>? categoryIds,
-  String? paymentType,
+  Set<String>? paymentTypes,
 }) {
   final List<String> merchants = applyFilters(
     all,
     months: months,
     categoryIds: categoryIds,
-    paymentType: paymentType,
+    paymentTypes: paymentTypes,
   ).map((LedgerEntry e) => e.txn.merchant).toSet().toList()
     ..sort();
   return merchants;
@@ -447,20 +441,40 @@ List<ExpenseCategory> categoryOptions(
   List<ExpenseCategory> categories, {
   Set<YearMonth>? months,
   Set<String>? merchants,
-  String? paymentType,
+  Set<String>? paymentTypes,
 }) {
   final Set<int> used = <int>{};
   for (final LedgerEntry entry in applyFilters(
     all,
     months: months,
     merchants: merchants,
-    paymentType: paymentType,
+    paymentTypes: paymentTypes,
   )) {
     for (final TxnSplit line in entry.lines) {
       used.add(line.categoryId);
     }
   }
   return categories.where((ExpenseCategory c) => used.contains(c.id)).toList();
+}
+
+/// Every card and account the ledger has seen that survives *the other* filters,
+/// alphabetically.
+///
+/// Each facet applies every filter except its own.
+List<String> paymentTypeOptions(
+  List<ExpenseTxn> all, {
+  Set<YearMonth>? months,
+  Set<int>? categoryIds,
+  Set<String>? merchants,
+}) {
+  final List<String> paymentTypes = applyFilters(
+    all,
+    months: months,
+    categoryIds: categoryIds,
+    merchants: merchants,
+  ).map((LedgerEntry e) => e.txn.paymentType).toSet().toList()
+    ..sort();
+  return paymentTypes;
 }
 
 /// The months on offer, newest first — every month the ledger touches under
@@ -484,7 +498,7 @@ List<YearMonth> monthOptions(
   Set<YearMonth> keep = const <YearMonth>{},
   Set<int>? categoryIds,
   Set<String>? merchants,
-  String? paymentType,
+  Set<String>? paymentTypes,
 }) {
   final Set<YearMonth> months = <YearMonth>{
     current,
@@ -493,7 +507,7 @@ List<YearMonth> monthOptions(
       all,
       categoryIds: categoryIds,
       merchants: merchants,
-      paymentType: paymentType,
+      paymentTypes: paymentTypes,
     ).map((LedgerEntry e) => YearMonth.fromDate(e.txn.date)),
   };
   return months.toList()..sort((YearMonth a, YearMonth b) => b.compareTo(a));
@@ -529,7 +543,7 @@ EmptyReason emptyReason(
   if (filters.query.trim().isNotEmpty) return EmptyReason.search;
   if (filters.categoryIds.isNotEmpty ||
       filters.merchants.isNotEmpty ||
-      filters.paymentType != null) {
+      filters.paymentTypes.isNotEmpty) {
     return EmptyReason.facets;
   }
   return EmptyReason.month;

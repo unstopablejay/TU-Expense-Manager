@@ -27,6 +27,7 @@ import '../core/ledger.dart';
 import '../core/models.dart';
 import '../core/splits.dart';
 import '../ui_shared/palette.dart';
+import '../ui_shared/shared_controls.dart';
 import '../ui_shared/transactions_tab.dart';
 
 /// The width at which the table replaces the phone's card list.
@@ -695,10 +696,6 @@ class _FilterToolbar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
-
-    // Offered against the resting state rather than against `isEmpty`: someone
-    // who widened to *all* months has an empty filter set and very much wants a
-    // way back to this month.
     final bool atRest = filters.isDefaultFor(currentMonth);
 
     final YearMonth? onlyMonth =
@@ -706,109 +703,95 @@ class _FilterToolbar extends StatelessWidget {
 
     return Container(
       decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow.withValues(alpha: 0.35),
         border: Border(
           bottom: BorderSide(color: theme.colorScheme.outlineVariant),
         ),
       ),
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        crossAxisAlignment: WrapCrossAlignment.center,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          SizedBox(
-            width: 300,
-            child: _SearchField(
-              value: filters.query,
-              onChanged: (String q) =>
-                  onFiltersChanged(filters.copyWith(query: q)),
-            ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: <Widget>[
+              SizedBox(
+                width: 280,
+                child: _SearchField(
+                  value: filters.query,
+                  onChanged: (String q) =>
+                      onFiltersChanged(filters.copyWith(query: q)),
+                ),
+              ),
+              if (onlyMonth != null)
+                IconButton(
+                  tooltip: 'Previous month',
+                  icon: const Icon(Icons.chevron_left),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => onFiltersChanged(
+                      filters.copyWith(months: <YearMonth>{onlyMonth.plus(-1)})),
+                ),
+              _FacetMenu<YearMonth>(
+                label: 'Date',
+                options: monthChoices,
+                selected: filters.months,
+                optionLabel: (YearMonth m) => m.label,
+                showCount: false,
+                active: !atRest || filters.months.isEmpty,
+                onChanged: (Set<YearMonth> months) =>
+                    onFiltersChanged(filters.copyWith(months: months)),
+              ),
+              if (onlyMonth != null)
+                IconButton(
+                  tooltip: 'Next month',
+                  icon: const Icon(Icons.chevron_right),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: onlyMonth.compareTo(currentMonth) < 0
+                      ? () => onFiltersChanged(
+                          filters.copyWith(months: <YearMonth>{onlyMonth.plus(1)}))
+                      : null,
+                ),
+              _FacetMenu<int>(
+                label: 'Category',
+                options:
+                    categoryChoices.map((ExpenseCategory c) => c.id).toList(),
+                selected: filters.categoryIds,
+                count: filters.categoryIds.length,
+                optionLabel: (int id) => _categoryName(id),
+                optionLeading: (int id) =>
+                    Icon(categoryIcon(_categoryName(id)), size: 18),
+                onChanged: (Set<int> picked) =>
+                    onFiltersChanged(filters.copyWith(categoryIds: picked)),
+              ),
+              _FacetMenu<String>(
+                label: 'Merchant',
+                options: merchantChoices,
+                selected: filters.merchants,
+                count: filters.merchants.length,
+                optionLabel: (String m) => m,
+                searchable: true,
+                onChanged: (Set<String> picked) =>
+                    onFiltersChanged(filters.copyWith(merchants: picked)),
+              ),
+              _FacetMenu<String>(
+                label: 'Card / account',
+                options: paymentTypeChoices,
+                selected: filters.paymentTypes,
+                count: filters.paymentTypes.length,
+                optionLabel: (String t) => t,
+                onChanged: (Set<String> picked) =>
+                    onFiltersChanged(filters.copyWith(paymentTypes: picked)),
+              ),
+            ],
           ),
-          // The period, with the steppers that move it a month at a time. Hidden
-          // rather than disabled in a multi-selection, where "the previous month"
-          // means nothing.
-          if (onlyMonth != null)
-            IconButton(
-              tooltip: 'Previous month',
-              icon: const Icon(Icons.chevron_left),
-              visualDensity: VisualDensity.compact,
-              onPressed: () => onFiltersChanged(
-                  filters.copyWith(months: <YearMonth>{onlyMonth.plus(-1)})),
-            ),
-          _FacetMenu<YearMonth>(
-            label: periodLabel(filters.months),
-            icon: Icons.calendar_month_outlined,
-            options: monthChoices,
-            selected: filters.months,
-            optionLabel: (YearMonth m) => m.label,
-            // The count is already in the label — "Aug 2026" or "3 months" —
-            // so a badge beside it would say it twice.
-            showCount: false,
-            active: !atRest || filters.months.isEmpty,
-            onChanged: (Set<YearMonth> months) =>
-                onFiltersChanged(filters.copyWith(months: months)),
-          ),
-          if (onlyMonth != null)
-            IconButton(
-              tooltip: 'Next month',
-              icon: const Icon(Icons.chevron_right),
-              visualDensity: VisualDensity.compact,
-              // Offering the future is offering the empty.
-              onPressed: onlyMonth.compareTo(currentMonth) < 0
-                  ? () => onFiltersChanged(
-                      filters.copyWith(months: <YearMonth>{onlyMonth.plus(1)}))
-                  : null,
-            ),
-          _FacetMenu<int>(
-            label: 'Category',
-            icon: Icons.label_outline,
-            options:
-                categoryChoices.map((ExpenseCategory c) => c.id).toList(),
-            selected: filters.categoryIds,
-            optionLabel: (int id) => _categoryName(id),
-            optionLeading: (int id) =>
-                Icon(categoryIcon(_categoryName(id)), size: 18),
-            onChanged: (Set<int> picked) =>
-                onFiltersChanged(filters.copyWith(categoryIds: picked)),
-          ),
-          _FacetMenu<String>(
-            label: 'Merchant',
-            icon: Icons.storefront_outlined,
-            options: merchantChoices,
-            selected: filters.merchants,
-            optionLabel: (String m) => m,
-            // The one facet that runs to hundreds of entries, so it gets a way to
-            // find one without scrolling the lot.
-            searchable: true,
-            onChanged: (Set<String> picked) =>
-                onFiltersChanged(filters.copyWith(merchants: picked)),
-          ),
-          _FacetMenu<String>(
-            label: 'Card / account',
-            icon: Icons.credit_card,
-            options: paymentTypeChoices,
-            selected: <String>{?filters.paymentType},
-            optionLabel: (String t) => t,
-            // One at a time, unlike the other two — `LedgerFilters.paymentType`
-            // is a single field, and always has been.
-            single: true,
-            onChanged: (Set<String> picked) => onFiltersChanged(
-              picked.isEmpty
-                  // `clearPaymentType`, because passing null cannot say whether
-                  // it means "leave it" or "drop it".
-                  ? filters.copyWith(clearPaymentType: true)
-                  : filters.copyWith(paymentType: picked.first),
-            ),
-          ),
-          // Dead rather than absent when there is nothing to clear: a button that
-          // comes and goes reshuffles the whole toolbar behind it, and it has to
-          // be visible before it is needed or nobody learns it is there.
-          TextButton.icon(
-            icon: const Icon(Icons.filter_alt_off_outlined, size: 18),
-            label: const Text('Clear all'),
-            onPressed: atRest
-                ? null
-                : () => onFiltersChanged(LedgerFilters.defaults(currentMonth)),
+          ActiveFiltersBar(
+            filters: filters,
+            currentMonth: currentMonth,
+            categoryChoices: categoryChoices,
+            onFiltersChanged: onFiltersChanged,
           ),
         ],
       ),
@@ -823,14 +806,9 @@ class _FilterToolbar extends StatelessWidget {
 
 /// A facet as a dropdown: a button that says what is picked, and a menu of the
 /// options with the picked ones ticked.
-///
-/// Generic over the option type because all four facets ask the same question of
-/// different things, and four copies of a menu is four places for one of them to
-/// start behaving differently.
 class _FacetMenu<T> extends StatefulWidget {
   const _FacetMenu({
     required this.label,
-    required this.icon,
     required this.options,
     required this.selected,
     required this.optionLabel,
@@ -839,29 +817,20 @@ class _FacetMenu<T> extends StatefulWidget {
     this.searchable = false,
     this.single = false,
     this.showCount = true,
+    this.count,
     this.active,
   });
 
   final String label;
-  final IconData icon;
   final List<T> options;
   final Set<T> selected;
   final String Function(T) optionLabel;
   final Widget Function(T)? optionLeading;
   final ValueChanged<Set<T>> onChanged;
-
-  /// A filter box inside the menu, for a list too long to scan.
   final bool searchable;
-
-  /// One option at a time. Tapping the picked one clears it.
   final bool single;
-
-  /// Whether to suffix the button with how many are picked. False where the label
-  /// already carries it.
   final bool showCount;
-
-  /// Whether the button reads as filtering. Defaults to "something is selected",
-  /// which is wrong only for the month, where an *empty* set is the unusual case.
+  final int? count;
   final bool? active;
 
   @override
@@ -869,10 +838,7 @@ class _FacetMenu<T> extends StatefulWidget {
 }
 
 class _FacetMenuState<T> extends State<_FacetMenu<T>> {
-  /// Local, and the only state in the toolbar: it is about the menu, not about
-  /// the ledger, and the shell has no business knowing it.
   String _query = '';
-
   final MenuController _controller = MenuController();
 
   List<T> get _shown {
@@ -885,6 +851,7 @@ class _FacetMenuState<T> extends State<_FacetMenu<T>> {
 
   void _toggle(T option) {
     if (widget.single) {
+      _controller.close();
       widget.onChanged(
         widget.selected.contains(option) ? <T>{} : <T>{option},
       );
@@ -899,12 +866,10 @@ class _FacetMenuState<T> extends State<_FacetMenu<T>> {
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final bool active = widget.active ?? widget.selected.isNotEmpty;
-    final int count = widget.selected.length;
+    final int count = widget.count ?? widget.selected.length;
 
     return MenuAnchor(
       controller: _controller,
-      // Cleared on close so the next open starts on the whole list rather than
-      // wherever the last search left it.
       onClose: () {
         if (_query.isNotEmpty) setState(() => _query = '');
       },
@@ -951,64 +916,50 @@ class _FacetMenuState<T> extends State<_FacetMenu<T>> {
                 )
               else
                 SizedBox(
-                  // Exact, not shrink-wrapped: see [_kMenuRowHeight].
                   height:
                       (_shown.length * _kMenuRowHeight).clamp(0, _kMenuMaxHeight),
                   child: ListView.builder(
-                        // Every row is the same height, so say so â it is what
-                        // lets the box above be sized without measuring, and it
-                        // saves the list laying each child out to find out.
-                        itemExtent: _kMenuRowHeight,
-                        // Not the primary scrollable. `MenuAnchor` wraps its panel
-                        // in a `Scrollbar`, which asserts if the controller it
-                        // finds has two positions attached â and the table behind
-                        // this menu is a scrollable too.
-                        primary: false,
-                        itemCount: _shown.length,
-                        itemBuilder: (BuildContext context, int index) {
-                          final T option = _shown[index];
-                          final bool on = widget.selected.contains(option);
+                    itemExtent: _kMenuRowHeight,
+                    primary: false,
+                    itemCount: _shown.length,
+                    itemBuilder: (BuildContext context, int index) {
+                      final T option = _shown[index];
+                      final bool on = widget.selected.contains(option);
 
-                          // A radio for the single-select facet and a checkbox
-                          // for the rest, because that is what each one means —
-                          // and the same idiom the device picker in the app bar
-                          // already uses.
-                          return ListTile(
-                            dense: true,
-                            leading: widget.single
-                                ? Icon(
-                                    on
-                                        ? Icons.radio_button_checked
-                                        : Icons.radio_button_unchecked,
-                                    size: 18,
-                                  )
-                                : Icon(
-                                    on
-                                        ? Icons.check_box
-                                        : Icons.check_box_outline_blank,
-                                    size: 18,
-                                  ),
-                            title: Row(
-                              children: <Widget>[
-                                if (widget.optionLeading != null) ...<Widget>[
-                                  widget.optionLeading!(option),
-                                  const SizedBox(width: 8),
-                                ],
-                                Expanded(
-                                  child: Text(
-                                    widget.optionLabel(option),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ],
+                      return ListTile(
+                        dense: true,
+                        leading: widget.single
+                            ? Icon(
+                                on
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_unchecked,
+                                size: 18,
+                              )
+                            : Icon(
+                                on
+                                    ? Icons.check_box
+                                    : Icons.check_box_outline_blank,
+                                size: 18,
+                              ),
+                        title: Row(
+                          children: <Widget>[
+                            if (widget.optionLeading != null) ...<Widget>[
+                              widget.optionLeading!(option),
+                              const SizedBox(width: 8),
+                            ],
+                            Expanded(
+                              child: Text(
+                                widget.optionLabel(option),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
-                            // The menu stays open: ticking three categories is
-                            // one gesture, not three trips back to the button.
-                            onTap: () => _toggle(option),
-                          );
-                        },
-                      ),
+                          ],
+                        ),
+                        onTap: () => _toggle(option),
+                      );
+                    },
+                  ),
                 ),
               const SizedBox(height: 8),
             ],
@@ -1016,41 +967,14 @@ class _FacetMenuState<T> extends State<_FacetMenu<T>> {
         ),
       ],
       builder: (BuildContext context, MenuController controller, Widget? _) {
-        final ButtonStyle style = active
-            ? FilledButton.styleFrom(
-                backgroundColor: theme.colorScheme.secondaryContainer,
-                foregroundColor: theme.colorScheme.onSecondaryContainer,
-              )
-            : OutlinedButton.styleFrom(
-                foregroundColor: theme.colorScheme.onSurface,
-              );
-
-        final Widget label = Text(
-          widget.showCount && count > 1
-              ? '${widget.label} · $count'
-              : widget.label,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        );
-
         void onPressed() =>
             controller.isOpen ? controller.close() : controller.open();
 
-        return ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 260),
-          child: active
-              ? FilledButton.icon(
-                  style: style,
-                  onPressed: onPressed,
-                  icon: Icon(widget.icon, size: 18),
-                  label: label,
-                )
-              : OutlinedButton.icon(
-                  style: style,
-                  onPressed: onPressed,
-                  icon: Icon(widget.icon, size: 18),
-                  label: label,
-                ),
+        return FilterTriggerButton(
+          label: widget.label,
+          count: widget.showCount ? count : 0,
+          active: active,
+          onPressed: onPressed,
         );
       },
     );

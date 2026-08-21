@@ -615,8 +615,15 @@ void main() {
 
     test('filters by card or account alone', () {
       expect(
-        idsOf(applyFilters(ledger, paymentType: 'HDFC Bank A/C *0444')),
+        idsOf(applyFilters(ledger, paymentTypes: <String>{'HDFC Bank A/C *0444'})),
         <int>[2, 4],
+      );
+    });
+
+    test('filters by multiple cards at once as an OR within the facet', () {
+      expect(
+        idsOf(applyFilters(ledger, paymentTypes: <String>{'YES BANK Card X2858', 'HDFC Bank A/C *0444'})),
+        <int>[1, 2, 3, 4],
       );
     });
 
@@ -643,7 +650,7 @@ void main() {
         idsOf(applyFilters(
           ledger,
           categoryIds: <int>{2},
-          paymentType: 'YES BANK Card X2858',
+          paymentTypes: <String>{'YES BANK Card X2858'},
         )),
         <int>[1],
       );
@@ -654,7 +661,7 @@ void main() {
         applyFilters(
           ledger,
           categoryIds: <int>{3}, // Fuel, only ever on the YES card
-          paymentType: 'HDFC Bank A/C *0444',
+          paymentTypes: <String>{'HDFC Bank A/C *0444'},
         ),
         isEmpty,
       );
@@ -1000,7 +1007,7 @@ void main() {
         // is the current month.
         expect(
           monthOptions(spread, current: august, categoryIds: <int>{3},
-              paymentType: 'X'),
+              paymentTypes: <String>{'X'}),
           <YearMonth>[august, const YearMonth(2026, 6)],
         );
       });
@@ -1950,7 +1957,7 @@ void main() {
       for (final LedgerFilters filters in <LedgerFilters>[
         LedgerFilters(months: <YearMonth>{august}, categoryIds: <int>{3}),
         LedgerFilters(months: <YearMonth>{august}, merchants: <String>{'Amazon'}),
-        LedgerFilters(months: <YearMonth>{august}, paymentType: 'HDFC'),
+        LedgerFilters(months: <YearMonth>{august}, paymentTypes: <String>{'HDFC'}),
         LedgerFilters(months: <YearMonth>{august}, query: 'fuel'),
       ]) {
         expect(filters.isDefaultFor(august), isFalse);
@@ -1962,7 +1969,7 @@ void main() {
         months: <YearMonth>{july},
         categoryIds: <int>{3, 4},
         merchants: <String>{'Amazon'},
-        paymentType: 'HDFC Bank A/c *0444',
+        paymentTypes: <String>{'HDFC Bank A/c *0444'},
         query: 'fuel',
       );
       expect(busy.isDefaultFor(august), isFalse);
@@ -1971,7 +1978,7 @@ void main() {
       expect(cleared.isDefaultFor(august), isTrue);
       expect(cleared.categoryIds, isEmpty);
       expect(cleared.merchants, isEmpty);
-      expect(cleared.paymentType, isNull);
+      expect(cleared.paymentTypes, isEmpty);
       expect(cleared.query, isEmpty);
       expect(cleared.months, <YearMonth>{august});
     });
@@ -2829,6 +2836,142 @@ void main() {
       await tester.tapAt(const Offset(10, 10));
       await tester.pumpAndSettle();
       expect(answers, <bool>[false]);
+    });
+  });
+
+  group('Filter Controls and Tokens', () {
+    testWidgets('FilterTriggerButton renders inactive and active states with count badge',
+        (WidgetTester tester) async {
+      int tapped = 0;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: Row(
+            children: <Widget>[
+              FilterTriggerButton(
+                label: 'Classification',
+                count: 0,
+                active: false,
+                onPressed: () => tapped++,
+              ),
+              FilterTriggerButton(
+                label: 'Entity',
+                count: 3,
+                active: true,
+                onPressed: () => tapped++,
+              ),
+            ],
+          ),
+        ),
+      ));
+
+      expect(find.text('Classification'), findsOneWidget);
+      expect(find.text('Entity'), findsOneWidget);
+      expect(find.text('3'), findsOneWidget);
+
+      await tester.tap(find.text('Classification'));
+      await tester.pump();
+      expect(tapped, 1);
+    });
+
+    testWidgets('ActiveFiltersBar renders token chips and triggers callback on delete',
+        (WidgetTester tester) async {
+      LedgerFilters current = LedgerFilters(
+        months: <YearMonth>{const YearMonth(2026, 8)},
+        categoryIds: const <int>{2},
+        merchants: const <String>{'SWIGGY'},
+        paymentTypes: const <String>{'YES BANK Card X2858'},
+        query: 'dinner',
+      );
+
+      final List<ExpenseCategory> categories = <ExpenseCategory>[
+        const ExpenseCategory(id: 1, name: 'Uncategorized'),
+        const ExpenseCategory(id: 2, name: 'Grocery'),
+      ];
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: StatefulBuilder(
+            builder: (BuildContext context, StateSetter setState) {
+              return ActiveFiltersBar(
+                filters: current,
+                currentMonth: const YearMonth(2026, 8),
+                categoryChoices: categories,
+                onFiltersChanged: (LedgerFilters f) => setState(() => current = f),
+              );
+            },
+          ),
+        ),
+      ));
+
+      // Chips for query, category, merchant, card should be visible
+      expect(find.text('"dinner"'), findsOneWidget);
+      expect(find.text('Grocery'), findsOneWidget);
+      expect(find.text('SWIGGY'), findsOneWidget);
+      expect(find.text('YES BANK Card X2858'), findsOneWidget);
+      expect(find.text('Clear all'), findsOneWidget);
+
+      // Remove Grocery chip
+      final Finder closeButtons = find.byIcon(Icons.close);
+      expect(closeButtons, findsNWidgets(4));
+
+      // Tap close on first chip (dinner)
+      await tester.tap(closeButtons.first);
+      await tester.pumpAndSettle();
+
+      expect(find.text('"dinner"'), findsNothing);
+      expect(current.query, isEmpty);
+
+      // Tap Clear all
+      await tester.tap(find.text('Clear all'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ActiveFilterChipToken), findsNothing);
+      expect(current.isDefaultFor(const YearMonth(2026, 8)), isTrue);
+    });
+
+    test('paymentTypeOptions narrows to cards matching selected merchant and category', () {
+      final List<ExpenseTxn> transactions = <ExpenseTxn>[
+        ExpenseTxn(
+          id: 1,
+          date: DateTime(2026, 8, 10),
+          amount: 500,
+          merchant: 'SWIGGY',
+          categoryId: 2,
+          categoryName: 'Food',
+          paymentType: 'Card Alpha',
+          direction: TxnDirection.debit,
+          reference: 'ref1',
+        ),
+        ExpenseTxn(
+          id: 2,
+          date: DateTime(2026, 8, 12),
+          amount: 1500,
+          merchant: 'AMAZON',
+          categoryId: 3,
+          categoryName: 'Shopping',
+          paymentType: 'Card Beta',
+          direction: TxnDirection.debit,
+          reference: 'ref2',
+        ),
+      ];
+
+      // Unfiltered shows all cards
+      expect(
+        paymentTypeOptions(transactions),
+        <String>['Card Alpha', 'Card Beta'],
+      );
+
+      // Filtering by merchant SWIGGY only offers Card Alpha
+      expect(
+        paymentTypeOptions(transactions, merchants: <String>{'SWIGGY'}),
+        <String>['Card Alpha'],
+      );
+
+      // Filtering by merchant AMAZON only offers Card Beta
+      expect(
+        paymentTypeOptions(transactions, merchants: <String>{'AMAZON'}),
+        <String>['Card Beta'],
+      );
     });
   });
 }

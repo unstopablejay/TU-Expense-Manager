@@ -1,9 +1,8 @@
-/// Controls both the dashboard and the transactions list are built from.
-library;
-
 import 'package:flutter/material.dart';
 
+import '../core/constants.dart';
 import '../core/ledger.dart';
+import '../core/models.dart';
 
 
 /// Lets the user tick several of [options] at once, returning the new selection
@@ -18,6 +17,7 @@ Future<Set<T>?> chooseMany<T>(
   required Set<T> selected,
   required String Function(T) label,
   Widget Function(T)? leading,
+  bool single = false,
 }) =>
     showModalBottomSheet<Set<T>>(
       context: context,
@@ -29,6 +29,7 @@ Future<Set<T>?> chooseMany<T>(
         selected: selected,
         label: label,
         leading: leading,
+        single: single,
       ),
     );
 
@@ -140,6 +141,7 @@ class _MultiSelectSheet<T> extends StatefulWidget {
     required this.selected,
     required this.label,
     this.leading,
+    this.single = false,
   });
 
   final String title;
@@ -147,6 +149,7 @@ class _MultiSelectSheet<T> extends StatefulWidget {
   final Set<T> selected;
   final String Function(T) label;
   final Widget Function(T)? leading;
+  final bool single;
 
   @override
   State<_MultiSelectSheet<T>> createState() => _MultiSelectSheetState<T>();
@@ -192,8 +195,35 @@ class _MultiSelectSheetState<T> extends State<_MultiSelectSheet<T>> {
                     itemCount: widget.options.length,
                     itemBuilder: (BuildContext context, int index) {
                       final T option = widget.options[index];
+                      final bool isSelected = _selected.contains(option);
+                      if (widget.single) {
+                        final Widget radioIcon = Icon(
+                          isSelected
+                              ? Icons.radio_button_checked
+                              : Icons.radio_button_unchecked,
+                          color: isSelected
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.outline,
+                        );
+                        return ListTile(
+                          leading: widget.leading?.call(option) ?? radioIcon,
+                          trailing: widget.leading != null ? radioIcon : null,
+                          title: Text(
+                            widget.label(option),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          onTap: () => setState(() {
+                            if (isSelected) {
+                              _selected = <T>{};
+                            } else {
+                              _selected = <T>{option};
+                            }
+                          }),
+                        );
+                      }
                       return CheckboxListTile(
-                        value: _selected.contains(option),
+                        value: isSelected,
                         secondary: widget.leading?.call(option),
                         title: Text(
                           widget.label(option),
@@ -229,4 +259,316 @@ class _MultiSelectSheetState<T> extends State<_MultiSelectSheet<T>> {
   }
 }
 
-/// What a row slides away to reveal: the delete it is on its way to.
+/// A modern trigger button for filters and facets with active pill styling,
+/// count badge, and chevron icon.
+class FilterTriggerButton extends StatelessWidget {
+  const FilterTriggerButton({
+    super.key,
+    required this.label,
+    this.count = 0,
+    this.active = false,
+    this.leading,
+    this.onPressed,
+  });
+
+  final String label;
+  final int count;
+  final bool active;
+  final Widget? leading;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final bool isDark = theme.brightness == Brightness.dark;
+    final bool isActive = active || count > 0;
+
+    final Color bgColor = isActive
+        ? (isDark
+            ? theme.colorScheme.primaryContainer.withValues(alpha: 0.4)
+            : const Color(0xFFE8F1FC))
+        : Colors.transparent;
+
+    final Color fgColor = isActive
+        ? (isDark
+            ? theme.colorScheme.onPrimaryContainer
+            : const Color(0xFF1E3A8A))
+        : theme.colorScheme.onSurfaceVariant;
+
+    return Material(
+      color: bgColor,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              if (leading != null) ...<Widget>[
+                leading!,
+                const SizedBox(width: 6),
+              ],
+              Text(
+                label,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  fontWeight: isActive ? FontWeight.w600 : FontWeight.w500,
+                  color: fgColor,
+                  fontSize: 13.5,
+                ),
+              ),
+              if (count > 0) ...<Widget>[
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? theme.colorScheme.surfaceContainerHighest
+                        : Colors.white,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: isDark
+                          ? theme.colorScheme.outlineVariant
+                          : const Color(0xFFBFDBFE),
+                      width: 1,
+                    ),
+                  ),
+                  child: Text(
+                    '$count',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: fgColor,
+                      height: 1.1,
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(width: 4),
+              Icon(
+                Icons.keyboard_arrow_down,
+                size: 18,
+                color: fgColor,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A removable active filter token chip with border and close icon.
+class ActiveFilterChipToken extends StatelessWidget {
+  const ActiveFilterChipToken({
+    super.key,
+    required this.label,
+    required this.onDeleted,
+    this.leading,
+  });
+
+  final String label;
+  final VoidCallback onDeleted;
+  final Widget? leading;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final bool isDark = theme.brightness == Brightness.dark;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: isDark ? theme.colorScheme.surfaceContainerLow : Colors.white,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(
+          color: isDark
+              ? theme.colorScheme.outlineVariant
+              : const Color(0xFFE2E8F0),
+          width: 1,
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(8, 4, 4, 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          if (leading != null) ...<Widget>[
+            leading!,
+            const SizedBox(width: 4),
+          ],
+          Text(
+            label,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurface,
+              fontWeight: FontWeight.w500,
+              fontSize: 12.5,
+            ),
+          ),
+          const SizedBox(width: 2),
+          InkWell(
+            onTap: onDeleted,
+            borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.all(3),
+              child: Icon(
+                Icons.close,
+                size: 13,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Displays the active filter chips row along with the 'Clear all' button.
+class ActiveFiltersBar extends StatelessWidget {
+  const ActiveFiltersBar({
+    super.key,
+    required this.filters,
+    required this.currentMonth,
+    required this.categoryChoices,
+    required this.onFiltersChanged,
+  });
+
+  final LedgerFilters filters;
+  final YearMonth currentMonth;
+  final List<ExpenseCategory> categoryChoices;
+  final ValueChanged<LedgerFilters> onFiltersChanged;
+
+  String _categoryName(int id) => categoryChoices
+      .firstWhere((ExpenseCategory c) => c.id == id,
+          orElse: () => const ExpenseCategory(id: -1, name: kUncategorized))
+      .name;
+
+  @override
+  Widget build(BuildContext context) {
+    final ThemeData theme = Theme.of(context);
+    final bool isDark = theme.brightness == Brightness.dark;
+
+    final List<Widget> chips = <Widget>[];
+
+    // Search query
+    if (filters.query.trim().isNotEmpty) {
+      chips.add(
+        ActiveFilterChipToken(
+          label: '"${filters.query.trim()}"',
+          onDeleted: () => onFiltersChanged(filters.copyWith(query: '')),
+        ),
+      );
+    }
+
+    // Months (if non-default)
+    final bool isDefaultMonths =
+        filters.months.length == 1 && filters.months.contains(currentMonth);
+    if (!isDefaultMonths) {
+      if (filters.months.isEmpty) {
+        chips.add(
+          ActiveFilterChipToken(
+            label: 'All time',
+            onDeleted: () => onFiltersChanged(
+              filters.copyWith(months: <YearMonth>{currentMonth}),
+            ),
+          ),
+        );
+      } else {
+        for (final YearMonth m in filters.months) {
+          chips.add(
+            ActiveFilterChipToken(
+              label: m.label,
+              onDeleted: () {
+                final Set<YearMonth> next = <YearMonth>{...filters.months}..remove(m);
+                onFiltersChanged(filters.copyWith(
+                  months: next.isEmpty ? <YearMonth>{currentMonth} : next,
+                ));
+              },
+            ),
+          );
+        }
+      }
+    }
+
+    // Categories
+    for (final int id in filters.categoryIds) {
+      final String name = _categoryName(id);
+      chips.add(
+        ActiveFilterChipToken(
+          label: name,
+          onDeleted: () {
+            final Set<int> next = <int>{...filters.categoryIds}..remove(id);
+            onFiltersChanged(filters.copyWith(categoryIds: next));
+          },
+        ),
+      );
+    }
+
+    // Merchants
+    for (final String m in filters.merchants) {
+      chips.add(
+        ActiveFilterChipToken(
+          label: m,
+          onDeleted: () {
+            final Set<String> next = <String>{...filters.merchants}..remove(m);
+            onFiltersChanged(filters.copyWith(merchants: next));
+          },
+        ),
+      );
+    }
+
+    // Payment Types (Cards / Accounts)
+    for (final String pt in filters.paymentTypes) {
+      chips.add(
+        ActiveFilterChipToken(
+          label: pt,
+          onDeleted: () {
+            final Set<String> next = <String>{...filters.paymentTypes}
+              ..remove(pt);
+            onFiltersChanged(filters.copyWith(paymentTypes: next));
+          },
+        ),
+      );
+    }
+
+    if (chips.isEmpty) return const SizedBox.shrink();
+
+    final Widget clearAllButton = OutlinedButton(
+      style: OutlinedButton.styleFrom(
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        minimumSize: Size.zero,
+        side: BorderSide(
+          color: isDark
+              ? theme.colorScheme.outlineVariant
+              : const Color(0xFFD1D5DB),
+        ),
+        foregroundColor: theme.colorScheme.onSurface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(6),
+        ),
+      ),
+      onPressed: () => onFiltersChanged(LedgerFilters.defaults(currentMonth)),
+      child: const Text('Clear all', style: TextStyle(fontSize: 12)),
+    );
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: <Widget>[
+          Expanded(
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: chips,
+            ),
+          ),
+          const SizedBox(width: 8),
+          clearAllButton,
+        ],
+      ),
+    );
+  }
+}

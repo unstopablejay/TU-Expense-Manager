@@ -22,6 +22,7 @@ class _LoginScreenState extends State<LoginScreen> {
   final FocusNode _passwordFocus = FocusNode();
 
   bool _busy = false;
+  bool _obscurePassword = true;
   String? _error;
 
   @override
@@ -115,11 +116,23 @@ class _LoginScreenState extends State<LoginScreen> {
                       controller: _password,
                       focusNode: _passwordFocus,
                       enabled: !_busy,
-                      obscureText: true,
+                      obscureText: _obscurePassword,
                       autofillHints: const <String>[AutofillHints.password],
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Password',
-                        border: OutlineInputBorder(),
+                        border: const OutlineInputBorder(),
+                        suffixIcon: IconButton(
+                          icon: Icon(
+                            _obscurePassword
+                                ? Icons.visibility_outlined
+                                : Icons.visibility_off_outlined,
+                          ),
+                          tooltip: _obscurePassword
+                              ? 'Show password'
+                              : 'Hide password',
+                          onPressed: () => setState(
+                              () => _obscurePassword = !_obscurePassword),
+                        ),
                       ),
                       // So a password manager and the Enter key both work, which
                       // is most of what makes a login form bearable.

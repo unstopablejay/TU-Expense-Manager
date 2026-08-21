@@ -32,13 +32,12 @@ LedgerView deriveLedgerView({
   required YearMonth currentMonth,
   required LedgerSort sort,
 }) {
-  // Every card and account within the chosen months. Derived from the loaded
-  // rows rather than queried, so it stays in step with the list for free.
-  final List<String> paymentTypes = applyFilters(
+  final List<String> paymentTypes = paymentTypeOptions(
     transactions,
     months: requested.months,
-  ).map((LedgerEntry e) => e.txn.paymentType).toSet().toList()
-    ..sort();
+    categoryIds: requested.categoryIds,
+    merchants: requested.merchants,
+  );
 
   // Each facet offers what the *other* filters leave available, so they
   // narrow each other without any one being able to empty itself out from
@@ -56,13 +55,13 @@ LedgerView deriveLedgerView({
     allCategories,
     months: requested.months,
     merchants: requested.merchants,
-    paymentType: requested.paymentType,
+    paymentTypes: requested.paymentTypes,
   );
   final List<String> merchants = merchantOptions(
     transactions,
     months: requested.months,
     categoryIds: requested.categoryIds,
-    paymentType: requested.paymentType,
+    paymentTypes: requested.paymentTypes,
   );
   final List<YearMonth> months = monthOptions(
     transactions,
@@ -70,7 +69,7 @@ LedgerView deriveLedgerView({
     keep: requested.months,
     categoryIds: requested.categoryIds,
     merchants: requested.merchants,
-    paymentType: requested.paymentType,
+    paymentTypes: requested.paymentTypes,
   );
 
   // A selection can outlive its data — delete the last transaction on a card
@@ -82,9 +81,7 @@ LedgerView deriveLedgerView({
       categories.map((ExpenseCategory c) => c.id),
     ),
     merchants: pruneSelection(requested.merchants, merchants),
-    paymentType: paymentTypes.contains(requested.paymentType)
-        ? requested.paymentType
-        : null,
+    paymentTypes: pruneSelection(requested.paymentTypes, paymentTypes),
     // Carried, never pruned — and this is the load-bearing line of the whole
     // month feature. For the other facets a stale selection means filtering
     // on a value nothing carries. A month matching nothing is not stale:
@@ -108,7 +105,7 @@ LedgerView deriveLedgerView({
         months: filters.months,
         categoryIds: filters.categoryIds,
         merchants: filters.merchants,
-        paymentType: filters.paymentType,
+        paymentTypes: filters.paymentTypes,
         query: filters.query,
       ),
       sort,
