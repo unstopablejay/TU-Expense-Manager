@@ -86,6 +86,17 @@ class BackupData {
     required this.meta,
   });
 
+  factory BackupData.empty() => const BackupData(
+        categories: <Map<String, Object?>>[],
+        merchantMappings: <Map<String, Object?>>[],
+        transactions: <Map<String, Object?>>[],
+        splits: <Map<String, Object?>>[],
+        deleted: <Map<String, Object?>>[],
+        aliases: <Map<String, Object?>>[],
+        appMeta: <Map<String, Object?>>[],
+        meta: <String, String>{},
+      );
+
   final List<Map<String, Object?>> categories;
   final List<Map<String, Object?>> merchantMappings;
   final List<Map<String, Object?>> transactions;

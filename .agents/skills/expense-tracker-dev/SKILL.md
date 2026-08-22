@@ -130,6 +130,22 @@ docker run -d \
 > - **Do NOT use `localhost`** (it routes to the Android emulator itself).
 > - Use the Android emulator loopback alias: **`http://10.0.2.2:8099`** or the Mac's LAN IP (e.g., `http://192.168.1.x:8099`).
 
+### Automated Rolling Backup & Restore Architecture
+- **Scheduled Auto-Backup**: `BackupScheduler` runs daily at 21:00 (9:00 PM) local container time (`TZ`), configurable via `BACKUP_HOUR` and `BACKUP_MINUTE` env vars.
+- **Atomic Bundle & Rolling Retention**: `BackupManager` packages full server state (`users.json`, `sessions.json`, and all device subtrees) into `/data/backups/backup_<timestamp>.json`, enforcing a 10-slot rolling FIFO cap (oldest auto/manual snapshot deleted upon the 11th).
+- **API Surface**:
+  - `GET /api/v1/backups`: Lists snapshots and schedule status.
+  - `POST /api/v1/backups`: Creates on-demand server snapshot.
+  - `POST /api/v1/backups/<id>/restore`: Performs safe server state restoration.
+- **Safety Shield on Restore**:
+  - Server automatically creates a pre-restore safety copy (`safety_...`) before applying the archive.
+  - Mobile app takes a local database safety export before overwriting local SQLite state with restored snapshot data.
+  - Safety copies do not count towards the 10 rolling auto-save slots.
+- **CLI Trigger**:
+  ```bash
+  docker exec -it tu-expense-server /app/server --backup-now
+  ```
+
 ---
 
 ## 7. Developer Workflows & Commands

@@ -19,6 +19,8 @@ import 'package:shelf/shelf_io.dart' as shelf_io;
 
 import 'package:tu_expense_server/api.dart';
 import 'package:tu_expense_server/auth.dart';
+import 'package:tu_expense_server/backup_manager.dart';
+import 'package:tu_expense_server/backup_scheduler.dart';
 import 'package:tu_expense_server/config.dart';
 import 'package:tu_expense_server/edit_queue.dart';
 import 'package:tu_expense_server/json_store.dart';
@@ -34,6 +36,9 @@ Future<void> main(List<String> argv) async {
     ..addOption('add-user', help: 'Create an account with this username.')
     ..addOption('set-password', help: "Change an account's password.")
     ..addFlag('list-users', negatable: false)
+    ..addFlag('backup-now',
+        negatable: false,
+        help: 'Take an immediate full server backup snapshot, then exit.')
     ..addOption('password',
         help: 'Supply the password instead of being prompted. Visible in the '
             'process list and the shell history, so prefer the prompt.')
@@ -69,6 +74,24 @@ Future<void> main(List<String> argv) async {
   final Paths paths = Paths(config.dataDir);
   final WriteLock lock = WriteLock();
   final AuthStore auth = AuthStore(paths, lock);
+  final BackupManager backupManager = BackupManager(
+    paths: paths,
+    lock: lock,
+    backupDir: config.backupDir,
+    keep: config.backupKeep,
+    serverVersion: kVersion,
+  );
+
+  if (args.flag('backup-now')) {
+    stdout.writeln('Creating on-demand server backup snapshot...');
+    final BackupItem item = await backupManager.createBackup(
+      type: 'manual',
+      note: 'Manual CLI snapshot trigger',
+    );
+    stdout.writeln('Backup created: ${item.id} (${item.bytes} bytes, '
+        '${item.counts['transactions'] ?? 0} transactions)');
+    return;
+  }
 
   if (args.option('add-user') case final String username) {
     exit(await _addUser(auth, username, args.option('password')));
@@ -83,7 +106,7 @@ Future<void> main(List<String> argv) async {
     return;
   }
 
-  await _serve(config, paths, lock, auth);
+  await _serve(config, paths, lock, auth, backupManager);
 }
 
 Future<void> _serve(
@@ -91,6 +114,7 @@ Future<void> _serve(
   Paths paths,
   WriteLock lock,
   AuthStore auth,
+  BackupManager backupManager,
 ) async {
   await paths.root.create(recursive: true);
 
@@ -112,11 +136,21 @@ Future<void> _serve(
     exit(78);
   }
 
+  final BackupScheduler scheduler = BackupScheduler(
+    manager: backupManager,
+    hour: config.backupScheduleHour,
+    minute: config.backupScheduleMinute,
+    enabled: config.backupEnabled,
+  );
+  scheduler.start();
+
   final Api api = Api(
     config: config,
     auth: auth,
     snapshots: SnapshotStore(paths, lock, keep: config.snapshotKeep),
     edits: EditQueueStore(paths, lock, expiry: config.editExpiry),
+    backupManager: backupManager,
+    scheduler: scheduler,
     version: kVersion,
   );
 
@@ -148,6 +182,7 @@ Future<void> _serve(
   ]) {
     signal.watch().listen((_) async {
       stdout.writeln('shutting down');
+      scheduler.cancel();
       await server.close(force: false);
       exit(0);
     });
