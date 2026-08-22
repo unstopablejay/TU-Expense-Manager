@@ -324,7 +324,23 @@ class _SplitScreenState extends State<SplitScreen> {
                         balanced && complete && positive && !_saving
                             ? _save
                             : null,
-                    child: const Text('Save'),
+                    child: _saving
+                        ? const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: <Widget>[
+                              SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              SizedBox(width: 8),
+                              Text('Saving…'),
+                            ],
+                          )
+                        : const Text('Save'),
                   ),
                 ],
               ),

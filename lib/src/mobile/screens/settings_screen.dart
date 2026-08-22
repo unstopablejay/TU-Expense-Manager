@@ -14,6 +14,7 @@ import '../../core/aliases.dart';
 import '../../core/backup_data.dart';
 import '../../core/backup_validate.dart';
 import '../../core/constants.dart';
+import '../../ui_shared/loading_dialog.dart';
 import '../auto_sync.dart';
 import '../backup_dialogs.dart';
 import '../backup_files.dart';
@@ -175,7 +176,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
     setState(() => _syncing = true);
     try {
-      final SyncOutcome result = await SyncClient.instance.testConnection(base);
+      final SyncOutcome result = await withLoadingModal<SyncOutcome>(
+        context: context,
+        message: 'Testing connection…',
+        subtitle: 'Checking server address…',
+        task: () => SyncClient.instance.testConnection(base),
+      );
       // Whatever this found is what the light should be showing, immediately —
       // testing the connection is the one action whose whole purpose is to
       // answer that question.
@@ -198,14 +204,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     final (String, String)? credentials = await _askForCredentials();
-    if (credentials == null) return;
+    if (credentials == null || !mounted) return;
 
     setState(() => _syncing = true);
     try {
-      final SyncOutcome result = await SyncClient.instance.signIn(
-        base: base,
-        username: credentials.$1,
-        password: credentials.$2,
+      final SyncOutcome result = await withLoadingModal<SyncOutcome>(
+        context: context,
+        message: 'Signing in…',
+        subtitle: 'Authenticating with server…',
+        task: () => SyncClient.instance.signIn(
+          base: base,
+          username: credentials.$1,
+          password: credentials.$2,
+        ),
       );
       if (!mounted) return;
       if (result.failed) {
@@ -234,7 +245,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _signOut() async {
     setState(() => _syncing = true);
     try {
-      await SyncClient.instance.signOut();
+      await withLoadingModal<void>(
+        context: context,
+        message: 'Signing out…',
+        task: SyncClient.instance.signOut,
+      );
       if (!mounted) return;
       setState(() {
         _syncUser = null;
@@ -250,10 +265,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (_busyWithData) return;
     setState(() => _syncing = true);
     try {
-      final SyncOutcome result = await SyncClient.instance.syncNow(
-        // A sync can apply edits made in a browser, so the shell has to know the
-        // ledger moved underneath it.
-        onChanged: widget.onChanged,
+      final SyncOutcome result = await withLoadingModal<SyncOutcome>(
+        context: context,
+        message: 'Syncing with server…',
+        subtitle: 'Uploading ledger and applying edits…',
+        task: () => SyncClient.instance.syncNow(
+          // A sync can apply edits made in a browser, so the shell has to know the
+          // ledger moved underneath it.
+          onChanged: widget.onChanged,
+        ),
       );
       // The light in the app bar is looking at the same server this just spoke
       // to, and a manual sync is the strongest evidence there is about it.
@@ -370,9 +390,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (_busyWithData) return;
     setState(() => _exporting = true);
     try {
-      final BackupData data = await AppDatabase.instance.exportAll();
-      final File file =
-          await writeBackup(data, backupFileName(DateTime.now()));
+      final (BackupData data, File file) =
+          await withLoadingModal<(BackupData, File)>(
+        context: context,
+        message: 'Exporting data…',
+        subtitle: 'Generating spreadsheet workbook…',
+        task: () async {
+          final BackupData d = await AppDatabase.instance.exportAll();
+          final File f =
+              await writeBackup(d, backupFileName(DateTime.now()));
+          return (d, f);
+        },
+      );
       if (!mounted) return;
       await SharePlus.instance.share(
         ShareParams(
@@ -407,7 +436,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _restoring = true);
     try {
       final (BackupData? backup, String? unreadable) =
-          await decodeBackupInBackground(await picked.readAsBytes());
+          await withLoadingModal<(BackupData?, String?)>(
+        context: context,
+        message: 'Reading backup…',
+        subtitle: 'Validating spreadsheet data…',
+        task: () async =>
+            decodeBackupInBackground(await picked.readAsBytes()),
+      );
       if (!mounted) return;
       if (backup == null) {
         await showBackupProblems(context, <String>[unreadable!]);
@@ -433,13 +468,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
       if (!go || !mounted) return;
 
-      // The one irreversible action in the app, made reversible. Written before
-      // the wipe rather than after, so a crash in between still leaves it.
-      final File safety = await writeBackup(
-        current,
-        backupFileName(DateTime.now(), beforeRestore: true),
+      final File safety = await withLoadingModal<File>(
+        context: context,
+        message: 'Restoring backup…',
+        subtitle: 'Saving safety copy and restoring records…',
+        task: () async {
+          final File s = await writeBackup(
+            current,
+            backupFileName(DateTime.now(), beforeRestore: true),
+          );
+          await AppDatabase.instance.replaceAll(backup);
+          return s;
+        },
       );
-      await AppDatabase.instance.replaceAll(backup);
       if (!mounted) return;
 
       await showDialog<void>(

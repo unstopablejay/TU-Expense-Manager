@@ -597,29 +597,42 @@ spending. Credit rows carry a `+` and a green amount in the list.
 ### Scanning
 
 - **First launch** reads the entire inbox automatically once the SMS permission is
-  granted — no button press needed.
+  granted — no button press needed. A themed **Loading Modal** featuring an animated 3D
+  spinning currency coin and capsule progress bar displays throughout initial intake to
+  provide clear visual feedback.
 - **Every launch after that** looks only at messages newer than the last one processed,
   using a real `WHERE` on the SMS content provider rather than re-reading everything.
 - The watermark advances to the newest message *actually seen*, not to the clock, so a
   skewed device time cannot strand real messages behind it. It only moves forwards, and
   only after a scan that completed — a scan that failed or was denied leaves it alone so
   the next attempt covers the same ground.
-- **Check for new SMS** (toolbar) runs that same incremental pass on demand.
+- **Check for new SMS** (toolbar) runs that same incremental pass on demand with a visual
+  loading modal.
 - **Rescan all messages** (overflow menu) ignores the watermark and re-reads the whole
-  inbox. Safe to run at any time — duplicates are caught by the natural-key index and
-  deleted rows by their tombstones. Worth doing after the parser learns a new template.
+  inbox inside a modal progress dialog. Safe to run at any time — duplicates are caught
+  by the natural-key index and deleted rows by their tombstones. Worth doing after the
+  parser learns a new template.
 
-Alerts arriving while the app is open are still picked up live by the foreground
-listener. It does not touch the watermark; a message it already inserted may be re-read
-by the next scan, where the natural key drops it.
+Alerts arriving while the app is open are picked up live by the foreground
+listener. Ingestion is protected by a multi-layer deduplication pipeline:
+- **In-Memory Listener Deduplication**: `SmsSource` maintains a sliding 60-second window
+  to ignore duplicate Android broadcasts from multi-part SMS or carrier re-deliveries.
+- **Serialized Intake Queue**: Live listener events and batch catch-up scans are serialized
+  in an asynchronous FIFO queue in `HomeShell`, preventing concurrent read/write race conditions.
+- **Database-Level Composite Deduplication**: `AppDatabase.insertParsed` enforces deduplication
+  not only by exact natural key `(amount, merchant, date, direction, reference)`, but also by
+  reference code uniqueness (`Refno` / `UTR` / `UPI Ref`) and time-window tolerance (±120 seconds
+  for identical amount, merchant, and direction) to prevent duplicate transactions caused by
+  carrier timestamp jitter or date-only clock fallbacks.
 
 ### Export, backup and restore
 
 **Settings → Data** holds both halves of one idea. **Export data** writes the whole
-database to an `.xlsx` workbook and hands it to the Android share sheet, which is how it
-reaches Drive — and from Drive, Google Sheets, which opens `.xlsx` natively with filters
-and pivots intact. **Restore from backup** reads one of those workbooks back over the
-top of everything.
+database to an `.xlsx` workbook (with a visual loading modal while generating the file)
+and hands it to the Android share sheet, which is how it reaches Drive — and from Drive,
+Google Sheets, which opens `.xlsx` natively with filters and pivots intact. **Restore from
+backup** reads one of those workbooks back over the top of everything, displaying a modal
+coin progress indicator while validating and rebuilding the database.
 
 It is deliberately *one* file rather than a pretty spreadsheet plus an opaque `.db`
 alongside it. A backup you can open, read and sanity-check is worth more than one you
@@ -667,8 +680,10 @@ rather than data.
 
 ## Testing
 
+> **Test-by-Default Policy**: Every new feature, UI enhancement, and bug fix in this repository is tested by default. Unit and widget tests must accompany all changes, and the full test suite must pass cleanly before any task is considered complete.
+
 ```bash
-flutter analyze
+dart analyze
 flutter test
 ```
 

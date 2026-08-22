@@ -792,6 +792,107 @@ class AppDatabase {
     );
     if (tombstone.isNotEmpty) return 0;
 
+    // If the SMS carries a reference, check for any tombstone with same ref & amount
+    if (sms.reference.isNotEmpty) {
+      final refTombstone = await db.query(
+        'deleted_transactions',
+        columns: <String>['merchant'],
+        where: 'amount = ? AND direction = ? AND reference = ?',
+        whereArgs: <Object?>[sms.amount, sms.direction.name, sms.reference],
+        limit: 1,
+      );
+      if (refTombstone.isNotEmpty) return 0;
+    } else {
+      // Time-window tombstone check (within 120 seconds) for same merchant and amount
+      final timeTombstone = await db.rawQuery(
+        'SELECT merchant FROM deleted_transactions '
+        'WHERE amount = ? AND merchant = ? COLLATE NOCASE AND direction = ? '
+        'AND ABS(date - ?) <= 120000 LIMIT 1',
+        <Object?>[
+          sms.amount,
+          sms.merchant,
+          sms.direction.name,
+          sms.date.millisecondsSinceEpoch,
+        ],
+      );
+      if (timeTombstone.isNotEmpty) return 0;
+    }
+
+    // 2. Existing Transaction check (Exact natural key)
+    final existingExact = await db.query(
+      'transactions',
+      columns: <String>['id'],
+      where: _naturalKeyWhere,
+      whereArgs: <Object?>[
+        sms.amount,
+        sms.merchant,
+        sms.date.millisecondsSinceEpoch,
+        sms.direction.name,
+        sms.reference,
+      ],
+      limit: 1,
+    );
+    if (existingExact.isNotEmpty) return 0;
+
+    // If reference is non-empty, check for matching reference + amount + direction
+    if (sms.reference.isNotEmpty) {
+      final refTxn = await db.query(
+        'transactions',
+        columns: <String>['id'],
+        where: 'amount = ? AND direction = ? AND reference = ?',
+        whereArgs: <Object?>[sms.amount, sms.direction.name, sms.reference],
+        limit: 1,
+      );
+      if (refTxn.isNotEmpty) return 0;
+    } else {
+      // If reference is empty, check time window (within 120 seconds) for identical merchant, amount, direction
+      final timeTxn = await db.rawQuery(
+        'SELECT id FROM transactions '
+        'WHERE amount = ? AND merchant = ? COLLATE NOCASE AND direction = ? '
+        'AND ABS(date - ?) <= 120000 LIMIT 1',
+        <Object?>[
+          sms.amount,
+          sms.merchant,
+          sms.direction.name,
+          sms.date.millisecondsSinceEpoch,
+        ],
+      );
+      if (timeTxn.isNotEmpty) return 0;
+
+      // Also check same calendar day if hour/minute/second were default/arrival-time
+      final startOfDay = DateTime(sms.date.year, sms.date.month, sms.date.day)
+          .millisecondsSinceEpoch;
+      final endOfDay = DateTime(
+              sms.date.year, sms.date.month, sms.date.day, 23, 59, 59, 999)
+          .millisecondsSinceEpoch;
+      final sameDayTxn = await db.query(
+        'transactions',
+        columns: <String>['id', 'payment_type'],
+        where: 'amount = ? AND merchant = ? COLLATE NOCASE AND direction = ? '
+            'AND reference = ? AND date >= ? AND date <= ?',
+        whereArgs: <Object?>[
+          sms.amount,
+          sms.merchant,
+          sms.direction.name,
+          '',
+          startOfDay,
+          endOfDay,
+        ],
+        limit: 1,
+      );
+      if (sameDayTxn.isNotEmpty) {
+        final existingPayment =
+            (sameDayTxn.first['payment_type'] as String?) ?? '';
+        if (existingPayment.isEmpty ||
+            sms.paymentType.isEmpty ||
+            existingPayment == 'Unknown' ||
+            sms.paymentType == 'Unknown' ||
+            existingPayment.toLowerCase() == sms.paymentType.toLowerCase()) {
+          return 0;
+        }
+      }
+    }
+
     final mapping = await db.query(
       'merchant_mappings',
       columns: <String>['category_id'],
@@ -820,6 +921,7 @@ class AppDatabase {
         'category_id': categoryId,
         'direction': sms.direction.name,
         'reference': sms.reference,
+        'note': '',
       },
       conflictAlgorithm: ConflictAlgorithm.ignore,
     );

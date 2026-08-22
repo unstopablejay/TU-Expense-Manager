@@ -21,6 +21,7 @@ import '../core/parser.dart';
 import '../ui_shared/connection_dot.dart';
 import '../ui_shared/dashboard_tab.dart';
 import '../ui_shared/formats.dart';
+import '../ui_shared/loading_dialog.dart';
 import '../ui_shared/theme.dart';
 import '../ui_shared/transactions_tab.dart';
 import 'auto_sync.dart';
@@ -256,6 +257,28 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   // SMS INTAKE
   // -------------------------------------------------------------------------
 
+  Future<void> _smsQueue = Future<void>.value();
+
+  Future<T> _serializeSms<T>(Future<T> Function() action) {
+    final completer = Completer<T>();
+    _smsQueue = _smsQueue.then((_) async {
+      try {
+        final res = await action();
+        completer.complete(res);
+      } catch (e, st) {
+        completer.completeError(e, st);
+      }
+    }, onError: (_) async {
+      try {
+        final res = await action();
+        completer.complete(res);
+      } catch (e, st) {
+        completer.completeError(e, st);
+      }
+    });
+    return completer.future;
+  }
+
   void _ensureSmsListening() {
     if (_smsListening) return;
     _smsListening = true;
@@ -263,7 +286,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 
   /// Handles incoming SMS in real time while the app is in the foreground.
-  Future<void> _handleIncomingSms(InboxSms sms) async {
+  Future<void> _handleIncomingSms(InboxSms sms) => _serializeSms(() async {
     final parsed = SmsParser.parse(sms.body, receivedAt: sms.receivedAt);
     if (parsed == null) return; // not a transaction alert
 
@@ -283,7 +306,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         '${_outOfViewSuffix(parsed.date)}');
 
     unawaited(_autoSync());
-  }
+  });
 
   /// Asks for the permission, registers the foreground listener, then catches
   /// up on the inbox — the whole of it on the very first run, and only what has
@@ -296,7 +319,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _ensureSmsListening();
 
     final since = await _db.lastScannedSmsDate();
-    final result = await _scan(since: since);
+    final _ScanResult? result;
+    if (since == null && mounted) {
+      result = await withLoadingModal<_ScanResult?>(
+        context: context,
+        message: 'Importing SMS transactions…',
+        subtitle: 'Scanning your inbox for bank alerts…',
+        task: () => _scan(since: null),
+      );
+    } else {
+      result = await _scan(since: since);
+    }
     // Only the first import is worth announcing; later catch-ups are routine.
     if (result != null && since == null && result.added > 0) {
       _toast('Imported ${result.added} transaction(s) from your inbox.');
@@ -305,7 +338,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   /// One pass over the inbox. The caller owns the permission check. Returns
   /// null when a scan is already in flight.
-  Future<_ScanResult?> _scan({DateTime? since}) async {
+  Future<_ScanResult?> _scan({DateTime? since}) => _serializeSms(() async {
     if (_scanning) return null;
     setState(() => _scanning = true);
     try {
@@ -360,7 +393,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     } finally {
       if (mounted) setState(() => _scanning = false);
     }
-  }
+  });
 
   /// Uploads after a scan, if that was asked for and a server is configured.
   ///
@@ -391,7 +424,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     _ensureSmsListening();
 
     final since = full ? null : await _db.lastScannedSmsDate();
-    final result = await _scan(since: since);
+    final _ScanResult? result;
+    if (mounted) {
+      result = await withLoadingModal<_ScanResult?>(
+        context: context,
+        message: full ? 'Rescanning all SMS messages…' : 'Checking for new SMS…',
+        subtitle: full ? 'Re-parsing your entire inbox…' : 'Scanning recent messages…',
+        task: () => _scan(since: since),
+      );
+    } else {
+      result = await _scan(since: since);
+    }
     if (result == null) return; // a scan was already running
 
     if (result.added == 0 && result.skipped == 0) {
