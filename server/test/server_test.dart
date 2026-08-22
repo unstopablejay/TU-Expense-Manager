@@ -18,6 +18,7 @@ import 'package:test/test.dart';
 
 import 'package:tu_expense_server/api.dart';
 import 'package:tu_expense_server/auth.dart';
+import 'package:tu_expense_server/backup_manager.dart';
 import 'package:tu_expense_server/config.dart';
 import 'package:tu_expense_server/edit_queue.dart';
 import 'package:tu_expense_server/json_store.dart';
@@ -25,15 +26,20 @@ import 'package:tu_expense_server/snapshots.dart';
 
 /// A server on a fresh directory, plus everything needed to talk to it.
 class Harness {
-  Harness(this.dir, this.handler, this.auth, this.snapshots);
+  Harness(this.dir, this.handler, this.auth, this.snapshots, this.backupManager);
 
-  static Future<Harness> start({int keep = 30, int maxUpload = 32 * 1024 * 1024}) async {
+  static Future<Harness> start({
+    int keep = 30,
+    int backupKeep = 10,
+    int maxUpload = 32 * 1024 * 1024,
+  }) async {
     final Directory dir =
         await Directory.systemTemp.createTemp('tu-expense-server-test');
     final Config config = Config.fromEnvironment(<String, String>{
       'DATA_DIR': dir.path,
       'WEB_ROOT': '${dir.path}/no-web-bundle-here',
       'SNAPSHOT_KEEP': '$keep',
+      'BACKUP_KEEP': '$backupKeep',
       'MAX_UPLOAD_BYTES': '$maxUpload',
     });
     final Paths paths = Paths(config.dataDir);
@@ -41,20 +47,29 @@ class Harness {
     final AuthStore auth = AuthStore(paths, lock);
     final SnapshotStore snapshots =
         SnapshotStore(paths, lock, keep: config.snapshotKeep);
+    final BackupManager backupManager = BackupManager(
+      paths: paths,
+      lock: lock,
+      backupDir: config.backupDir,
+      keep: config.backupKeep,
+      serverVersion: 'test',
+    );
     final Api api = Api(
       config: config,
       auth: auth,
       snapshots: snapshots,
       edits: EditQueueStore(paths, lock, expiry: config.editExpiry),
+      backupManager: backupManager,
       version: 'test',
     );
-    return Harness(dir, api.handler, auth, snapshots);
+    return Harness(dir, api.handler, auth, snapshots, backupManager);
   }
 
   final Directory dir;
   final Handler handler;
   final AuthStore auth;
   final SnapshotStore snapshots;
+  final BackupManager backupManager;
 
   Future<void> dispose() async {
     if (dir.existsSync()) await dir.delete(recursive: true);

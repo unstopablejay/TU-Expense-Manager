@@ -221,6 +221,185 @@ class SyncClient {
     await _prefs.clearSession();
   }
 
+  /// Fetches the list of rolling server backups and schedule information.
+  Future<({List<ServerBackupItem> backups, ServerBackupSchedule? schedule, String? error})>
+      fetchServerBackups() async {
+    final Uri? base = await _prefs.baseUrl();
+    final String? token = await _prefs.token();
+    if (base == null || token == null) {
+      return (
+        backups: const <ServerBackupItem>[],
+        schedule: null,
+        error: 'Sign in to your server to view rolling backups.',
+      );
+    }
+    try {
+      final http.Response response = await _client
+          .get(
+            _url(base, '/api/v1/backups'),
+            headers: <String, String>{'Authorization': 'Bearer $token'},
+          )
+          .timeout(kSyncQuickTimeout);
+      if (response.statusCode == 401) {
+        return (
+          backups: const <ServerBackupItem>[],
+          schedule: null,
+          error: 'Your session has expired. Please sign in again.',
+        );
+      }
+      if (response.statusCode != 200) {
+        return (
+          backups: const <ServerBackupItem>[],
+          schedule: null,
+          error: _errorFrom(response) ??
+              'Could not fetch backups (${response.statusCode}).',
+        );
+      }
+      final Map<String, Object?> body = _decode(response.body);
+      final Object? rawBackups = body['backups'];
+      final List<ServerBackupItem> list = <ServerBackupItem>[
+        if (rawBackups is List)
+          for (final Object? b in rawBackups)
+            if (b is Map<String, Object?>) ServerBackupItem.fromJson(b),
+      ];
+      final Object? rawSchedule = body['schedule'];
+      final ServerBackupSchedule? schedule = rawSchedule is Map<String, Object?>
+          ? ServerBackupSchedule.fromJson(rawSchedule)
+          : null;
+      return (backups: list, schedule: schedule, error: null);
+    } on Object catch (e) {
+      return (
+        backups: const <ServerBackupItem>[],
+        schedule: null,
+        error: _explain(e),
+      );
+    }
+  }
+
+  /// Triggers a manual server backup snapshot into the rolling store.
+  Future<({ServerBackupItem? backup, String? error})> createServerBackup({
+    String? note,
+  }) async {
+    final Uri? base = await _prefs.baseUrl();
+    final String? token = await _prefs.token();
+    if (base == null || token == null) {
+      return (
+        backup: null,
+        error: 'Sign in to your server to create a backup.',
+      );
+    }
+    try {
+      final http.Response response = await _client
+          .post(
+            _url(base, '/api/v1/backups'),
+            headers: <String, String>{
+              'Authorization': 'Bearer $token',
+              'Content-Type': 'application/json; charset=utf-8',
+            },
+            body: jsonEncode(<String, Object?>{
+              if (note case final String n) 'note': n,
+            }),
+          )
+          .timeout(kSyncQuickTimeout);
+      if (response.statusCode != 201) {
+        return (
+          backup: null,
+          error: _errorFrom(response) ??
+              'Backup creation failed (${response.statusCode}).',
+        );
+      }
+      final Map<String, Object?> body = _decode(response.body);
+      final Object? rawBackup = body['backup'];
+      final ServerBackupItem? item = rawBackup is Map<String, Object?>
+          ? ServerBackupItem.fromJson(rawBackup)
+          : null;
+      return (backup: item, error: null);
+    } on Object catch (e) {
+      return (backup: null, error: _explain(e));
+    }
+  }
+
+  /// Restores a server backup snapshot on the server.
+  Future<({bool ok, String? restoredId, String? safetyId, String? error})>
+      restoreServerBackup(String backupId) async {
+    final Uri? base = await _prefs.baseUrl();
+    final String? token = await _prefs.token();
+    if (base == null || token == null) {
+      return (
+        ok: false,
+        restoredId: null,
+        safetyId: null,
+        error: 'Sign in to your server to restore a backup.',
+      );
+    }
+    try {
+      final http.Response response = await _client
+          .post(
+            _url(base, '/api/v1/backups/$backupId/restore'),
+            headers: <String, String>{'Authorization': 'Bearer $token'},
+          )
+          .timeout(kSyncPushTimeout);
+      if (response.statusCode != 200) {
+        return (
+          ok: false,
+          restoredId: null,
+          safetyId: null,
+          error:
+              _errorFrom(response) ?? 'Restore failed (${response.statusCode}).',
+        );
+      }
+      final Map<String, Object?> body = _decode(response.body);
+      final Object? result = body['result'];
+      final String? restored = result is Map<String, Object?>
+          ? result['restored_backup_id'] as String?
+          : null;
+      final String? safety = result is Map<String, Object?>
+          ? result['safety_backup_id'] as String?
+          : null;
+      return (ok: true, restoredId: restored, safetyId: safety, error: null);
+    } on Object catch (e) {
+      return (ok: false, restoredId: null, safetyId: null, error: _explain(e));
+    }
+  }
+
+  /// Fetches the restored snapshot body from server to update local mobile DB.
+  Future<({BackupData? data, String? error})> fetchRestoredSnapshotData() async {
+    final Uri? base = await _prefs.baseUrl();
+    final String? token = await _prefs.token();
+    final String device = await _prefs.deviceId();
+    if (base == null || token == null) {
+      return (data: null, error: 'Sign in to your server first.');
+    }
+    try {
+      final http.Response response = await _client
+          .get(
+            _url(base, '/api/v1/snapshot'),
+            headers: <String, String>{
+              'Authorization': 'Bearer $token',
+              'X-Expense-Device': device,
+            },
+          )
+          .timeout(kSyncPushTimeout);
+      if (response.statusCode != 200) {
+        return (
+          data: null,
+          error: _errorFrom(response) ??
+              'Could not pull snapshot (${response.statusCode}).',
+        );
+      }
+      final BackupData data =
+          decodeBackupJson(utf8.decode(response.bodyBytes));
+      final List<String> problems =
+          validateBackup(data, appSchemaVersion: kSchemaVersion);
+      if (problems.isNotEmpty) {
+        return (data: null, error: problems.first);
+      }
+      return (data: data, error: null);
+    } on Object catch (e) {
+      return (data: null, error: _explain(e));
+    }
+  }
+
   /// Drains the edit queue, applies it, pushes the ledger and acknowledges.
   ///
   /// [onChanged] is called if the ledger was actually modified, so the shell can

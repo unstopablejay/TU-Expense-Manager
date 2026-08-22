@@ -384,3 +384,84 @@ class DeletedTxn {
   String get key => '$amount|$merchant|${date.millisecondsSinceEpoch}'
       '|${direction.name}|$reference';
 }
+
+/// A snapshot stored on the server's rolling backup system.
+class ServerBackupItem {
+  const ServerBackupItem({
+    required this.id,
+    required this.at,
+    required this.bytes,
+    required this.type,
+    this.note,
+    this.counts = const <String, String>{},
+    this.serverVersion,
+  });
+
+  factory ServerBackupItem.fromJson(Map<String, Object?> json) =>
+      ServerBackupItem(
+        id: json['id'] as String? ?? '',
+        at: DateTime.tryParse(json['at'] as String? ?? '') ?? DateTime.now(),
+        bytes: (json['bytes'] as num?)?.toInt() ?? 0,
+        type: json['type'] as String? ?? 'auto',
+        note: json['note'] as String?,
+        counts: <String, String>{
+          if (json['counts'] is Map)
+            for (final MapEntry<Object?, Object?> e
+                in (json['counts']! as Map).entries)
+              '${e.key}': '${e.value}',
+        },
+        serverVersion: json['server_version'] as String?,
+      );
+
+  final String id;
+  final DateTime at;
+  final int bytes;
+  final String type;
+  final String? note;
+  final Map<String, String> counts;
+  final String? serverVersion;
+
+  int get transactionsCount => int.tryParse(counts['transactions'] ?? '') ?? 0;
+  bool get isSafetyBackup => type == 'pre_restore';
+  bool get isAuto => type == 'auto';
+  bool get isManual => type == 'manual';
+}
+
+/// Information about the server's backup schedule and retention policy.
+class ServerBackupSchedule {
+  const ServerBackupSchedule({
+    required this.enabled,
+    required this.hour,
+    required this.minute,
+    required this.keep,
+    required this.path,
+    this.nextRun,
+  });
+
+  factory ServerBackupSchedule.fromJson(Map<String, Object?> json) =>
+      ServerBackupSchedule(
+        enabled: json['enabled'] as bool? ?? true,
+        hour: (json['hour'] as num?)?.toInt() ?? 21,
+        minute: (json['minute'] as num?)?.toInt() ?? 0,
+        keep: (json['keep'] as num?)?.toInt() ?? 10,
+        path: json['path'] as String? ?? '/data/backups',
+        nextRun: json['next_run'] != null
+            ? DateTime.tryParse(json['next_run']! as String)
+            : null,
+      );
+
+  final bool enabled;
+  final int hour;
+  final int minute;
+  final int keep;
+  final String path;
+  final DateTime? nextRun;
+
+  String get timeFormatted {
+    final int h = hour % 12 == 0 ? 12 : hour % 12;
+    final String m = minute.toString().padLeft(2, '0');
+    final String period = hour >= 12 ? 'PM' : 'AM';
+    return '$h:$m $period';
+  }
+}
+

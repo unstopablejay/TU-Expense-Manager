@@ -23,6 +23,7 @@ import '../database.dart';
 import '../sync_client.dart';
 import '../sync_prefs.dart';
 import '../update_service.dart';
+import '../widgets/server_backups_sheet.dart';
 import '../widgets/settings_header.dart';
 import 'categories_screen.dart';
 import 'merchant_defaults_screen.dart';
@@ -737,6 +738,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     'Uploads as soon as a scan finds something, without waiting '
                     'for the next automatic sync. Off by default.',
                   ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.backup_table_outlined),
+                  title: const Text('Server rolling backups'),
+                  subtitle: const Text(
+                    'Daily 9:00 PM auto-backups, snapshot history and restore.',
+                  ),
+                  enabled: _syncUser != null && !_busyWithData,
+                  onTap: _syncUser == null || _busyWithData
+                      ? null
+                      : () => showServerBackupsSheet(
+                            context,
+                            onChanged: widget.onChanged,
+                          ),
                 ),
                 const Divider(height: 32),
                 SettingsHeader('Updates'),

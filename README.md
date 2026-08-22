@@ -993,9 +993,35 @@ same address and sign in with the same account.
 | `EXPENSE_ADMIN_PASSWORD` | — | Its password. The server refuses to start with no accounts and no way to make one. |
 | `PORT` | `8099` | |
 | `DATA_DIR` | `/data` | |
+| `BACKUP_DIR` | `/data/backups` | Where full server state backups land. |
+| `BACKUP_HOUR` | `21` | Scheduled daily backup hour in container local time (0-23, default 9:00 PM). |
+| `BACKUP_MINUTE` | `0` | Scheduled daily backup minute (0-59). |
+| `BACKUP_KEEP` | `10` | Rolling snapshot retention limit (FIFO rotation). |
+| `BACKUP_ENABLED` | `true` | Set to `false` to disable the built-in daily timer. |
 | `SNAPSHOT_KEEP` | `30` | Snapshots kept per device. |
 | `MAX_UPLOAD_BYTES` | `33554432` | 32 MB. |
 | `EDIT_EXPIRY_DAYS` | `30` | Drops an edit no phone came to collect. |
+
+### Automated Rolling Daily Backups & Restore (Docker / ZimaOS)
+
+The backend server includes a built-in automated rolling daily backup system designed for containerized setups on ZimaOS / CasaOS:
+
+- **Automated Schedule (9:00 PM Daily):** The server schedules a daily snapshot at 21:00 (9:00 PM) local container time (`TZ`), capturing all users, credentials, device metadata, edit queues, and ledger snapshots in an atomic timestamped bundle.
+- **Storage & Retention (10 Rolling Slots):** Backups are saved in `/data/backups` (or a persistent host directory mounted via `BACKUP_DIR`). A FIFO rotation policy caps rolling snapshots at 10 slots, automatically pruning the oldest snapshot when an 11th is created.
+- **On-Demand Snapshots:** Trigger an immediate server snapshot via CLI:
+  ```bash
+  docker exec -it tu-expense-server /app/server --backup-now
+  ```
+  or by tapping **Backup now** inside the app.
+- **Mobile Management & Safe One-Click Restore:**
+  - Navigate to **Settings → Server sync → Server rolling backups** on the phone.
+  - View all available snapshots with timestamps, file size, and transaction counts.
+  - Tapping **Restore** initiates a safe end-to-end restore:
+    1. **Local Safety Shield:** If the phone already has data, it creates an immediate local safety backup before replacing anything.
+    2. **Server Safety Shield:** The server takes a pre-restore safety snapshot (`safety_...`) before applying the archive.
+    3. The restored state is pulled and applied to the phone's local SQLite database.
+    4. Safety snapshots are preserved and do not consume the 10 rolling auto-save slots.
+- **Full Compatibility:** Manual XLSX export and import remain available under **Settings → Data**.
 
 ### About the security of this
 

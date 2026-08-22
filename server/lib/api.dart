@@ -15,6 +15,8 @@ import 'package:shelf_router/shelf_router.dart';
 import 'package:shelf_static/shelf_static.dart';
 
 import 'auth.dart';
+import 'backup_manager.dart';
+import 'backup_scheduler.dart';
 import 'config.dart';
 import 'edit_queue.dart';
 import 'snapshots.dart';
@@ -41,6 +43,8 @@ class Api {
     required this.auth,
     required this.snapshots,
     required this.edits,
+    required this.backupManager,
+    this.scheduler,
     required this.version,
   });
 
@@ -48,6 +52,8 @@ class Api {
   final AuthStore auth;
   final SnapshotStore snapshots;
   final EditQueueStore edits;
+  final BackupManager backupManager;
+  final BackupScheduler? scheduler;
   final String version;
 
   Handler get handler {
@@ -65,7 +71,11 @@ class Api {
       ..post('/api/v1/edits', _authenticated(_queueEdits))
       ..get('/api/v1/edits', _authenticated(_pendingEdits))
       ..post('/api/v1/edits/ack', _authenticated(_ackEdits))
-      ..get('/api/v1/edits/applied', _authenticated(_appliedEdits));
+      ..get('/api/v1/edits/applied', _authenticated(_appliedEdits))
+      ..get('/api/v1/backups', _authenticated(_listBackups))
+      ..post('/api/v1/backups', _authenticated(_createBackup))
+      ..get('/api/v1/backups/<id>', _authenticated(_getBackup))
+      ..post('/api/v1/backups/<id>/restore', _authenticated(_restoreBackup));
 
     // The SPA last, so it never shadows the API. Any path the router does not
     // know is a client-side route and gets index.html — which is what makes a
@@ -356,6 +366,70 @@ class Api {
       'device': device,
       'applied': await edits.applied(user: user, device: device),
     });
+  }
+
+  Future<Response> _listBackups(Request request, String user) async {
+    final List<BackupItem> items = await backupManager.listBackups();
+    return _json(<String, Object?>{
+      'ok': true,
+      'backups': items.map((BackupItem b) => b.toJson()).toList(),
+      'schedule': <String, Object?>{
+        'enabled': config.backupEnabled,
+        'hour': config.backupScheduleHour,
+        'minute': config.backupScheduleMinute,
+        'keep': config.backupKeep,
+        'path': config.backupDir,
+        if (scheduler?.nextRun != null)
+          'next_run': scheduler!.nextRun!.toIso8601String(),
+      },
+    });
+  }
+
+  Future<Response> _createBackup(Request request, String user) async {
+    final Object? body = await _body(request);
+    final String? note =
+        body is Map<String, Object?> ? body['note'] as String? : null;
+    final BackupItem item = await backupManager.createBackup(
+      type: 'manual',
+      note: note ?? 'Manual backup created by $user',
+    );
+    return _json(<String, Object?>{
+      'ok': true,
+      'backup': item.toJson(),
+    }, status: 201);
+  }
+
+  Future<Response> _getBackup(Request request, String user) async {
+    final String? id = request.params['id'];
+    if (id == null || id.isEmpty) {
+      return _error(400, 'Specify a backup ID.');
+    }
+    final Map<String, Object?>? bundle = await backupManager.getBackupBundle(id);
+    if (bundle == null) {
+      return _error(404, 'Backup "$id" not found.');
+    }
+    return _json(<String, Object?>{
+      'ok': true,
+      'backup': bundle,
+    });
+  }
+
+  Future<Response> _restoreBackup(Request request, String user) async {
+    final String? id = request.params['id'];
+    if (id == null || id.isEmpty) {
+      return _error(400, 'Specify a backup ID to restore.');
+    }
+    try {
+      final RestoreResult result = await backupManager.restoreBackup(id);
+      return _json(<String, Object?>{
+        'ok': true,
+        'result': result.toJson(),
+      });
+    } on BackupRestoreException catch (e) {
+      return _error(400, e.message);
+    } catch (e) {
+      return _error(500, 'Restore failed: $e');
+    }
   }
 
   // ---------------------------------------------------------------------------
