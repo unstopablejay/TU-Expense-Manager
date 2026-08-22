@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tu_expense_tracker/main.dart';
-import 'package:tu_expense_tracker/src/mobile/sms_source.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
