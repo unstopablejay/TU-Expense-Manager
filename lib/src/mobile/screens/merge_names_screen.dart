@@ -8,6 +8,7 @@ library;
 import 'package:flutter/material.dart';
 import '../../core/aliases.dart';
 import '../../core/models.dart';
+import '../../ui_shared/loading_dialog.dart';
 import '../database.dart';
 import '../widgets/settings_header.dart';
 
@@ -108,16 +109,21 @@ class _MergeNamesScreenState extends State<MergeNamesScreen> {
 
   void _clearSelection() => setState(_selected.clear);
 
-  /// Writes [rows] as the whole alias set, reloads, and offers to put back
-  /// whatever was there before.
   Future<void> _apply(Map<String, String> rows, String message) async {
     final Map<String, String> before = _aliases.rowsFor(widget.kind);
-    await _db.setAliases(widget.kind, rows);
-    setState(_selected.clear);
-    await Future.wait(<Future<void>>[
-      _load(),
-      if (widget.onChanged != null) widget.onChanged!(),
-    ]);
+    await withLoadingModal<void>(
+      context: context,
+      message: 'Applying merge…',
+      subtitle: 'Updating name aliases…',
+      task: () async {
+        await _db.setAliases(widget.kind, rows);
+        setState(_selected.clear);
+        await Future.wait(<Future<void>>[
+          _load(),
+          if (widget.onChanged != null) widget.onChanged!(),
+        ]);
+      },
+    );
     if (!mounted) return;
 
     ScaffoldMessenger.of(context)

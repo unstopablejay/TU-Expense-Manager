@@ -28,6 +28,11 @@ class SmsSource {
   Telephony get _telephonyInstance => telephony ?? Telephony.instance;
 
   void Function(InboxSms sms)? _listener;
+  bool _isListening = false;
+
+  /// Retains recent incoming SMS signatures with their receipt timestamps to
+  /// filter out duplicate broadcast events from multi-part SMS or carrier re-deliveries.
+  final Map<String, DateTime> _recentlyReceived = <String, DateTime>{};
 
   bool get isSupported => defaultTargetPlatform == TargetPlatform.android;
 
@@ -40,23 +45,43 @@ class SmsSource {
   /// Live listener for new alerts while the app is in the foreground.
   void listen(void Function(InboxSms sms) onMessage) {
     _listener = onMessage;
-    if (!isSupported) return;
+    if (!isSupported || _isListening) return;
     try {
+      _isListening = true;
       _telephonyInstance.listenIncomingSms(
         onNewMessage: (SmsMessage message) {
           final body = message.body;
-          if (body != null) onMessage(InboxSms(body, _timestampOf(message)));
+          if (body != null) {
+            final sms = InboxSms(body, _timestampOf(message));
+            _dispatchIncoming(sms);
+          }
         },
         listenInBackground: false,
       );
     } catch (_) {
+      _isListening = false;
       // Plugin unavailable (e.g. running on a desktop target) — ignore.
     }
   }
 
+  void _dispatchIncoming(InboxSms sms) {
+    final now = DateTime.now();
+    _recentlyReceived.removeWhere(
+      (String _, DateTime seenAt) => now.difference(seenAt).inSeconds > 60,
+    );
+
+    final String key =
+        '${sms.body.trim()}|${sms.receivedAt?.millisecondsSinceEpoch ?? 0}';
+    if (_recentlyReceived.containsKey(key)) {
+      return; // Duplicate broadcast dropped
+    }
+    _recentlyReceived[key] = now;
+    _listener?.call(sms);
+  }
+
   /// Simulates an incoming SMS message for testing or previewing.
   void simulateIncomingSms(InboxSms sms) {
-    _listener?.call(sms);
+    _dispatchIncoming(sms);
   }
 
   /// Reads the inbox. With [since] the query is narrowed to messages newer than

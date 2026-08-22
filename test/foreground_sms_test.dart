@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tu_expense_tracker/main.dart';
+import 'package:tu_expense_tracker/src/ui_shared/loading_dialog.dart';
 
 class FakeDatabase implements AppDatabase {
   final List<ExpenseTxn> _txns = <ExpenseTxn>[];
@@ -34,11 +35,26 @@ class FakeDatabase implements AppDatabase {
 
   @override
   Future<int> insertParsed(ParsedSms sms) async {
-    final key = '${sms.amount}_${sms.merchant}_${sms.date.millisecondsSinceEpoch}_${sms.direction.name}_${sms.reference}';
+    final key =
+        '${sms.amount}_${sms.merchant}_${sms.date.millisecondsSinceEpoch}_${sms.direction.name}_${sms.reference}';
     if (_tombstones.contains(key)) return 0;
     for (final t in _txns) {
-      final existingKey = '${t.amount}_${t.merchant}_${t.date.millisecondsSinceEpoch}_${t.direction.name}_${t.reference}';
+      final existingKey =
+          '${t.amount}_${t.merchant}_${t.date.millisecondsSinceEpoch}_${t.direction.name}_${t.reference}';
       if (existingKey == key) return 0;
+      if (sms.reference.isNotEmpty &&
+          t.reference == sms.reference &&
+          t.amount == sms.amount &&
+          t.direction == sms.direction) {
+        return 0;
+      }
+      if (sms.reference.isEmpty &&
+          t.merchant.toLowerCase() == sms.merchant.toLowerCase() &&
+          t.amount == sms.amount &&
+          t.direction == sms.direction &&
+          t.date.difference(sms.date).inSeconds.abs() <= 120) {
+        return 0;
+      }
     }
 
     final catId = _merchantMappings[sms.merchant.toLowerCase()] ?? 1;
@@ -282,6 +298,167 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
 
       expect(find.text('AMAZON'), findsOneWidget);
+    });
+
+    testWidgets('initial launch scan displays LoadingModal and dismisses cleanly',
+        (WidgetTester tester) async {
+      setLargeViewport(tester);
+
+      final db = FakeDatabase();
+      final smsSource = FakeSmsSource(
+        initialInbox: <InboxSms>[
+          InboxSms(
+            'Spent Rs.450.00 On HDFC Bank Card 6824 At SWIGGY On 2026-08-21:07:19:26.',
+            DateTime(2026, 8, 21, 7, 19, 26),
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(TuExpenseTrackerApp(
+        database: db,
+        smsSource: smsSource,
+      ));
+      // First pump starts initState and triggers withLoadingModal
+      await tester.pump();
+
+      // Complete async scan and dismiss modal
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump();
+
+      expect(find.byType(LoadingModal), findsNothing);
+      expect((await db.transactions()).length, 1);
+    });
+
+    testWidgets('toolbar rescan triggers LoadingModal and dismisses cleanly',
+        (WidgetTester tester) async {
+      setLargeViewport(tester);
+
+      final db = FakeDatabase();
+      await db.setLastScannedSmsDate(DateTime(2026, 8, 20));
+      final smsSource = FakeSmsSource();
+
+      await tester.pumpWidget(TuExpenseTrackerApp(
+        database: db,
+        smsSource: smsSource,
+      ));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Switch to Transactions tab
+      await tester.tap(find.byIcon(Icons.receipt_long_outlined));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // Tap Check for new SMS button on app bar
+      await tester.tap(find.byTooltip('Check for new SMS'));
+      await tester.pump();
+
+      // Complete scan and dismiss modal
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump();
+
+      expect(find.byType(LoadingModal), findsNothing);
+    });
+
+    testWidgets('duplicate SMS with timestamp jitter within window creates only 1 transaction',
+        (WidgetTester tester) async {
+      setLargeViewport(tester);
+
+      final db = FakeDatabase();
+      final smsSource = FakeSmsSource();
+
+      await tester.pumpWidget(TuExpenseTrackerApp(
+        database: db,
+        smsSource: smsSource,
+      ));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      const body =
+          'Spent Rs.250.00 On HDFC Bank Card 6824 At STARBUCKS On 2026-08-21:07:19:26.';
+      final t1 = DateTime(2026, 8, 21, 7, 19, 26);
+      final t2 = DateTime(2026, 8, 21, 7, 19, 35); // 9 seconds drift
+
+      smsSource.simulateIncomingSms(InboxSms(body, t1));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      smsSource.simulateIncomingSms(InboxSms(body, t2));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      final txns = await db.transactions();
+      expect(txns.length, 1);
+      expect(txns.single.merchant, 'STARBUCKS');
+      expect(txns.single.amount, 250.0);
+    });
+
+    testWidgets('duplicate UPI alerts with same Ref code create only 1 transaction',
+        (WidgetTester tester) async {
+      setLargeViewport(tester);
+
+      final db = FakeDatabase();
+      final smsSource = FakeSmsSource();
+
+      await tester.pumpWidget(TuExpenseTrackerApp(
+        database: db,
+        smsSource: smsSource,
+      ));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      const body1 =
+          'Sent Rs.18.00\nFrom HDFC Bank A/C *0444\nTo Saravana Medical\nOn 10/08/26\nRef 213313774670';
+      const body2 =
+          'Sent Rs.18.00\nFrom HDFC Bank A/C *0444\nTo Saravana Medical\nOn 10/08/26\nRef 213313774670';
+
+      final t1 = DateTime(2026, 8, 10, 14, 30, 10);
+      final t2 = DateTime(2026, 8, 10, 14, 30, 45); // Different second
+
+      smsSource.simulateIncomingSms(InboxSms(body1, t1));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      smsSource.simulateIncomingSms(InboxSms(body2, t2));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      final txns = await db.transactions();
+      expect(txns.length, 1);
+      expect(txns.single.reference, '213313774670');
+    });
+
+    testWidgets('concurrent live incoming SMS and inbox catch-up scan does not duplicate',
+        (WidgetTester tester) async {
+      setLargeViewport(tester);
+
+      final db = FakeDatabase();
+      final smsSource = FakeSmsSource();
+
+      await tester.pumpWidget(TuExpenseTrackerApp(
+        database: db,
+        smsSource: smsSource,
+      ));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      const body =
+          'INR 350.00 spent on YES BANK Card X2858 @UBER 13-08-2026 09:21:35 am. Avl Lmt INR 281,496.08.';
+      final arrivalTime = DateTime(2026, 8, 13, 9, 21, 35);
+
+      // Add to inbox AND simulate live broadcast simultaneously
+      smsSource.inbox.add(InboxSms(body, arrivalTime));
+      smsSource.simulateIncomingSms(InboxSms(body, arrivalTime));
+
+      // Trigger resume scan concurrently
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+
+      final txns = await db.transactions();
+      expect(txns.length, 1);
+      expect(txns.single.merchant, 'UBER');
+      expect(txns.single.amount, 350.0);
     });
   });
 }

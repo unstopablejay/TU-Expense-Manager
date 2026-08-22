@@ -7,6 +7,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../core/models.dart';
+import '../../ui_shared/loading_dialog.dart';
 import '../../ui_shared/palette.dart';
 import '../database.dart';
 
@@ -65,9 +66,18 @@ class _DeletedScreenState extends State<DeletedScreen> {
 
   Future<void> _restore(List<DeletedTxn> rows) async {
     if (rows.isEmpty) return;
-    await _db.restoreTransactions(rows);
-    setState(_selected.clear);
-    await Future.wait(<Future<void>>[_load(), widget.onChanged()]);
+    await withLoadingModal<void>(
+      context: context,
+      message: rows.length == 1
+          ? 'Restoring transaction…'
+          : 'Restoring ${rows.length} transactions…',
+      subtitle: 'Updating database records…',
+      task: () async {
+        await _db.restoreTransactions(rows);
+        setState(_selected.clear);
+        await Future.wait(<Future<void>>[_load(), widget.onChanged()]);
+      },
+    );
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
