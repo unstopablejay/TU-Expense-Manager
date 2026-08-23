@@ -51,6 +51,7 @@ The project is structured as a multi-platform Flutter app and a Dart CLI server:
 - **SMS Parsing**:
   - **No Keyword Scanning for Direction**: Transaction direction (debit vs. credit) comes strictly from the matched regex template, not keyword scans (prevents issues with merchant names containing words like "CREDIT").
   - **No Clock Time Fallback**: UPI alerts have no clock time; the parser adopts the SMS arrival time if it falls on the same date, otherwise defaulting to midnight.
+- **Testing Safety Rule**: **NEVER test or install builds on real physical devices** because they hold real user financial data. Always use an Android virtual device (emulator) for testing and verification.
 - **Notes**: Notes are sanitized using `cleanNote()`, collapsing white space and capping notes at 140 characters (`kNoteMaxLength`).
 
 ---
