@@ -10,6 +10,7 @@ library;
 import 'package:flutter/widgets.dart';
 
 import 'src/mobile/home_shell.dart';
+import 'src/ui_shared/theme_controller.dart';
 
 export 'src/core/aliases.dart';
 export 'src/core/backup_data.dart';
@@ -52,8 +53,11 @@ export 'src/ui_shared/formats.dart';
 export 'src/ui_shared/palette.dart';
 export 'src/ui_shared/shared_controls.dart';
 export 'src/ui_shared/theme.dart';
+export 'src/ui_shared/theme_controller.dart';
+export 'src/ui_shared/theme_models.dart';
 export 'src/ui_shared/transactions_tab.dart';
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await ThemeController.instance.load();
   runApp(const TuExpenseTrackerApp());
 }

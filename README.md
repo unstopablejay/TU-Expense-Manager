@@ -92,10 +92,11 @@ Notes on the design:
 
 ### Database
 
-Schema version 7. Seven tables, created on first launch (`AppDatabase`):
+Schema version 8. Seven tables, created on first launch (`AppDatabase`):
 
 ```sql
-categories           (id INTEGER PK, name TEXT UNIQUE COLLATE NOCASE)
+categories           (id INTEGER PK, name TEXT UNIQUE COLLATE NOCASE,
+                      icon TEXT NOT NULL DEFAULT '')
 merchant_mappings    (merchant_name TEXT PK COLLATE NOCASE, category_id INTEGER FK)
 name_aliases         (kind TEXT, alias TEXT COLLATE NOCASE, canonical TEXT,
                       PRIMARY KEY (kind, alias))
@@ -229,6 +230,26 @@ supplies is not a placeholder for missing data, it is the truth — a transactio
 before notes existed genuinely has none. The tombstone `ALTER` is guarded the same way the
 v5 `splits_json` one is, and for the same reason: a database arriving from v2 or earlier had
 `deleted_transactions` created from the shared const, which already carries `note`.
+
+#### Migration v7 → v8
+
+Adds `categories.icon` storing custom emojis. Pre-existing categories are backfilled with default seeded emojis (🛒 Grocery, 🍔 Food, ⛽ Fuel, 🛍️ Shopping, 💡 Bills & Utilities, ✈️ Travel, 🎬 Entertainment, 💊 Health, ❓ Uncategorized, 💰 Income) or smart keyword suggestions.
+
+### Category Emojis & Smart Matching
+
+Every category in the app features a colorful, unique emoji representation (WhatsApp / Fluent emoji style).
+
+- **Integrated Emoji Picker**: When creating or editing categories in **Settings › Categories**, users get a live squircle avatar preview, real-time emoji auto-suggestion based on category name typing, a curated quick-pick emoji scrollbar, and custom keyboard emoji input.
+- **Smart Automatic Keyword Matching**: Automatically matches typed keywords to relevant emojis (e.g. coffee/tea/cafe → ☕, rent/house/flat → 🏠, gym/fitness → 🏋️, cab/uber/taxi → 🚕, pet/dog/cat → 🐾, gaming/steam → 🎮, books/college → 📚, salon/hair → ✂️, bills → 💡, investment/stocks/mutual funds → 📈, insurance → 🛡️, etc.).
+- **Dynamic Fallbacks**: Unconfigured or custom categories without an explicit icon gracefully fall back to keyword matching or `🏷️`.
+
+### Modern Fintech Rounded Transaction Cards
+
+The transactions ledger uses a modern fintech card presentation inspired by Revolut and Copilot Money:
+
+- **16px Rounded Cards**: Smooth 16px corner radius (`BorderRadius.circular(16)`) with crisp hairline borders and zero elevation.
+- **Tinted Squircle Badges**: 44x44 tinted squircle avatar (`BorderRadius.circular(12)`) with a 15% alpha background tint of the category chart hue, enclosing a bold 22px category emoji (or `💰` for credits).
+- **Clear Typography & Directional Color**: Bold merchant titles, concise metadata subtext, 8px rounded category badge with border, and right-aligned bold amounts with explicit `+` (green) for credits and `-` for debits.
 
 ### Notes
 
@@ -568,12 +589,21 @@ key that finds the row again.
 
 ### Settings
 
-The second destination on the navigation bar: **Merchants & defaults**, the **Cleanup**
-merge screens, **Server sync** (address, device name, sign in, sync now, sync
-automatically and how often), the update controls (automatic check, check now,
-install), and version information. Leaving it reloads the ledger, because a default changed there can be
-backfilled over history — without the reload the rows behind it would keep showing the
-categories they had on the way in.
+The settings destination on the navigation bar houses:
+- **Appearance & Themes**: Live base theme selection (**System**, **Light**, **Dark**, and **OLED Pitch Black**) paired with an 8-color accent palette (**Classic Blue**, **Crimson Red**, **Emerald Green**, **Royal Purple**, **Sunset Orange**, **Rose Pink**, **Teal/Cyan**, and **Cyber Amber**).
+- **Categorization**: **Merchants & defaults** configuration.
+- **Cleanup**: Merge merchants and cards/accounts.
+- **Data**: Spreadsheet export and full database restore.
+- **Server sync**: Server address, device name, authentication, manual sync, automatic sync frequency, and rolling backup management.
+- **Updates & About**: Automatic update checks, APK sideloading, and version information.
+
+Leaving Settings reloads the ledger, because a default changed there can be backfilled over history — without the reload the rows behind it would keep showing the categories they had on the way in.
+
+### Appearance & Themes
+
+- **Two-Tier Customization**: Choose your base theme mode (**System**, **Light**, **Dark**, or **OLED Black**) and customize your primary accent seed across 8 curated vibrant color palettes.
+- **OLED Pitch Black**: Built specifically for AMOLED/OLED displays to minimize battery consumption and eye strain, rendering true `#000000` pitch black scaffold and navigation bars with `#121418` obsidian elevated containers for clear card separation.
+- **Instant Persistence & Web Sync**: Theme preferences are persisted instantly and synchronized seamlessly across both the Android mobile application and the desktop web client.
 
 ### Deleted transactions
 

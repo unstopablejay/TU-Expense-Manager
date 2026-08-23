@@ -11,15 +11,27 @@ import 'splits.dart';
 
 
 class ExpenseCategory {
-  const ExpenseCategory({required this.id, required this.name});
+  const ExpenseCategory({
+    required this.id,
+    required this.name,
+    this.icon = '',
+  });
 
   factory ExpenseCategory.fromMap(Map<String, Object?> map) => ExpenseCategory(
         id: map['id'] as int,
         name: map['name'] as String,
+        icon: (map['icon'] as String?) ?? '',
       );
 
   final int id;
   final String name;
+  final String icon;
+
+  Map<String, Object?> toMap() => <String, Object?>{
+        'id': id,
+        'name': name,
+        'icon': icon,
+      };
 }
 
 /// A category together with everything filed under it — what the cleanup screen

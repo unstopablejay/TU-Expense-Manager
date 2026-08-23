@@ -155,20 +155,30 @@ class _MerchantDefaultsScreenState extends State<MerchantDefaultsScreen> {
                     final bool unset = m.defaultCategoryId == null;
 
                     return ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: unset
-                            ? theme.colorScheme.surfaceContainerHighest
-                            : theme.colorScheme.primaryContainer,
-                        foregroundColor: unset
-                            ? theme.colorScheme.onSurfaceVariant
-                            : theme.colorScheme.onPrimaryContainer,
-                        child: Icon(
-                          alwaysAsk
-                              ? Icons.help_outline
-                              : unset
-                                  ? Icons.help_outline
-                                  : categoryIcon(m.defaultCategoryName!),
-                          size: 20,
+                      leading: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: unset || alwaysAsk
+                              ? theme.colorScheme.surfaceContainerHighest
+                              : categoryColor(m.defaultCategoryName!, theme.brightness)
+                                  .withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(11),
+                          border: Border.all(
+                            color: unset || alwaysAsk
+                                ? theme.colorScheme.outlineVariant
+                                    .withValues(alpha: 0.4)
+                                : categoryColor(m.defaultCategoryName!, theme.brightness)
+                                    .withValues(alpha: 0.3),
+                            width: 1,
+                          ),
+                        ),
+                        alignment: Alignment.center,
+                        child: Text(
+                          alwaysAsk || unset
+                              ? '❓'
+                              : categoryEmoji(m.defaultCategoryName!),
+                          style: const TextStyle(fontSize: 20),
                         ),
                       ),
                       title: Text(

@@ -32,6 +32,8 @@ import '../core/splits.dart';
 import '../ui_shared/connection_dot.dart';
 import '../ui_shared/dashboard_tab.dart';
 import '../ui_shared/formats.dart';
+import '../ui_shared/theme_controller.dart';
+import '../ui_shared/theme_models.dart';
 import 'api_client.dart';
 import 'edit_sheets.dart';
 import 'session.dart';
@@ -349,6 +351,7 @@ class _WebShellState extends State<WebShell> {
         actions: <Widget>[
           if (_devices.length > 1) _devicePicker(),
           _syncedLabel(),
+          _themeMenu(context),
           IconButton(
             // A mouse cannot pull to refresh, so the shared tabs'
             // RefreshIndicator is unreachable here and this is the way in.
@@ -533,6 +536,78 @@ class _WebShellState extends State<WebShell> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _themeMenu(BuildContext context) {
+    final ThemeController controller = ThemeController.instance;
+    return PopupMenuButton<void>(
+      tooltip: 'Appearance & Theme',
+      icon: const Icon(Icons.palette_outlined),
+      itemBuilder: (BuildContext context) => <PopupMenuEntry<void>>[
+        const PopupMenuItem<void>(
+          enabled: false,
+          child: Text(
+            'THEME MODE',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
+          ),
+        ),
+        for (final AppThemeMode mode in AppThemeMode.values)
+          PopupMenuItem<void>(
+            onTap: () => controller.setThemeMode(mode),
+            child: Row(
+              children: <Widget>[
+                Icon(
+                  mode.icon,
+                  size: 18,
+                  color: controller.appThemeMode == mode
+                      ? Theme.of(context).colorScheme.primary
+                      : null,
+                ),
+                const SizedBox(width: 12),
+                Expanded(child: Text(mode.label)),
+                if (controller.appThemeMode == mode)
+                  Icon(
+                    Icons.check,
+                    size: 18,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+              ],
+            ),
+          ),
+        const PopupMenuDivider(),
+        const PopupMenuItem<void>(
+          enabled: false,
+          child: Text(
+            'ACCENT COLOR',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
+          ),
+        ),
+        for (final AppAccentColor accent in AppAccentColor.values)
+          PopupMenuItem<void>(
+            onTap: () => controller.setAccentColor(accent),
+            child: Row(
+              children: <Widget>[
+                Container(
+                  width: 16,
+                  height: 16,
+                  decoration: BoxDecoration(
+                    color: accent.seedColor,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(child: Text(accent.label)),
+                if (controller.accentColor == accent)
+                  Icon(
+                    Icons.check,
+                    size: 18,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 

@@ -16,6 +16,7 @@ import '../core/ledger.dart';
 import '../core/models.dart';
 import '../core/parser.dart';
 import '../core/splits.dart';
+import '../ui_shared/palette.dart';
 
 class AppDatabase {
   AppDatabase._();
@@ -62,7 +63,8 @@ class AppDatabase {
     await db.execute('''
       CREATE TABLE categories (
         id   INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE COLLATE NOCASE
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        icon TEXT NOT NULL DEFAULT ''
       )
     ''');
 
@@ -100,7 +102,10 @@ class AppDatabase {
 
     final batch = db.batch();
     for (final name in _defaultCategories) {
-      batch.insert('categories', <String, Object?>{'name': name});
+      batch.insert('categories', <String, Object?>{
+        'name': name,
+        'icon': categoryEmoji(name),
+      });
     }
     await batch.commit(noResult: true);
   }
@@ -285,6 +290,19 @@ class AppDatabase {
         await db.execute('ALTER TABLE deleted_transactions ADD COLUMN note TEXT');
       }
     }
+    if (oldVersion < 8) {
+      await db.execute(
+        "ALTER TABLE categories ADD COLUMN icon TEXT NOT NULL DEFAULT ''",
+      );
+      for (final name in _defaultCategories) {
+        await db.update(
+          'categories',
+          <String, Object?>{'icon': categoryEmoji(name)},
+          where: "name = ? AND (icon IS NULL OR icon = '')",
+          whereArgs: <Object?>[name],
+        );
+      }
+    }
   }
 
   Future<int> uncategorizedId() async {
@@ -310,17 +328,27 @@ class AppDatabase {
     return rows.map(ExpenseCategory.fromMap).toList();
   }
 
-  Future<ExpenseCategory> addCategory(String name) async {
+  Future<ExpenseCategory> addCategory(String name, {String icon = ''}) async {
     final db = await database;
     final clean = name.trim();
+    final cleanIcon =
+        icon.trim().isNotEmpty ? icon.trim() : categoryEmoji(clean);
     final id = await db.insert(
       'categories',
-      <String, Object?>{'name': clean},
+      <String, Object?>{'name': clean, 'icon': cleanIcon},
       conflictAlgorithm: ConflictAlgorithm.ignore,
     );
-    if (id != 0) return ExpenseCategory(id: id, name: clean);
+    if (id != 0) return ExpenseCategory(id: id, name: clean, icon: cleanIcon);
 
-    // Name already exists (UNIQUE NOCASE) — reuse the existing row.
+    // Name already exists (UNIQUE NOCASE) — update icon if non-empty and reuse existing row.
+    if (icon.trim().isNotEmpty) {
+      await db.update(
+        'categories',
+        <String, Object?>{'icon': icon.trim()},
+        where: 'name = ?',
+        whereArgs: <Object?>[clean],
+      );
+    }
     final rows = await db.query(
       'categories',
       where: 'name = ?',
@@ -328,6 +356,26 @@ class AppDatabase {
       limit: 1,
     );
     return ExpenseCategory.fromMap(rows.first);
+  }
+
+  Future<void> updateCategory(
+    int id, {
+    required String name,
+    required String icon,
+  }) async {
+    final db = await database;
+    final cleanName = name.trim();
+    final cleanIcon =
+        icon.trim().isNotEmpty ? icon.trim() : categoryEmoji(cleanName);
+    await db.update(
+      'categories',
+      <String, Object?>{
+        'name': cleanName,
+        'icon': cleanIcon,
+      },
+      where: 'id = ?',
+      whereArgs: <Object?>[id],
+    );
   }
 
   /// The whole ledger, newest first, merged names applied.

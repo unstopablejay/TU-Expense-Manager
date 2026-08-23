@@ -48,6 +48,7 @@ const Set<String> _safePackages = <String>{
   'flutter',
   'fl_chart',
   'intl',
+  'shared_preferences',
 };
 
 /// What each guarded directory may import, beyond its own siblings.
