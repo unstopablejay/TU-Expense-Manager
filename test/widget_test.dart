@@ -1993,7 +1993,7 @@ void main() {
           meta: <String, String>{
             'format': kBackupFormat,
             'format_version': '$kBackupFormatVersion',
-            'schema_version': '7',
+            'schema_version': '$kSchemaVersion',
             'app_version': '1.1.0',
             'exported_at': '2026-08-17T14:32:10+05:30',
           },
@@ -2004,9 +2004,9 @@ void main() {
             },
           ],
           categories: <Map<String, Object?>>[
-            <String, Object?>{'id': 1, 'name': 'Uncategorized'},
-            <String, Object?>{'id': 2, 'name': 'Grocery'},
-            <String, Object?>{'id': 3, 'name': 'Food'},
+            <String, Object?>{'id': 1, 'name': 'Uncategorized', 'icon': ''},
+            <String, Object?>{'id': 2, 'name': 'Grocery', 'icon': ''},
+            <String, Object?>{'id': 3, 'name': 'Food', 'icon': ''},
           ],
           merchantMappings: <Map<String, Object?>>[
             <String, Object?>{'merchant_name': 'SWIGGY', 'category_id': 3},
@@ -2113,7 +2113,7 @@ void main() {
       expect(after.aliases, before.aliases);
       expect(after.appMeta, before.appMeta);
       expect(after.meta['format'], kBackupFormat);
-      expect(after.schemaVersion, 7);
+      expect(after.schemaVersion, 8);
     });
 
     // The one that would fail silently. `transactions.amount` is a REAL that

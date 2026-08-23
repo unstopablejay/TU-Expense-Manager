@@ -22,7 +22,7 @@ import '../ui_shared/connection_dot.dart';
 import '../ui_shared/dashboard_tab.dart';
 import '../ui_shared/formats.dart';
 import '../ui_shared/loading_dialog.dart';
-import '../ui_shared/theme.dart';
+import '../ui_shared/theme_controller.dart';
 import '../ui_shared/transactions_tab.dart';
 import 'auto_sync.dart';
 import 'connection_monitor.dart';
@@ -46,19 +46,28 @@ class TuExpenseTrackerApp extends StatelessWidget {
     super.key,
     this.database,
     this.smsSource,
+    this.themeController,
   });
 
   final AppDatabase? database;
   final SmsSource? smsSource;
+  final ThemeController? themeController;
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'TU Expense Tracker',
-      debugShowCheckedModeBanner: false,
-      theme: appTheme(Brightness.light),
-      darkTheme: appTheme(Brightness.dark),
-      home: HomeShell(database: database, smsSource: smsSource),
+    final controller = themeController ?? ThemeController.instance;
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (BuildContext context, Widget? child) {
+        return MaterialApp(
+          title: 'TU Expense Tracker',
+          debugShowCheckedModeBanner: false,
+          theme: controller.lightTheme,
+          darkTheme: controller.darkTheme,
+          themeMode: controller.flutterThemeMode,
+          home: HomeShell(database: database, smsSource: smsSource),
+        );
+      },
     );
   }
 }

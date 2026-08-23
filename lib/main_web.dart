@@ -11,14 +11,15 @@ library;
 
 import 'package:flutter/material.dart';
 
-import 'src/ui_shared/theme.dart';
+import 'src/ui_shared/theme_controller.dart';
 import 'src/web/api_client.dart';
 import 'src/web/login_screen.dart';
 import 'src/web/session.dart';
 import 'src/web/web_shell.dart';
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await ThemeController.instance.load();
   runApp(const WebApp());
 }
 
@@ -65,17 +66,25 @@ class _WebAppState extends State<WebApp> {
   }
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        title: 'TU Expense Tracker',
-        debugShowCheckedModeBanner: false,
-        theme: appTheme(Brightness.light),
-        darkTheme: appTheme(Brightness.dark),
-        home: !_session.restored
-            // A blank frame rather than a login form, so someone already signed
-            // in is never shown one for an instant on every page load.
-            ? const Scaffold(body: Center(child: CircularProgressIndicator()))
-            : _session.signedIn
-                ? WebShell(api: _api, session: _session)
-                : LoginScreen(api: _api, session: _session),
-      );
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: ThemeController.instance,
+      builder: (BuildContext context, Widget? child) {
+        return MaterialApp(
+          title: 'TU Expense Tracker',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeController.instance.lightTheme,
+          darkTheme: ThemeController.instance.darkTheme,
+          themeMode: ThemeController.instance.flutterThemeMode,
+          home: !_session.restored
+              // A blank frame rather than a login form, so someone already signed
+              // in is never shown one for an instant on every page load.
+              ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+              : _session.signedIn
+                  ? WebShell(api: _api, session: _session)
+                  : LoginScreen(api: _api, session: _session),
+        );
+      },
+    );
+  }
 }

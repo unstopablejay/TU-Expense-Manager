@@ -155,11 +155,23 @@ Future<int?> pickWebCategory(
                   children: <Widget>[
                     for (final ExpenseCategory category in categories)
                       ListTile(
-                        leading: Icon(
-                          categoryIcon(category.name),
-                          color: categoryColor(
-                            category.name,
-                            Theme.of(sheetContext).brightness,
+                        leading: Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            color: categoryColor(
+                              category.name,
+                              Theme.of(sheetContext).brightness,
+                            ).withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          alignment: Alignment.center,
+                          child: Text(
+                            categoryEmoji(
+                              category.name,
+                              explicitIcon: category.icon,
+                            ),
+                            style: const TextStyle(fontSize: 18),
                           ),
                         ),
                         title: Text(category.name),

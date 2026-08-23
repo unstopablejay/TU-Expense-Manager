@@ -15,6 +15,8 @@ import '../../core/backup_data.dart';
 import '../../core/backup_validate.dart';
 import '../../core/constants.dart';
 import '../../ui_shared/loading_dialog.dart';
+import '../../ui_shared/theme_controller.dart';
+import '../../ui_shared/theme_models.dart';
 import '../auto_sync.dart';
 import '../backup_dialogs.dart';
 import '../backup_files.dart';
@@ -545,6 +547,130 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ? const Center(child: CircularProgressIndicator())
         : ListView(
             children: <Widget>[
+              SettingsHeader('Appearance'),
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16.0,
+                  vertical: 8.0,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      'Theme mode',
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: SegmentedButton<AppThemeMode>(
+                        showSelectedIcon: false,
+                        segments: const <ButtonSegment<AppThemeMode>>[
+                          ButtonSegment<AppThemeMode>(
+                            value: AppThemeMode.system,
+                            icon: Icon(Icons.brightness_auto_outlined),
+                            label: Text('System'),
+                          ),
+                          ButtonSegment<AppThemeMode>(
+                            value: AppThemeMode.light,
+                            icon: Icon(Icons.light_mode_outlined),
+                            label: Text('Light'),
+                          ),
+                          ButtonSegment<AppThemeMode>(
+                            value: AppThemeMode.dark,
+                            icon: Icon(Icons.dark_mode_outlined),
+                            label: Text('Dark'),
+                          ),
+                          ButtonSegment<AppThemeMode>(
+                            value: AppThemeMode.oled,
+                            icon: Icon(Icons.contrast),
+                            label: Text('OLED'),
+                          ),
+                        ],
+                        selected: <AppThemeMode>{
+                          ThemeController.instance.appThemeMode,
+                        },
+                        onSelectionChanged: (Set<AppThemeMode> selection) {
+                          if (selection.isNotEmpty) {
+                            ThemeController.instance.setThemeMode(
+                              selection.first,
+                            );
+                            setState(() {});
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Accent color',
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      height: 52,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: AppAccentColor.values.length,
+                        separatorBuilder: (BuildContext context, int index) =>
+                            const SizedBox(width: 12),
+                        itemBuilder: (BuildContext context, int index) {
+                          final AppAccentColor accent =
+                              AppAccentColor.values[index];
+                          final bool isSelected =
+                              ThemeController.instance.accentColor == accent;
+                          return Tooltip(
+                            message: accent.label,
+                            child: InkWell(
+                              onTap: () {
+                                ThemeController.instance.setAccentColor(accent);
+                                setState(() {});
+                              },
+                              borderRadius: BorderRadius.circular(24),
+                              child: Container(
+                                width: 48,
+                                height: 48,
+                                decoration: BoxDecoration(
+                                  color: accent.seedColor,
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: isSelected
+                                        ? theme.colorScheme.onSurface
+                                        : theme.colorScheme.outlineVariant
+                                            .withValues(alpha: 0.5),
+                                    width: isSelected ? 3 : 1,
+                                  ),
+                                  boxShadow: isSelected
+                                      ? <BoxShadow>[
+                                          BoxShadow(
+                                            color: accent.seedColor
+                                                .withValues(alpha: 0.4),
+                                            blurRadius: 8,
+                                            spreadRadius: 1,
+                                          ),
+                                        ]
+                                      : null,
+                                ),
+                                child: isSelected
+                                    ? const Icon(
+                                        Icons.check,
+                                        color: Colors.white,
+                                        size: 22,
+                                      )
+                                    : null,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 32),
               SettingsHeader('Categorization'),
                 ListTile(
                   leading: const Icon(Icons.storefront_outlined),

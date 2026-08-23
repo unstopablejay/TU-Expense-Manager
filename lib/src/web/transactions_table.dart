@@ -634,10 +634,9 @@ class _TableRowState extends State<_TableRow> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Icon(
-              needsCategory ? Icons.help_outline : categoryIcon(label),
-              size: 13,
-              color: needsCategory ? theme.colorScheme.onErrorContainer : hue,
+            Text(
+              needsCategory ? '❓' : categoryEmoji(label),
+              style: const TextStyle(fontSize: 13),
             ),
             const SizedBox(width: 5),
             Flexible(
@@ -761,8 +760,10 @@ class _FilterToolbar extends StatelessWidget {
                 selected: filters.categoryIds,
                 count: filters.categoryIds.length,
                 optionLabel: (int id) => _categoryName(id),
-                optionLeading: (int id) =>
-                    Icon(categoryIcon(_categoryName(id)), size: 18),
+                optionLeading: (int id) => Text(
+                  categoryEmoji(_categoryName(id)),
+                  style: const TextStyle(fontSize: 16),
+                ),
                 onChanged: (Set<int> picked) =>
                     onFiltersChanged(filters.copyWith(categoryIds: picked)),
               ),
@@ -1127,10 +1128,9 @@ class _SummaryStrip extends StatelessWidget {
                 theme.colorScheme.error),
           for (final MapEntry<String, double> item in breakdown.take(3))
             Chip(
-              avatar: Icon(
-                categoryIcon(item.key),
-                size: 16,
-                color: categoryColor(item.key, theme.brightness),
+              avatar: Text(
+                categoryEmoji(item.key),
+                style: const TextStyle(fontSize: 14),
               ),
               label: Text('${item.key} · ${money.format(item.value)}'),
               visualDensity: VisualDensity.compact,

@@ -175,11 +175,14 @@ class TransactionsTab extends StatelessWidget {
                 label: (int id) => categoryChoices
                     .firstWhere((ExpenseCategory c) => c.id == id)
                     .name,
-                leading: (int id) => Icon(
-                  categoryIcon(categoryChoices
-                      .firstWhere((ExpenseCategory c) => c.id == id)
-                      .name),
-                ),
+                leading: (int id) {
+                  final cat = categoryChoices
+                      .firstWhere((ExpenseCategory c) => c.id == id);
+                  return Text(
+                    categoryEmoji(cat.name, explicitIcon: cat.icon),
+                    style: const TextStyle(fontSize: 18),
+                  );
+                },
               );
               if (picked != null) {
                 onFiltersChanged(filters.copyWith(categoryIds: picked));
@@ -668,7 +671,10 @@ class _SummaryHeader extends StatelessWidget {
               children: <Widget>[
                 for (final entry in breakdown.take(6))
                   Chip(
-                    avatar: Icon(categoryIcon(entry.key), size: 18),
+                    avatar: Text(
+                      categoryEmoji(entry.key),
+                      style: const TextStyle(fontSize: 16),
+                    ),
                     label: Text('${entry.key} · ${money.format(entry.value)}'),
                     visualDensity: VisualDensity.compact,
                   ),
@@ -735,40 +741,75 @@ class _TransactionTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final needsCategory = txn.isUncategorized;
+    final Color catColor = categoryColor(txn.categoryName, theme.brightness);
+    final Color credColor = creditColor(theme);
+    final Color accentBadgeColor = needsCategory
+        ? theme.colorScheme.error
+        : (txn.isCredit ? credColor : catColor);
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
+      elevation: 0,
       clipBehavior: Clip.antiAlias,
-      color: selected ? theme.colorScheme.primaryContainer : null,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: selected
+              ? theme.colorScheme.primary
+              : theme.colorScheme.outlineVariant.withValues(
+                  alpha: theme.brightness == Brightness.dark ? 0.25 : 0.5,
+                ),
+          width: selected ? 1.5 : 1,
+        ),
+      ),
+      color: selected
+          ? theme.colorScheme.primaryContainer.withValues(alpha: 0.6)
+          : null,
       child: ListTile(
         onTap: onTap,
         onLongPress: onLongPress,
         selected: selected,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         leading: selected
-            ? CircleAvatar(
-                backgroundColor: theme.colorScheme.primary,
-                foregroundColor: theme.colorScheme.onPrimary,
-                child: const Icon(Icons.check),
-              )
-            : CircleAvatar(
-                backgroundColor: needsCategory
-                    ? theme.colorScheme.errorContainer
-                    : theme.colorScheme.secondaryContainer,
-                foregroundColor: needsCategory
-                    ? theme.colorScheme.onErrorContainer
-                    : theme.colorScheme.onSecondaryContainer,
+            ? Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primary,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                alignment: Alignment.center,
                 child: Icon(
-                  txn.isCredit
-                      ? Icons.south_west
-                      : categoryIcon(txn.categoryName),
+                  Icons.check,
+                  color: theme.colorScheme.onPrimary,
+                  size: 22,
+                ),
+              )
+            : Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: accentBadgeColor.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: accentBadgeColor.withValues(alpha: 0.28),
+                    width: 1,
+                  ),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  txn.isCredit ? '💰' : categoryEmoji(txn.categoryName),
+                  style: const TextStyle(fontSize: 22),
                 ),
               ),
         title: Text(
           txn.merchant,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontWeight: FontWeight.w600),
+          style: theme.textTheme.titleMedium?.copyWith(
+            fontWeight: FontWeight.w600,
+            letterSpacing: -0.2,
+          ),
         ),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -778,7 +819,9 @@ class _TransactionTile extends StatelessWidget {
               '${txn.paymentType} · ${dateFormat.format(txn.date)}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.bodySmall,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
             ),
             const SizedBox(height: 6),
             Row(
@@ -788,10 +831,16 @@ class _TransactionTile extends StatelessWidget {
                   padding:
                       const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                   decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(20),
+                    borderRadius: BorderRadius.circular(8),
                     color: needsCategory
                         ? theme.colorScheme.errorContainer
                         : theme.colorScheme.surfaceContainerHighest,
+                    border: Border.all(
+                      color: needsCategory
+                          ? theme.colorScheme.error.withValues(alpha: 0.4)
+                          : theme.colorScheme.outlineVariant.withValues(alpha: 0.3),
+                      width: 0.8,
+                    ),
                   ),
                   child: Text(
                     !needsCategory
@@ -802,6 +851,7 @@ class _TransactionTile extends StatelessWidget {
                             ? kUncategorized
                             : 'Tap to categorize or split',
                     style: theme.textTheme.labelSmall?.copyWith(
+                      fontWeight: FontWeight.w500,
                       color: needsCategory
                           ? theme.colorScheme.onErrorContainer
                           : theme.colorScheme.onSurfaceVariant,
@@ -840,10 +890,13 @@ class _TransactionTile extends StatelessWidget {
         trailing: Text(
           txn.isCredit
               ? '+${money.format(shownAmount ?? txn.amount)}'
-              : money.format(shownAmount ?? txn.amount),
+              : '-${money.format(shownAmount ?? txn.amount)}',
           style: theme.textTheme.titleMedium?.copyWith(
             fontWeight: FontWeight.bold,
-            color: txn.isCredit ? creditColor(theme) : null,
+            letterSpacing: -0.3,
+            color: txn.isCredit
+                ? credColor
+                : theme.colorScheme.onSurface,
           ),
         ),
       ),

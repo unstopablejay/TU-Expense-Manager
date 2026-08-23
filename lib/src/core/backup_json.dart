@@ -50,6 +50,7 @@ const Map<String, Map<String, _Col>> _columns = <String, Map<String, _Col>>{
   kJsonCategories: <String, _Col>{
     'id': _Col.int_,
     'name': _Col.text,
+    'icon': _Col.text,
   },
   kJsonMerchantMappings: <String, _Col>{
     'merchant_name': _Col.text,

@@ -11,6 +11,243 @@ import 'package:flutter/material.dart';
 import '../core/constants.dart';
 import '../core/ledger.dart';
 
+/// The default emojis mapped for standard categories.
+const Map<String, String> _seededCategoryEmojis = <String, String>{
+  'grocery': '🛒',
+  'food': '🍔',
+  'fuel': '⛽',
+  'shopping': '🛍️',
+  'bills & utilities': '💡',
+  'bills': '💡',
+  'travel': '✈️',
+  'entertainment': '🎬',
+  'health': '💊',
+  'uncategorized': '❓',
+  'income': '💰',
+  'salary': '💰',
+  'credit': '💰',
+};
+
+/// Popular emojis for category selection in pickers and sheets.
+const List<String> kCuratedCategoryEmojis = <String>[
+  '🛒', '🍔', '⛽', '🛍️', '💡', '✈️', '🎬', '💊',
+  '☕', '🍕', '🍻', '🏠', '🏋️', '🚕', '🚗', '🎮',
+  '🐾', '📚', '🎁', '📺', '💻', '📱', '✂️', '👗',
+  '🏖️', '🍿', '🥖', '🍎', '🍰', '🍜', '💰', '🧾',
+  '📈', '🛡️', '🩺', '⚡', '🔧', '📦', '🎓', '🏷️',
+];
+
+/// Smart emoji suggestions for any category name based on keyword matches.
+String suggestCategoryEmoji(String category) {
+  final String key = category.trim().toLowerCase();
+  if (key.isEmpty) return '🏷️';
+  if (_seededCategoryEmojis.containsKey(key)) {
+    return _seededCategoryEmojis[key]!;
+  }
+
+  if (key.contains('coffee') ||
+      key == 'tea' ||
+      key.contains('tea ') ||
+      key.contains(' tea') ||
+      key.contains('chai') ||
+      key.contains('cafe') ||
+      key.contains('starbucks')) {
+    return '☕';
+  }
+  if (key.contains('pizza') ||
+      key.contains('burger') ||
+      key.contains('snack') ||
+      key.contains('dine') ||
+      key.contains('restau') ||
+      key.contains('swiggy') ||
+      key.contains('zomato')) {
+    return '🍔';
+  }
+  if (key.contains('beer') ||
+      key.contains('wine') ||
+      key.contains('bar') ||
+      key.contains('pub') ||
+      key.contains('drink') ||
+      key.contains('alcohol')) {
+    return '🍻';
+  }
+  if (key.contains('grocery') ||
+      key.contains('zepto') ||
+      key.contains('blinkit') ||
+      key.contains('instamart') ||
+      key.contains('supermarket')) {
+    return '🛒';
+  }
+  if (key.contains('rent') ||
+      key.contains('house') ||
+      key.contains('home') ||
+      key.contains('flat') ||
+      key.contains('apartment') ||
+      key.contains('maint')) {
+    return '🏠';
+  }
+  if (key.contains('pet') ||
+      key.contains('dog') ||
+      key.contains('cat') ||
+      key.contains('vet')) {
+    return '🐾';
+  }
+  if (key.contains('gym') ||
+      key.contains('fitness') ||
+      key.contains('workout') ||
+      key.contains('sport') ||
+      key.contains('yoga')) {
+    return '🏋️';
+  }
+  if (key.contains('fuel') ||
+      key.contains('petrol') ||
+      key.contains('diesel') ||
+      key.contains('cng') ||
+      key.contains('gas')) {
+    return '⛽';
+  }
+  if (key.contains('cab') ||
+      key.contains('taxi') ||
+      key.contains('uber') ||
+      key.contains('ola') ||
+      key.contains('rapido') ||
+      key.contains('auto')) {
+    return '🚕';
+  }
+  if (key.contains('flight') ||
+      key.contains('airline') ||
+      key.contains('airfare') ||
+      key.contains('airport') ||
+      key.contains('trip') ||
+      key.contains('travel') ||
+      key.contains('hotel') ||
+      key.contains('vacation') ||
+      key.contains('tour')) {
+    return '✈️';
+  }
+  if (key.contains('movie') ||
+      key.contains('cinema') ||
+      key.contains('theatre') ||
+      key.contains('show') ||
+      key.contains('event')) {
+    return '🎬';
+  }
+  if (key.contains('game') ||
+      key.contains('gaming') ||
+      key.contains('steam') ||
+      key.contains('playstation') ||
+      key.contains('xbox')) {
+    return '🎮';
+  }
+  if (key.contains('netflix') ||
+      key.contains('spotify') ||
+      key.contains('prime') ||
+      key.contains('youtube') ||
+      key.contains('subscrip') ||
+      key.contains('ott')) {
+    return '📺';
+  }
+  if (key.contains('book') ||
+      key.contains('education') ||
+      key.contains('course') ||
+      key.contains('college') ||
+      key.contains('school') ||
+      key.contains('tuition')) {
+    return '📚';
+  }
+  if (key.contains('health') ||
+      key.contains('med') ||
+      key.contains('doctor') ||
+      key.contains('hospital') ||
+      key.contains('pharmacy') ||
+      key.contains('clinic')) {
+    return '💊';
+  }
+  if (key.contains('salon') ||
+      key.contains('barber') ||
+      key.contains('hair') ||
+      key.contains('spa') ||
+      key.contains('beauty') ||
+      key.contains('groom')) {
+    return '✂️';
+  }
+  if (key.contains('cloth') ||
+      key.contains('wear') ||
+      key.contains('dress') ||
+      key.contains('shirt') ||
+      key.contains('fashion') ||
+      key.contains('myntra')) {
+    return '👗';
+  }
+  if (key.contains('tech') ||
+      key.contains('laptop') ||
+      key.contains('comput') ||
+      key.contains('apple') ||
+      key.contains('gadget') ||
+      key.contains('electron')) {
+    return '💻';
+  }
+  if (key.contains('phone') ||
+      key.contains('mobile') ||
+      key.contains('recharge') ||
+      key.contains('wifi') ||
+      key.contains('broadband') ||
+      key.contains('internet')) {
+    return '📱';
+  }
+  if (key.contains('gift') ||
+      key.contains('donat') ||
+      key.contains('charity') ||
+      key.contains('present')) {
+    return '🎁';
+  }
+  if (key.contains('invest') ||
+      key.contains('stock') ||
+      key.contains('mutual') ||
+      key.contains('crypto') ||
+      key.contains('gold') ||
+      key.contains('share')) {
+    return '📈';
+  }
+  if (key.contains('insur') ||
+      key.contains('policy') ||
+      key.contains('lic') ||
+      key.contains('protect')) {
+    return '🛡️';
+  }
+  if (key.contains('salary') ||
+      key.contains('bonus') ||
+      key.contains('freelance') ||
+      key.contains('income') ||
+      key.contains('earn')) {
+    return '💰';
+  }
+  if (key.contains('bill') ||
+      key.contains('utilit') ||
+      key.contains('electric') ||
+      key.contains('power') ||
+      key.contains('water')) {
+    return '💡';
+  }
+  if (key.contains('shop') ||
+      key.contains('amazon') ||
+      key.contains('flipkart') ||
+      key.contains('store') ||
+      key.contains('mall')) {
+    return '🛍️';
+  }
+
+  return '🏷️';
+}
+
+/// Resolves the emoji for a category, honoring [explicitIcon] if provided.
+String categoryEmoji(String category, {String? explicitIcon}) {
+  if (explicitIcon != null && explicitIcon.trim().isNotEmpty) {
+    return explicitIcon.trim();
+  }
+  return suggestCategoryEmoji(category);
+}
+
 IconData categoryIcon(String category) {
   switch (category.toLowerCase()) {
     case 'grocery':

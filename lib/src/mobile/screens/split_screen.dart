@@ -235,10 +235,20 @@ class _SplitScreenState extends State<SplitScreen> {
                     onPressed: () => _pickCategoryFor(row),
                     child: Row(
                       children: <Widget>[
-                        Icon(
-                          categoryIcon(row.category?.name ?? ''),
-                          size: 18,
-                        ),
+                        if (row.category != null)
+                          Text(
+                            categoryEmoji(
+                              row.category!.name,
+                              explicitIcon: row.category!.icon,
+                            ),
+                            style: const TextStyle(fontSize: 16),
+                          )
+                        else
+                          Icon(
+                            Icons.category_outlined,
+                            size: 18,
+                            color: theme.colorScheme.primary,
+                          ),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(

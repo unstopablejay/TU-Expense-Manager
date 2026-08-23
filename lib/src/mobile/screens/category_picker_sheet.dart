@@ -76,7 +76,10 @@ class _CategoryPickerSheetState extends State<CategoryPickerSheet> {
     final name = _newCategory.text.trim();
     if (name.isEmpty || _creating) return;
     setState(() => _creating = true);
-    final category = await AppDatabase.instance.addCategory(name);
+    final category = await AppDatabase.instance.addCategory(
+      name,
+      icon: suggestCategoryEmoji(name),
+    );
     if (!mounted) return;
     _choose(category);
   }
@@ -111,9 +114,9 @@ class _CategoryPickerSheetState extends State<CategoryPickerSheet> {
               Text(widget.subtitle!, style: theme.textTheme.bodySmall),
             ],
             const SizedBox(height: 16),
-            if (widget.alwaysAskLabel != null && uncategorized != null) ...[
+            if (widget.alwaysAskLabel != null && uncategorized != null) ...<Widget>[
               ActionChip(
-                avatar: const Icon(Icons.help_outline, size: 18),
+                avatar: const Text('❓', style: TextStyle(fontSize: 16)),
                 label: Text(widget.alwaysAskLabel!),
                 onPressed: () => _choose(uncategorized),
               ),
@@ -129,7 +132,13 @@ class _CategoryPickerSheetState extends State<CategoryPickerSheet> {
                   // actually describe what it does.
                   if (category.name != kUncategorized)
                     ChoiceChip(
-                      avatar: Icon(categoryIcon(category.name), size: 18),
+                      avatar: Text(
+                        categoryEmoji(
+                          category.name,
+                          explicitIcon: category.icon,
+                        ),
+                        style: const TextStyle(fontSize: 16),
+                      ),
                       label: Text(category.name),
                       selected: category.id == widget.selectedId,
                       onSelected: (_) => _choose(category),

@@ -52,25 +52,63 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
       usage.category.name == kUncategorized;
 
   Future<void> _add() async {
-    final String? name = await showModalBottomSheet<String>(
+    final _CategoryFormResult? result =
+        await showModalBottomSheet<_CategoryFormResult>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (_) => _NewCategorySheet(
+      builder: (_) => _CategoryEditorSheet(
+        title: 'New category',
+        buttonLabel: 'Add',
         taken: <String>[
           for (final CategoryUsage usage in _usage) usage.category.name,
         ],
       ),
     );
-    if (name == null || !mounted) return;
+    if (result == null || !mounted) return;
 
-    final ExpenseCategory added = await _db.addCategory(name);
+    final ExpenseCategory added =
+        await _db.addCategory(result.name, icon: result.icon);
     await _load();
     if (!mounted) return;
 
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text('Added ${added.name}')));
+  }
+
+  Future<void> _edit(CategoryUsage usage) async {
+    final _CategoryFormResult? result =
+        await showModalBottomSheet<_CategoryFormResult>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => _CategoryEditorSheet(
+        title: 'Edit category',
+        buttonLabel: 'Save',
+        initialName: usage.category.name,
+        initialIcon: usage.category.icon.isNotEmpty
+            ? usage.category.icon
+            : categoryEmoji(usage.category.name),
+        taken: <String>[
+          for (final CategoryUsage other in _usage)
+            if (other.category.id != usage.category.id) other.category.name,
+        ],
+      ),
+    );
+    if (result == null || !mounted) return;
+
+    await _db.updateCategory(
+      usage.category.id,
+      name: result.name,
+      icon: result.icon,
+    );
+    await _load();
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text('Updated ${result.name}')));
   }
 
   Future<void> _delete(CategoryUsage usage) async {
@@ -153,21 +191,53 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
               itemBuilder: (BuildContext context, int index) {
                 final CategoryUsage usage = _usage[index];
                 final String name = usage.category.name;
+                final Color catColor = categoryColor(name, brightness);
 
                 return ListTile(
-                  leading: Icon(
-                    categoryIcon(name),
-                    color: categoryColor(name, brightness),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  leading: Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: catColor.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: catColor.withValues(alpha: 0.3),
+                        width: 1,
+                      ),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      categoryEmoji(name, explicitIcon: usage.category.icon),
+                      style: const TextStyle(fontSize: 22),
+                    ),
                   ),
-                  title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  title: Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
                   subtitle: Text(_subtitle(usage)),
+                  onTap: _isFallback(usage) ? null : () => _edit(usage),
                   trailing: _isFallback(usage)
                       ? null
-                      : IconButton(
-                          tooltip: 'Delete $name',
-                          icon: const Icon(Icons.delete_outline),
-                          color: theme.colorScheme.error,
-                          onPressed: () => _delete(usage),
+                      : Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            IconButton(
+                              tooltip: 'Edit $name',
+                              icon: const Icon(Icons.edit_outlined),
+                              onPressed: () => _edit(usage),
+                            ),
+                            IconButton(
+                              tooltip: 'Delete $name',
+                              icon: const Icon(Icons.delete_outline),
+                              color: theme.colorScheme.error,
+                              onPressed: () => _delete(usage),
+                            ),
+                          ],
                         ),
                 );
               },
@@ -176,48 +246,73 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
   }
 }
 
-/// Names a new category.
-///
-/// The names already in use come in so a collision is caught while it is still
-/// being typed. [AppDatabase.addCategory] would quietly hand back the existing
-/// row instead — exactly right for the picker on a transaction, where the user
-/// wants *a* category by that name and does not care whether it had to be
-/// created, and wrong here, where the list is the subject and an Add that
-/// appears to do nothing is the whole confusion.
-class _NewCategorySheet extends StatefulWidget {
-  const _NewCategorySheet({required this.taken});
+class _CategoryFormResult {
+  const _CategoryFormResult({required this.name, required this.icon});
 
-  final List<String> taken;
-
-  @override
-  State<_NewCategorySheet> createState() => _NewCategorySheetState();
+  final String name;
+  final String icon;
 }
 
-class _NewCategorySheetState extends State<_NewCategorySheet> {
-  final TextEditingController _name = TextEditingController();
+/// Names and styles a category with an emoji.
+class _CategoryEditorSheet extends StatefulWidget {
+  const _CategoryEditorSheet({
+    required this.title,
+    required this.buttonLabel,
+    required this.taken,
+    this.initialName = '',
+    this.initialIcon = '',
+  });
 
-  /// Lower-cased name to the spelling on screen, so a clash can be reported in
-  /// the words the list actually shows.
-  ///
-  /// Case-insensitive because the column is `UNIQUE COLLATE NOCASE` — "grocery"
-  /// would not be a second category, it would be a failed insert. Dart's
-  /// lower-casing is the Unicode one and SQLite's NOCASE only folds ASCII, so
-  /// this can refuse a name the table would have taken; erring towards refusing
-  /// is the harmless direction.
+  final String title;
+  final String buttonLabel;
+  final List<String> taken;
+  final String initialName;
+  final String initialIcon;
+
+  @override
+  State<_CategoryEditorSheet> createState() => _CategoryEditorSheetState();
+}
+
+class _CategoryEditorSheetState extends State<_CategoryEditorSheet> {
+  late final TextEditingController _name =
+      TextEditingController(text: widget.initialName);
+  late final TextEditingController _customEmoji =
+      TextEditingController(text: widget.initialIcon);
+  late String _selectedEmoji;
+  late bool _userPickedEmojiManually;
+
   late final Map<String, String> _taken = <String, String>{
     for (final String name in widget.taken) name.toLowerCase(): name,
   };
 
   @override
+  void initState() {
+    super.initState();
+    _selectedEmoji = widget.initialIcon.trim().isNotEmpty
+        ? widget.initialIcon.trim()
+        : (widget.initialName.trim().isNotEmpty
+            ? categoryEmoji(widget.initialName)
+            : '🏷️');
+    _userPickedEmojiManually = widget.initialIcon.trim().isNotEmpty;
+  }
+
+  @override
   void dispose() {
     _name.dispose();
+    _customEmoji.dispose();
     super.dispose();
   }
 
   void _submit() {
     final String name = _name.text.trim();
     if (name.isEmpty || _taken.containsKey(name.toLowerCase())) return;
-    Navigator.pop(context, name);
+    final String icon = _selectedEmoji.trim().isNotEmpty
+        ? _selectedEmoji.trim()
+        : suggestCategoryEmoji(name);
+    Navigator.pop(
+      context,
+      _CategoryFormResult(name: name, icon: icon),
+    );
   }
 
   @override
@@ -225,6 +320,8 @@ class _NewCategorySheetState extends State<_NewCategorySheet> {
     final theme = Theme.of(context);
     final String typed = _name.text.trim();
     final String? clash = _taken[typed.toLowerCase()];
+    final Color previewColor =
+        categoryColor(typed.isEmpty ? 'Category' : typed, theme.brightness);
 
     return Padding(
       // Lifts the field clear of the keyboard.
@@ -238,36 +335,142 @@ class _NewCategorySheetState extends State<_NewCategorySheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Text('New category', style: theme.textTheme.titleLarge),
+            Text(widget.title, style: theme.textTheme.titleLarge),
             const SizedBox(height: 4),
             Text(
-              'It joins the picker on every transaction and can be set as a '
-              "merchant's default.",
+              'Customize your category name and unique colourful emoji.',
               style: theme.textTheme.bodySmall,
             ),
             const SizedBox(height: 16),
-            TextField(
-              controller: _name,
-              autofocus: true,
-              textCapitalization: TextCapitalization.words,
-              onChanged: (_) => setState(() {}),
-              onSubmitted: (_) => _submit(),
-              decoration: InputDecoration(
-                isDense: true,
-                border: const OutlineInputBorder(),
-                labelText: 'Call it',
-                errorText: clash == null ? null : '$clash already exists',
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    color: previewColor.withValues(alpha: 0.18),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: previewColor.withValues(alpha: 0.45),
+                      width: 1.5,
+                    ),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    _selectedEmoji,
+                    style: const TextStyle(fontSize: 28),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _name,
+                    autofocus: widget.initialName.isEmpty,
+                    textCapitalization: TextCapitalization.words,
+                    onChanged: (String val) {
+                      if (!_userPickedEmojiManually) {
+                        _selectedEmoji = suggestCategoryEmoji(val);
+                      }
+                      setState(() {});
+                    },
+                    onSubmitted: (_) => _submit(),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      border: const OutlineInputBorder(),
+                      labelText: 'Category name',
+                      errorText: clash == null ? null : '$clash already exists',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Quick emoji picker',
+              style: theme.textTheme.labelMedium?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 48,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: kCuratedCategoryEmojis.length,
+                separatorBuilder: (_, _) => const SizedBox(width: 8),
+                itemBuilder: (BuildContext ctx, int i) {
+                  final String emoji = kCuratedCategoryEmojis[i];
+                  final bool isSelected = _selectedEmoji == emoji;
+                  return InkWell(
+                    onTap: () {
+                      setState(() {
+                        _selectedEmoji = emoji;
+                        _customEmoji.text = emoji;
+                        _userPickedEmojiManually = true;
+                      });
+                    },
+                    borderRadius: BorderRadius.circular(12),
+                    child: Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: isSelected
+                            ? theme.colorScheme.primaryContainer
+                            : theme.colorScheme.surfaceContainerHighest
+                                .withValues(alpha: 0.6),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: isSelected
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.outlineVariant
+                                  .withValues(alpha: 0.4),
+                          width: isSelected ? 2 : 1,
+                        ),
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(
+                        emoji,
+                        style: const TextStyle(fontSize: 22),
+                      ),
+                    ),
+                  );
+                },
               ),
             ),
             const SizedBox(height: 12),
             Row(
               children: <Widget>[
+                SizedBox(
+                  width: 140,
+                  child: TextField(
+                    controller: _customEmoji,
+                    maxLength: 2,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                      labelText: 'Custom emoji',
+                      counterText: '',
+                    ),
+                    onChanged: (String val) {
+                      if (val.trim().isNotEmpty) {
+                        setState(() {
+                          _selectedEmoji = val.trim();
+                          _userPickedEmojiManually = true;
+                        });
+                      }
+                    },
+                  ),
+                ),
                 const Spacer(),
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                const SizedBox(width: 8),
                 FilledButton(
-                  // Dead until there is a name that can actually be inserted,
-                  // rather than pressable and silently ineffective.
                   onPressed: typed.isEmpty || clash != null ? null : _submit,
-                  child: const Text('Add'),
+                  child: Text(widget.buttonLabel),
                 ),
               ],
             ),
@@ -330,7 +533,6 @@ class _DeleteCategorySheetState extends State<_DeleteCategorySheet> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final Brightness brightness = theme.brightness;
     final CategoryUsage usage = widget.usage;
 
     return Padding(
@@ -358,10 +560,12 @@ class _DeleteCategorySheetState extends State<_DeleteCategorySheet> {
                 children: <Widget>[
                   for (final ExpenseCategory category in widget.destinations)
                     ChoiceChip(
-                      avatar: Icon(
-                        categoryIcon(category.name),
-                        size: 18,
-                        color: categoryColor(category.name, brightness),
+                      avatar: Text(
+                        categoryEmoji(
+                          category.name,
+                          explicitIcon: category.icon,
+                        ),
+                        style: const TextStyle(fontSize: 16),
                       ),
                       label: Text(category.name),
                       selected: category.id == _into.id,

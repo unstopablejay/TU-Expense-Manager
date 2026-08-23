@@ -80,8 +80,21 @@ When filters change:
 
 ---
 
-## 4. UI Patterns & Form Fields
+## 4. UI Patterns, Multi-Theme System, Category Emojis & Cards
 
+- **Category Emojis & Smart Keyword Matcher (`lib/src/ui_shared/palette.dart`, `categories_screen.dart`, `models.dart`)**:
+  - **Vibrant WhatsApp / Fluent Style Category Emojis**: Every category has a colorful emoji representation. Defaults include 🛒 Grocery, 🍔 Food, ⛽ Fuel, 🛍️ Shopping, 💡 Bills & Utilities, ✈️ Travel, 🎬 Entertainment, 💊 Health, ❓ Uncategorized, and 💰 Income.
+  - **Smart Automatic Keyword Matching (`suggestCategoryEmoji`)**: Automatically suggests contextual emojis when typing category names (e.g. coffee/cafe -> ☕, rent/house -> 🏠, gym/fitness -> 🏋️, cab/uber -> 🚕, pet/dog -> 🐾, gaming/steam -> 🎮, books/college -> 📚, salon/hair -> ✂️, bills -> 💡, crypto/stocks -> 📈, etc.).
+  - **Interactive Category Editor Sheet (`_CategoryEditorSheet`)**: Features a live squircle emoji avatar preview, real-time auto-suggestion based on input text, a curated quick-pick emoji selector grid (`kCuratedCategoryEmojis`), custom emoji text input, and full edit/rename support.
+- **Modern Fintech Rounded Transaction Cards (`lib/src/ui_shared/transactions_tab.dart`)**:
+  - **Copilot / Revolut Inspired Card Design**: 16px corner radius (`BorderRadius.circular(16)`), subtle outline border with elevation 0.
+  - **Tinted Squircle Badges**: 44x44 tinted squircle avatar (`BorderRadius.circular(12)`) featuring a 15% alpha background tint of the category chart hue and 30% alpha outline border, enclosing a bold 22px category emoji (or `💰` for credits).
+  - **Clear Typography & Directional Color**: Bold merchant titles, subtext for account & date metadata, 8px rounded category badge with border, and right-aligned bold amounts with explicit `+` (accent green) for credits and `-` for debits.
+- **Multi-Theme & Pitch Black OLED Architecture (`lib/src/ui_shared/theme.dart`, `theme_models.dart`, `theme_controller.dart`)**:
+  - **Two-Tier Customization**: Base mode (`AppThemeMode`: `system`, `light`, `dark`, `oled`) + Accent color palette (`AppAccentColor`: `blue`, `red`, `green`, `purple`, `orange`, `pink`, `cyan`, `amber`).
+  - **Pitch Black OLED Mode**: Pure `#000000` pitch black scaffold, app bar, and bottom navigation bar backgrounds paired with `#121418` deep obsidian card and dialog containers, providing true black pixel shut-off for OLED displays while preserving structural visual hierarchy.
+  - **State Management & Persistence**: `ThemeController` (singleton `ChangeNotifier`) automatically persists preferences via `ThemePrefs` (`theme.mode`, `theme.accent`) and seamlessly synchronizes active theme across both Mobile (`TuExpenseTrackerApp`) and Web (`WebApp`, `WebShell`).
+  - **Inline Settings UI**: Segmented buttons for Base Mode selection and horizontal scrollable color swatch circles for live instant theme switching.
 - **Password Visibility Toggle**: All credential and password input fields (e.g. `_CredentialsDialog` on mobile and `LoginScreen` on web) must include an eye icon button (`IconButton`) toggling `obscureText` between masked and visible states.
 - **Active Filter Display**: Filter selections are presented immediately as individual removable tokens in `ActiveFiltersBar`.
 - **Visual Loading Modals & Coin Progress Bar (`lib/src/ui_shared/loading_dialog.dart`)**:
@@ -94,8 +107,8 @@ When filters change:
 
 ## 5. Database Schema Reference
 
-SQLite database runs on version 7:
-- `categories`: Available expense categories.
+SQLite database runs on version 8 (`kSchemaVersion = 8`):
+- `categories`: Available expense categories (`id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL COLLATE NOCASE, icon TEXT NOT NULL DEFAULT ''`).
 - `merchant_mappings`: Direct `merchant_name` (PK, NOCASE) to `category_id` mapping.
 - `name_aliases`: Merged merchant or payment type labels.
 - `transactions`: Core transaction records.
@@ -104,7 +117,8 @@ SQLite database runs on version 7:
 - `app_meta`: Persistent metadata (e.g., `last_scanned_sms_date`).
 
 > [!NOTE]
-> For split transactions, `transactions.category_id` is a denormalized cache storing the ID of the split line with the highest amount. This dominant category is used for fallback sorting and display.
+> - In schema v8, the `icon` column stores custom category emojis. When empty, `categoryEmoji(name)` falls back to seeded emojis and smart keyword matching.
+> - For split transactions, `transactions.category_id` is a denormalized cache storing the ID of the split line with the highest amount. This dominant category is used for fallback sorting and display.
 
 ---
 

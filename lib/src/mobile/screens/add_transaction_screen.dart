@@ -635,13 +635,23 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
                       ListTile(
                         contentPadding: EdgeInsets.zero,
                         leading: _selectedCategory != null
-                            ? CircleAvatar(
-                                radius: 18,
-                                backgroundColor: colorScheme.primaryContainer,
-                                child: Icon(
-                                  categoryIcon(_selectedCategory!.name),
-                                  size: 18,
-                                  color: colorScheme.onPrimaryContainer,
+                            ? Container(
+                                width: 36,
+                                height: 36,
+                                decoration: BoxDecoration(
+                                  color: categoryColor(
+                                    _selectedCategory!.name,
+                                    theme.brightness,
+                                  ).withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                alignment: Alignment.center,
+                                child: Text(
+                                  categoryEmoji(
+                                    _selectedCategory!.name,
+                                    explicitIcon: _selectedCategory!.icon,
+                                  ),
+                                  style: const TextStyle(fontSize: 18),
                                 ),
                               )
                             : Icon(Icons.category_outlined, color: colorScheme.primary),
@@ -796,13 +806,20 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
                 padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
                 child: Row(
                   children: <Widget>[
-                    Icon(
-                      line.category != null
-                          ? categoryIcon(line.category!.name)
-                          : Icons.category_outlined,
-                      size: 18,
-                      color: colorScheme.primary,
-                    ),
+                    if (line.category != null)
+                      Text(
+                        categoryEmoji(
+                          line.category!.name,
+                          explicitIcon: line.category!.icon,
+                        ),
+                        style: const TextStyle(fontSize: 16),
+                      )
+                    else
+                      Icon(
+                        Icons.category_outlined,
+                        size: 18,
+                        color: colorScheme.primary,
+                      ),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
@@ -1055,8 +1072,8 @@ class _CategorySearchSheetState extends State<_CategorySearchSheet> {
     if (clean.isEmpty || _creating) return;
     setState(() => _creating = true);
     try {
-      final ExpenseCategory category =
-          await AppDatabase.instance.addCategory(clean);
+      final ExpenseCategory category = await AppDatabase.instance
+          .addCategory(clean, icon: suggestCategoryEmoji(clean));
       widget.onCategoryCreated(category);
       if (mounted) Navigator.pop(context, category);
     } catch (_) {
@@ -1189,17 +1206,32 @@ class _CategorySearchSheetState extends State<_CategorySearchSheet> {
                         itemBuilder: (BuildContext ctx, int index) {
                           final category = filtered[index];
                           final isSelected = category.id == widget.selected?.id;
+                          final Color catColor = categoryColor(category.name, theme.brightness);
                           return ListTile(
-                            leading: CircleAvatar(
-                              radius: 16,
-                              backgroundColor: colorScheme.surfaceContainerHighest,
-                              child: Icon(
-                                categoryIcon(category.name),
-                                size: 16,
-                                color: colorScheme.primary,
+                            leading: Container(
+                              width: 36,
+                              height: 36,
+                              decoration: BoxDecoration(
+                                color: catColor.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: catColor.withValues(alpha: 0.3),
+                                  width: 1,
+                                ),
+                              ),
+                              alignment: Alignment.center,
+                              child: Text(
+                                categoryEmoji(
+                                  category.name,
+                                  explicitIcon: category.icon,
+                                ),
+                                style: const TextStyle(fontSize: 18),
                               ),
                             ),
-                            title: Text(category.name),
+                            title: Text(
+                              category.name,
+                              style: const TextStyle(fontWeight: FontWeight.w500),
+                            ),
                             trailing: isSelected
                                 ? Icon(Icons.check, color: colorScheme.primary)
                                 : null,
