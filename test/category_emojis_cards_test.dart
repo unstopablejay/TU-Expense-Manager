@@ -72,6 +72,33 @@ void main() {
       });
       expect(from.icon, '');
     });
+
+    test('CategoryUsage.fromMap preserves category icon', () {
+      final usage = CategoryUsage.fromMap(const <String, Object?>{
+        'id': 5,
+        'name': 'Custom Pizza',
+        'icon': '🍕',
+        'unsplit_count': 3,
+        'split_count': 1,
+        'merchant_default_count': 1,
+      });
+      expect(usage.category.id, 5);
+      expect(usage.category.name, 'Custom Pizza');
+      expect(usage.category.icon, '🍕');
+    });
+
+    test('CategoryDeletion preserves categoryIcon for undo restore', () {
+      const deletion = CategoryDeletion(
+        categoryId: 5,
+        categoryName: 'Custom Pizza',
+        categoryIcon: '🍕',
+        transactionIds: <int>[1, 2],
+        splitIds: <int>[],
+        merchantNames: <String>['Dominoes'],
+        tombstones: <Map<String, Object?>>[],
+      );
+      expect(deletion.categoryIcon, '🍕');
+    });
   });
 
   group('TransactionsTab & Card Rendering', () {

@@ -82,6 +82,7 @@ class CategoryDeletion {
   const CategoryDeletion({
     required this.categoryId,
     required this.categoryName,
+    this.categoryIcon = '',
     required this.transactionIds,
     required this.splitIds,
     required this.merchantNames,
@@ -90,6 +91,7 @@ class CategoryDeletion {
 
   final int categoryId;
   final String categoryName;
+  final String categoryIcon;
   final List<int> transactionIds;
   final List<int> splitIds;
   final List<String> merchantNames;
