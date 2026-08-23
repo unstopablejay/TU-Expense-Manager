@@ -132,12 +132,15 @@ class _CategoryPickerSheetState extends State<CategoryPickerSheet> {
                   // actually describe what it does.
                   if (category.name != kUncategorized)
                     ChoiceChip(
-                      avatar: Text(
-                        categoryEmoji(
-                          category.name,
-                          explicitIcon: category.icon,
-                        ),
-                        style: const TextStyle(fontSize: 16),
+                      avatar: CategoryAvatar(
+                        category: category.name,
+                        explicitIcon: category.icon,
+                        size: 20,
+                        fontSize: 14,
+                        iconSize: 14,
+                        borderRadius: 4,
+                        backgroundColor: Colors.transparent,
+                        borderColor: Colors.transparent,
                       ),
                       label: Text(category.name),
                       selected: category.id == widget.selectedId,

@@ -667,6 +667,48 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         },
                       ),
                     ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Icon pack',
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: SegmentedButton<AppIconPack>(
+                        showSelectedIcon: false,
+                        segments: const <ButtonSegment<AppIconPack>>[
+                          ButtonSegment<AppIconPack>(
+                            value: AppIconPack.emojis,
+                            icon: Icon(Icons.emoji_emotions_outlined),
+                            label: Text('Emojis'),
+                          ),
+                          ButtonSegment<AppIconPack>(
+                            value: AppIconPack.outlined,
+                            icon: Icon(Icons.category_outlined),
+                            label: Text('Outlined'),
+                          ),
+                          ButtonSegment<AppIconPack>(
+                            value: AppIconPack.filled,
+                            icon: Icon(Icons.category),
+                            label: Text('Filled'),
+                          ),
+                        ],
+                        selected: <AppIconPack>{
+                          ThemeController.instance.appIconPack,
+                        },
+                        onSelectionChanged: (Set<AppIconPack> selection) {
+                          if (selection.isNotEmpty) {
+                            ThemeController.instance.setIconPack(
+                              selection.first,
+                            );
+                            setState(() {});
+                          }
+                        },
+                      ),
+                    ),
                   ],
                 ),
               ),

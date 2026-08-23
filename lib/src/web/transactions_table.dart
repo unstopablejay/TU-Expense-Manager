@@ -634,9 +634,14 @@ class _TableRowState extends State<_TableRow> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            Text(
-              needsCategory ? '❓' : categoryEmoji(label),
-              style: const TextStyle(fontSize: 13),
+            CategoryAvatar(
+              category: label,
+              size: 16,
+              fontSize: 12,
+              iconSize: 12,
+              borderRadius: 4,
+              backgroundColor: Colors.transparent,
+              borderColor: Colors.transparent,
             ),
             const SizedBox(width: 5),
             Flexible(
@@ -760,9 +765,14 @@ class _FilterToolbar extends StatelessWidget {
                 selected: filters.categoryIds,
                 count: filters.categoryIds.length,
                 optionLabel: (int id) => _categoryName(id),
-                optionLeading: (int id) => Text(
-                  categoryEmoji(_categoryName(id)),
-                  style: const TextStyle(fontSize: 16),
+                optionLeading: (int id) => CategoryAvatar(
+                  category: _categoryName(id),
+                  size: 20,
+                  fontSize: 14,
+                  iconSize: 14,
+                  borderRadius: 4,
+                  backgroundColor: Colors.transparent,
+                  borderColor: Colors.transparent,
                 ),
                 onChanged: (Set<int> picked) =>
                     onFiltersChanged(filters.copyWith(categoryIds: picked)),
@@ -1128,9 +1138,14 @@ class _SummaryStrip extends StatelessWidget {
                 theme.colorScheme.error),
           for (final MapEntry<String, double> item in breakdown.take(3))
             Chip(
-              avatar: Text(
-                categoryEmoji(item.key),
-                style: const TextStyle(fontSize: 14),
+              avatar: CategoryAvatar(
+                category: item.key,
+                size: 18,
+                fontSize: 13,
+                iconSize: 13,
+                borderRadius: 4,
+                backgroundColor: Colors.transparent,
+                borderColor: Colors.transparent,
               ),
               label: Text('${item.key} · ${money.format(item.value)}'),
               visualDensity: VisualDensity.compact,

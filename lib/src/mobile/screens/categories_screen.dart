@@ -4,6 +4,7 @@ library;
 import 'package:flutter/material.dart';
 import '../../core/constants.dart';
 import '../../core/models.dart';
+import '../../ui_shared/emoji_picker_sheet.dart';
 import '../../ui_shared/palette.dart';
 import '../database.dart';
 
@@ -171,7 +172,6 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final Brightness brightness = theme.brightness;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Categories')),
@@ -191,27 +191,14 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
               itemBuilder: (BuildContext context, int index) {
                 final CategoryUsage usage = _usage[index];
                 final String name = usage.category.name;
-                final Color catColor = categoryColor(name, brightness);
 
                 return ListTile(
                   contentPadding:
                       const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  leading: Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: catColor.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: catColor.withValues(alpha: 0.3),
-                        width: 1,
-                      ),
-                    ),
-                    alignment: Alignment.center,
-                    child: Text(
-                      categoryEmoji(name, explicitIcon: usage.category.icon),
-                      style: const TextStyle(fontSize: 22),
-                    ),
+                  leading: CategoryAvatar(
+                    category: name,
+                    explicitIcon: usage.category.icon,
+                    size: 44,
                   ),
                   title: Text(
                     name,
@@ -315,6 +302,20 @@ class _CategoryEditorSheetState extends State<_CategoryEditorSheet> {
     );
   }
 
+  Future<void> _pickEmojiFromSheet() async {
+    final picked = await showEmojiPickerSheet(
+      context,
+      initialEmoji: _selectedEmoji,
+    );
+    if (picked != null && picked.isNotEmpty) {
+      setState(() {
+        _selectedEmoji = picked;
+        _customEmoji.text = picked;
+        _userPickedEmojiManually = true;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -345,21 +346,28 @@ class _CategoryEditorSheetState extends State<_CategoryEditorSheet> {
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Container(
-                  width: 56,
-                  height: 56,
-                  decoration: BoxDecoration(
-                    color: previewColor.withValues(alpha: 0.18),
+                Tooltip(
+                  message: 'Tap to browse all emojis',
+                  child: InkWell(
+                    onTap: _pickEmojiFromSheet,
                     borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: previewColor.withValues(alpha: 0.45),
-                      width: 1.5,
+                    child: Container(
+                      width: 56,
+                      height: 56,
+                      decoration: BoxDecoration(
+                        color: previewColor.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: previewColor.withValues(alpha: 0.45),
+                          width: 1.5,
+                        ),
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(
+                        _selectedEmoji,
+                        style: const TextStyle(fontSize: 28),
+                      ),
                     ),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                    _selectedEmoji,
-                    style: const TextStyle(fontSize: 28),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -386,13 +394,27 @@ class _CategoryEditorSheetState extends State<_CategoryEditorSheet> {
               ],
             ),
             const SizedBox(height: 16),
-            Text(
-              'Quick emoji picker',
-              style: theme.textTheme.labelMedium?.copyWith(
-                fontWeight: FontWeight.w600,
-              ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: <Widget>[
+                Text(
+                  'Quick emoji picker',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: _pickEmojiFromSheet,
+                  icon: const Icon(Icons.grid_view_outlined, size: 16),
+                  label: const Text('Browse all'),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 4),
             SizedBox(
               height: 48,
               child: ListView.separated(

@@ -71,9 +71,14 @@ class TransactionActionsSheet extends StatelessWidget {
               children: <Widget>[
                 for (final TxnSplit line in txn.effectiveSplits)
                   Chip(
-                    avatar: Text(
-                      categoryEmoji(line.categoryName),
-                      style: const TextStyle(fontSize: 16),
+                    avatar: CategoryAvatar(
+                      category: line.categoryName,
+                      size: 20,
+                      fontSize: 14,
+                      iconSize: 14,
+                      borderRadius: 4,
+                      backgroundColor: Colors.transparent,
+                      borderColor: Colors.transparent,
                     ),
                     label: Text(
                       txn.isSplit

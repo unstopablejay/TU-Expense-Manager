@@ -60,3 +60,26 @@ enum AppAccentColor {
     return AppAccentColor.blue;
   }
 }
+
+/// The icon rendering pack used for category badges across the app.
+enum AppIconPack {
+  emojis('Vibrant Emojis', 'Colorful emojis in tinted squircles', Icons.emoji_emotions_outlined),
+  outlined('Minimalist Outlined', 'Clean wireframe Material icons', Icons.category_outlined),
+  filled('Modern Filled', 'Solid Material filled icons', Icons.category);
+
+  const AppIconPack(this.label, this.subtitle, this.icon);
+
+  final String label;
+  final String subtitle;
+  final IconData icon;
+
+  /// Parses a serialized name or returns [AppIconPack.emojis] as fallback.
+  static AppIconPack fromName(String? name) {
+    if (name == null) return AppIconPack.emojis;
+    for (final pack in AppIconPack.values) {
+      if (pack.name.toLowerCase() == name.toLowerCase()) return pack;
+    }
+    return AppIconPack.emojis;
+  }
+}
+
