@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tu_expense_tracker/main.dart';
 import 'package:tu_expense_tracker/src/ui_shared/loading_dialog.dart';
@@ -137,6 +138,30 @@ void main() {
       expect(received, isNotNull);
       expect(received!.body, 'Test body');
       expect(received!.receivedAt, DateTime(2026, 8, 21, 10, 0));
+    });
+
+    test('readInbox parses results from method channel (SMS & MMS/RCS)', () async {
+      final binding = TestDefaultBinaryMessengerBinding.instance;
+      binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('com.tu.expense.manager/telephony'),
+        (MethodCall call) async {
+          if (call.method == 'readInbox') {
+            return <Map<String, Object?>>[
+              <String, Object?>{
+                'body': 'INR 750.00 spent on YES BANK Card X2858 @UPI_VALLI A 23-08-2026 10:29:37 am.',
+                'date': 1787461186000,
+              },
+            ];
+          }
+          return null;
+        },
+      );
+
+      final source = SmsSource();
+      final messages = await source.readInbox();
+      expect(messages.length, 1);
+      expect(messages.first.body, contains('750.00'));
+      expect(messages.first.receivedAt, DateTime.fromMillisecondsSinceEpoch(1787461186000));
     });
   });
 
