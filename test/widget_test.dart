@@ -85,6 +85,34 @@ void main() {
       expect(parsed.merchant, 'SWIGGY');
     });
 
+    test('parses real YES Bank 750rs UPI card alert', () {
+      final parsed = SmsParser.parse(
+        'INR 750.00 spent on YES BANK Card X2858 @UPI_VALLI A '
+        '23-08-2026 10:29:37 am. Avl Lmt INR 275,651.08. '
+        'SMS BLKCC 2858 to 9840909000 if not you',
+      );
+
+      expect(parsed, isNotNull);
+      expect(parsed!.amount, 750.00);
+      expect(parsed.paymentType, 'YES BANK Card X2858');
+      expect(parsed.merchant, 'UPI_VALLI A');
+      expect(parsed.date, DateTime(2026, 8, 23, 10, 29, 37));
+      expect(parsed.direction, TxnDirection.debit);
+    });
+
+    test('parses YES Bank alert with time lacking seconds and flexible separator', () {
+      final parsed = SmsParser.parse(
+        'INR 750.00 spent on YES BANK Card X2858 at UPI_VALLI A '
+        'on 23-08-2026 10:29 am. Avl Lmt INR 275,651.08.',
+      );
+
+      expect(parsed, isNotNull);
+      expect(parsed!.amount, 750.00);
+      expect(parsed.paymentType, 'YES BANK Card X2858');
+      expect(parsed.merchant, 'UPI_VALLI A');
+      expect(parsed.date, DateTime(2026, 8, 23, 10, 29));
+    });
+
     test('returns null for messages that are not spend alerts', () {
       expect(SmsParser.parse('123456 is your OTP. Do not share it.'), isNull);
       expect(

@@ -43,6 +43,7 @@ The project is structured as a multi-platform Flutter app and a Dart CLI server:
 - **Idempotency & Multi-Layer Deduplication**:
   - **SmsSource In-Memory Deduplication**: Tracks recent incoming SMS signatures in a bounded 60-second window to drop duplicate native broadcast events from multi-part SMS or carrier re-deliveries, and prevents duplicate telephony listener registrations.
   - **Sequential Ingestion Queue (`HomeShell._serializeSms`)**: Asynchronous serialization queue guarantees that live incoming SMS processing and batch inbox catch-up scans never execute concurrently or race.
+  - **Asynchronous Background Ingestion (`MainActivity.kt`)**: Native Android SMS and MMS/RCS queries run on a dedicated background worker executor (`Executors.newSingleThreadExecutor()`) with batch text part loading (`content://mms/part`), completely decoupling heavy inbox scans from the Android UI thread and Flutter rasterizer to prevent any UI freezing during rescans.
   - **Database-Level Composite Deduplication (`AppDatabase.insertParsed`)**:
     - **Exact Natural Key**: `(amount, merchant, date, direction, reference)`.
     - **Reference Code Uniqueness**: Non-empty reference codes (UPI Ref, UTR, Refno) deduplicate across identical `amount + direction + reference`.
@@ -50,8 +51,10 @@ The project is structured as a multi-platform Flutter app and a Dart CLI server:
 - **Tombstones**: Deletions write natural keys to `deleted_transactions`. Inbox rescans check this table to avoid re-importing deleted SMS alerts.
 - **SMS Parsing**:
   - **No Keyword Scanning for Direction**: Transaction direction (debit vs. credit) comes strictly from the matched regex template, not keyword scans (prevents issues with merchant names containing words like "CREDIT").
+  - **Flexible Merchant Separators & Time Formats**: Templates flexibly match `@`, `at`, `to`, `towards`, and `for` merchant separators, with support for timestamps with or without seconds (`HH:mm[:ss]` and optional `am`/`pm`).
   - **No Clock Time Fallback**: UPI alerts have no clock time; the parser adopts the SMS arrival time if it falls on the same date, otherwise defaulting to midnight.
-- **Testing Safety Rule**: **NEVER test or install builds on real physical devices** because they hold real user financial data. Always use an Android virtual device (emulator) for testing and verification.
+- **Testing Safety Rule**: **NEVER test or install builds on real physical devices** (including CMF Phone 1 or any other device connected via wireless debugging or USB) because they hold real user financial data. **ALWAYS use an Android Virtual Device (VD emulator, e.g., `emulator-5554`) for all testing, verification, and inspection.**
+- **Docker Environment Rule**: **STRICTLY use the local Docker server on your development machine.** **NEVER touch, connect to, or execute commands on the ZIMA OS Docker instance.**
 - **Notes**: Notes are sanitized using `cleanNote()`, collapsing white space and capping notes at 140 characters (`kNoteMaxLength`).
 
 ---
