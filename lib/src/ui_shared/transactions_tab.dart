@@ -178,9 +178,13 @@ class TransactionsTab extends StatelessWidget {
                 leading: (int id) {
                   final cat = categoryChoices
                       .firstWhere((ExpenseCategory c) => c.id == id);
-                  return Text(
-                    categoryEmoji(cat.name, explicitIcon: cat.icon),
-                    style: const TextStyle(fontSize: 18),
+                  return CategoryAvatar(
+                    category: cat.name,
+                    explicitIcon: cat.icon,
+                    size: 24,
+                    fontSize: 16,
+                    iconSize: 16,
+                    borderRadius: 6,
                   );
                 },
               );
@@ -671,9 +675,14 @@ class _SummaryHeader extends StatelessWidget {
               children: <Widget>[
                 for (final entry in breakdown.take(6))
                   Chip(
-                    avatar: Text(
-                      categoryEmoji(entry.key),
-                      style: const TextStyle(fontSize: 16),
+                    avatar: CategoryAvatar(
+                      category: entry.key,
+                      size: 20,
+                      fontSize: 14,
+                      iconSize: 14,
+                      borderRadius: 4,
+                      backgroundColor: Colors.transparent,
+                      borderColor: Colors.transparent,
                     ),
                     label: Text('${entry.key} · ${money.format(entry.value)}'),
                     visualDensity: VisualDensity.compact,
@@ -741,11 +750,7 @@ class _TransactionTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final needsCategory = txn.isUncategorized;
-    final Color catColor = categoryColor(txn.categoryName, theme.brightness);
     final Color credColor = creditColor(theme);
-    final Color accentBadgeColor = needsCategory
-        ? theme.colorScheme.error
-        : (txn.isCredit ? credColor : catColor);
 
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
@@ -785,22 +790,10 @@ class _TransactionTile extends StatelessWidget {
                   size: 22,
                 ),
               )
-            : Container(
-                width: 44,
-                height: 44,
-                decoration: BoxDecoration(
-                  color: accentBadgeColor.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: accentBadgeColor.withValues(alpha: 0.28),
-                    width: 1,
-                  ),
-                ),
-                alignment: Alignment.center,
-                child: Text(
-                  txn.isCredit ? '💰' : categoryEmoji(txn.categoryName),
-                  style: const TextStyle(fontSize: 22),
-                ),
+            : CategoryAvatar(
+                category: txn.categoryName,
+                isCredit: txn.isCredit,
+                size: 44,
               ),
         title: Text(
           txn.merchant,

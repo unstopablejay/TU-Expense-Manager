@@ -236,12 +236,13 @@ class _SplitScreenState extends State<SplitScreen> {
                     child: Row(
                       children: <Widget>[
                         if (row.category != null)
-                          Text(
-                            categoryEmoji(
-                              row.category!.name,
-                              explicitIcon: row.category!.icon,
-                            ),
-                            style: const TextStyle(fontSize: 16),
+                          CategoryAvatar(
+                            category: row.category!.name,
+                            explicitIcon: row.category!.icon,
+                            size: 24,
+                            fontSize: 14,
+                            iconSize: 14,
+                            borderRadius: 6,
                           )
                         else
                           Icon(

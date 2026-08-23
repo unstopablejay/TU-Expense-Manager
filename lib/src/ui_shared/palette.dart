@@ -10,6 +10,8 @@ import 'package:flutter/material.dart';
 
 import '../core/constants.dart';
 import '../core/ledger.dart';
+import 'theme_controller.dart';
+import 'theme_models.dart';
 
 /// The default emojis mapped for standard categories.
 const Map<String, String> _seededCategoryEmojis = <String, String>{
@@ -54,10 +56,11 @@ String suggestCategoryEmoji(String category) {
       key.contains('starbucks')) {
     return '☕';
   }
-  if (key.contains('pizza') ||
+  if (key.contains('food') ||
+      key.contains('din') ||
+      key.contains('pizza') ||
       key.contains('burger') ||
       key.contains('snack') ||
-      key.contains('dine') ||
       key.contains('restau') ||
       key.contains('swiggy') ||
       key.contains('zomato')) {
@@ -86,6 +89,19 @@ String suggestCategoryEmoji(String category) {
       key.contains('maint')) {
     return '🏠';
   }
+  if (key.contains('transport') ||
+      key.contains('commute') ||
+      key.contains('cab') ||
+      key.contains('taxi') ||
+      key.contains('uber') ||
+      key.contains('ola') ||
+      key.contains('rapido') ||
+      key.contains('auto') ||
+      key.contains('vehicle') ||
+      key.contains('drive') ||
+      key.contains('car')) {
+    return '🚕';
+  }
   if (key.contains('pet') ||
       key.contains('dog') ||
       key.contains('cat') ||
@@ -95,7 +111,8 @@ String suggestCategoryEmoji(String category) {
   if (key.contains('gym') ||
       key.contains('fitness') ||
       key.contains('workout') ||
-      key.contains('sport') ||
+      key.contains('sports') ||
+      key == 'sport' ||
       key.contains('yoga')) {
     return '🏋️';
   }
@@ -105,14 +122,6 @@ String suggestCategoryEmoji(String category) {
       key.contains('cng') ||
       key.contains('gas')) {
     return '⛽';
-  }
-  if (key.contains('cab') ||
-      key.contains('taxi') ||
-      key.contains('uber') ||
-      key.contains('ola') ||
-      key.contains('rapido') ||
-      key.contains('auto')) {
-    return '🚕';
   }
   if (key.contains('flight') ||
       key.contains('airline') ||
@@ -248,30 +257,306 @@ String categoryEmoji(String category, {String? explicitIcon}) {
   return suggestCategoryEmoji(category);
 }
 
-IconData categoryIcon(String category) {
-  switch (category.toLowerCase()) {
-    case 'grocery':
-      return Icons.local_grocery_store_outlined;
-    case 'food':
-      return Icons.restaurant_outlined;
-    case 'fuel':
-      return Icons.local_gas_station_outlined;
-    case 'shopping':
-      return Icons.shopping_bag_outlined;
-    case 'bills & utilities':
-      return Icons.receipt_outlined;
-    case 'travel':
-      return Icons.flight_takeoff_outlined;
-    case 'entertainment':
-      return Icons.movie_outlined;
-    case 'health':
-      return Icons.medical_services_outlined;
-    case 'uncategorized':
-      return Icons.help_outline;
-    default:
-      return Icons.label_outline;
+/// Resolves a Material vector icon for any category name or keyword match.
+///
+/// Supports both [AppIconPack.outlined] and [AppIconPack.filled].
+IconData categoryVectorIcon(String category, {bool filled = false}) {
+  final String key = category.trim().toLowerCase();
+  if (key == 'income' || key == 'salary' || key == 'credit') {
+    return filled
+        ? Icons.account_balance_wallet
+        : Icons.account_balance_wallet_outlined;
+  }
+  if (key.contains('coffee') ||
+      key == 'tea' ||
+      key.contains('tea ') ||
+      key.contains(' tea') ||
+      key.contains('chai') ||
+      key.contains('cafe') ||
+      key.contains('starbucks')) {
+    return filled ? Icons.local_cafe : Icons.local_cafe_outlined;
+  }
+  if (key.contains('food') ||
+      key.contains('pizza') ||
+      key.contains('burger') ||
+      key.contains('snack') ||
+      key.contains('dine') ||
+      key.contains('restau') ||
+      key.contains('swiggy') ||
+      key.contains('zomato')) {
+    return filled ? Icons.restaurant : Icons.restaurant_outlined;
+  }
+  if (key.contains('beer') ||
+      key.contains('wine') ||
+      key.contains('bar') ||
+      key.contains('pub') ||
+      key.contains('drink') ||
+      key.contains('alcohol')) {
+    return filled ? Icons.sports_bar : Icons.sports_bar_outlined;
+  }
+  if (key.contains('grocery') ||
+      key.contains('groceries') ||
+      key.contains('zepto') ||
+      key.contains('blinkit') ||
+      key.contains('instamart') ||
+      key.contains('supermarket')) {
+    return filled
+        ? Icons.local_grocery_store
+        : Icons.local_grocery_store_outlined;
+  }
+  if (key.contains('rent') ||
+      key.contains('house') ||
+      key.contains('home') ||
+      key.contains('flat') ||
+      key.contains('apartment') ||
+      key.contains('maint')) {
+    return filled ? Icons.home : Icons.home_outlined;
+  }
+  if (key.contains('pet') ||
+      key.contains('dog') ||
+      key.contains('cat') ||
+      key.contains('vet')) {
+    return filled ? Icons.pets : Icons.pets_outlined;
+  }
+  if (key.contains('transport') ||
+      key.contains('commute') ||
+      key.contains('cab') ||
+      key.contains('taxi') ||
+      key.contains('uber') ||
+      key.contains('ola') ||
+      key.contains('rapido') ||
+      key.contains('auto') ||
+      key.contains('vehicle') ||
+      key.contains('drive') ||
+      key.contains('car')) {
+    return filled ? Icons.directions_car : Icons.directions_car_outlined;
+  }
+  if (key.contains('gym') ||
+      key.contains('fitness') ||
+      key.contains('workout') ||
+      key.contains('sports') ||
+      key == 'sport' ||
+      key.contains('yoga')) {
+    return filled ? Icons.fitness_center : Icons.fitness_center_outlined;
+  }
+  if (key.contains('fuel') ||
+      key.contains('petrol') ||
+      key.contains('diesel') ||
+      key.contains('cng') ||
+      key.contains('gas')) {
+    return filled ? Icons.local_gas_station : Icons.local_gas_station_outlined;
+  }
+  if (key.contains('salary') ||
+      key.contains('income') ||
+      key.contains('deposit') ||
+      key.contains('earning') ||
+      key.contains('credit') ||
+      key.contains('revenue') ||
+      key.contains('money') ||
+      key.contains('cash')) {
+    return filled
+        ? Icons.account_balance_wallet
+        : Icons.account_balance_wallet_outlined;
+  }
+  if (key.contains('flight') ||
+      key.contains('airline') ||
+      key.contains('airfare') ||
+      key.contains('airport') ||
+      key.contains('trip') ||
+      key.contains('travel') ||
+      key.contains('hotel') ||
+      key.contains('vacation') ||
+      key.contains('tour')) {
+    return filled ? Icons.flight : Icons.flight_outlined;
+  }
+  if (key.contains('movie') ||
+      key.contains('cinema') ||
+      key.contains('theatre') ||
+      key.contains('show') ||
+      key.contains('event') ||
+      key == 'entertainment') {
+    return filled ? Icons.movie : Icons.movie_outlined;
+  }
+  if (key.contains('game') ||
+      key.contains('gaming') ||
+      key.contains('steam') ||
+      key.contains('playstation') ||
+      key.contains('xbox')) {
+    return filled ? Icons.sports_esports : Icons.sports_esports_outlined;
+  }
+  if (key.contains('netflix') ||
+      key.contains('spotify') ||
+      key.contains('prime') ||
+      key.contains('youtube') ||
+      key.contains('subscrip') ||
+      key.contains('ott')) {
+    return filled ? Icons.tv : Icons.tv_outlined;
+  }
+  if (key.contains('book') ||
+      key.contains('education') ||
+      key.contains('course') ||
+      key.contains('college') ||
+      key.contains('school') ||
+      key.contains('tuition')) {
+    return filled ? Icons.school : Icons.school_outlined;
+  }
+  if (key.contains('health') ||
+      key.contains('med') ||
+      key.contains('doctor') ||
+      key.contains('hospital') ||
+      key.contains('pharmacy') ||
+      key.contains('clinic')) {
+    return filled ? Icons.medical_services : Icons.medical_services_outlined;
+  }
+  if (key.contains('salon') ||
+      key.contains('barber') ||
+      key.contains('hair') ||
+      key.contains('spa') ||
+      key.contains('beauty') ||
+      key.contains('groom')) {
+    return filled ? Icons.content_cut : Icons.content_cut_outlined;
+  }
+  if (key.contains('cloth') ||
+      key.contains('wear') ||
+      key.contains('dress') ||
+      key.contains('shirt') ||
+      key.contains('fashion') ||
+      key.contains('myntra')) {
+    return filled ? Icons.checkroom : Icons.checkroom_outlined;
+  }
+  if (key.contains('tech') ||
+      key.contains('laptop') ||
+      key.contains('comput') ||
+      key.contains('apple') ||
+      key.contains('gadget') ||
+      key.contains('electron')) {
+    return filled ? Icons.laptop : Icons.laptop_outlined;
+  }
+  if (key.contains('phone') ||
+      key.contains('mobile') ||
+      key.contains('recharge') ||
+      key.contains('wifi') ||
+      key.contains('broadband') ||
+      key.contains('internet')) {
+    return filled ? Icons.phone_android : Icons.phone_android_outlined;
+  }
+  if (key.contains('gift') ||
+      key.contains('donat') ||
+      key.contains('charity') ||
+      key.contains('present')) {
+    return filled ? Icons.card_giftcard : Icons.card_giftcard_outlined;
+  }
+  if (key.contains('invest') ||
+      key.contains('stock') ||
+      key.contains('mutual') ||
+      key.contains('crypto') ||
+      key.contains('gold') ||
+      key.contains('share')) {
+    return filled ? Icons.trending_up : Icons.trending_up_outlined;
+  }
+  if (key.contains('insur') ||
+      key.contains('policy') ||
+      key.contains('lic') ||
+      key.contains('protect')) {
+    return filled ? Icons.shield : Icons.shield_outlined;
+  }
+  if (key.contains('bill') ||
+      key.contains('utilit') ||
+      key.contains('electric') ||
+      key.contains('power') ||
+      key.contains('water') ||
+      key == 'bills & utilities') {
+    return filled ? Icons.receipt_long : Icons.receipt_long_outlined;
+  }
+  if (key.contains('shop') ||
+      key.contains('amazon') ||
+      key.contains('flipkart') ||
+      key.contains('store') ||
+      key.contains('mall') ||
+      key == 'shopping') {
+    return filled ? Icons.shopping_bag : Icons.shopping_bag_outlined;
+  }
+  if (key == 'uncategorized' || key == '❓') {
+    return filled ? Icons.help : Icons.help_outline;
+  }
+
+  return filled ? Icons.label : Icons.label_outline;
+}
+
+IconData categoryIcon(String category) =>
+    categoryVectorIcon(category, filled: false);
+
+/// A responsive category badge that automatically renders an emoji or vector
+/// icon based on the active [AppIconPack] in [ThemeController].
+class CategoryAvatar extends StatelessWidget {
+  const CategoryAvatar({
+    super.key,
+    required this.category,
+    this.explicitIcon,
+    this.isCredit = false,
+    this.size = 44,
+    this.fontSize = 22,
+    this.iconSize = 22,
+    this.borderRadius = 12,
+    this.iconPack,
+    this.backgroundColor,
+    this.borderColor,
+  });
+
+  final String category;
+  final String? explicitIcon;
+  final bool isCredit;
+  final double size;
+  final double fontSize;
+  final double iconSize;
+  final double borderRadius;
+  final AppIconPack? iconPack;
+  final Color? backgroundColor;
+  final Color? borderColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final pack = iconPack ?? ThemeController.instance.appIconPack;
+    final catColor = categoryColor(category, theme.brightness);
+    final bg = backgroundColor ?? catColor.withValues(alpha: 0.16);
+    final border = borderColor ?? catColor.withValues(alpha: 0.35);
+
+    final Widget child = switch (pack) {
+      AppIconPack.emojis => Text(
+          isCredit ? '💰' : categoryEmoji(category, explicitIcon: explicitIcon),
+          style: TextStyle(fontSize: fontSize),
+        ),
+      AppIconPack.outlined => Icon(
+          isCredit
+              ? Icons.account_balance_wallet_outlined
+              : categoryVectorIcon(category, filled: false),
+          color: catColor,
+          size: iconSize,
+        ),
+      AppIconPack.filled => Icon(
+          isCredit
+              ? Icons.account_balance_wallet
+              : categoryVectorIcon(category, filled: true),
+          color: catColor,
+          size: iconSize,
+        ),
+    };
+
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(borderRadius),
+        border: Border.all(color: border, width: 1),
+      ),
+      alignment: Alignment.center,
+      child: child,
+    );
   }
 }
+
 
 /// The eight categorical chart colours, light and dark.
 ///

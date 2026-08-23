@@ -635,24 +635,13 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
                       ListTile(
                         contentPadding: EdgeInsets.zero,
                         leading: _selectedCategory != null
-                            ? Container(
-                                width: 36,
-                                height: 36,
-                                decoration: BoxDecoration(
-                                  color: categoryColor(
-                                    _selectedCategory!.name,
-                                    theme.brightness,
-                                  ).withValues(alpha: 0.15),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                alignment: Alignment.center,
-                                child: Text(
-                                  categoryEmoji(
-                                    _selectedCategory!.name,
-                                    explicitIcon: _selectedCategory!.icon,
-                                  ),
-                                  style: const TextStyle(fontSize: 18),
-                                ),
+                            ? CategoryAvatar(
+                                category: _selectedCategory!.name,
+                                explicitIcon: _selectedCategory!.icon,
+                                size: 36,
+                                fontSize: 18,
+                                iconSize: 18,
+                                borderRadius: 10,
                               )
                             : Icon(Icons.category_outlined, color: colorScheme.primary),
                         title: Text(
@@ -807,12 +796,13 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
                 child: Row(
                   children: <Widget>[
                     if (line.category != null)
-                      Text(
-                        categoryEmoji(
-                          line.category!.name,
-                          explicitIcon: line.category!.icon,
-                        ),
-                        style: const TextStyle(fontSize: 16),
+                      CategoryAvatar(
+                        category: line.category!.name,
+                        explicitIcon: line.category!.icon,
+                        size: 24,
+                        fontSize: 14,
+                        iconSize: 14,
+                        borderRadius: 6,
                       )
                     else
                       Icon(
@@ -1206,27 +1196,14 @@ class _CategorySearchSheetState extends State<_CategorySearchSheet> {
                         itemBuilder: (BuildContext ctx, int index) {
                           final category = filtered[index];
                           final isSelected = category.id == widget.selected?.id;
-                          final Color catColor = categoryColor(category.name, theme.brightness);
                           return ListTile(
-                            leading: Container(
-                              width: 36,
-                              height: 36,
-                              decoration: BoxDecoration(
-                                color: catColor.withValues(alpha: 0.15),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: catColor.withValues(alpha: 0.3),
-                                  width: 1,
-                                ),
-                              ),
-                              alignment: Alignment.center,
-                              child: Text(
-                                categoryEmoji(
-                                  category.name,
-                                  explicitIcon: category.icon,
-                                ),
-                                style: const TextStyle(fontSize: 18),
-                              ),
+                            leading: CategoryAvatar(
+                              category: category.name,
+                              explicitIcon: category.icon,
+                              size: 36,
+                              fontSize: 18,
+                              iconSize: 18,
+                              borderRadius: 10,
                             ),
                             title: Text(
                               category.name,

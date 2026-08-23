@@ -15,6 +15,7 @@ class ThemePrefs {
 
   static const String _themeModeKey = 'theme.mode';
   static const String _accentColorKey = 'theme.accent';
+  static const String _iconPackKey = 'theme.icon_pack';
 
   Future<AppThemeMode> themeMode() async {
     final SharedPreferences prefs = await SharedPreferences.getInstance();
@@ -37,9 +38,20 @@ class ThemePrefs {
     final SharedPreferences prefs = await SharedPreferences.getInstance();
     await prefs.setString(_accentColorKey, accent.name);
   }
+
+  Future<AppIconPack> iconPack() async {
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    final String? raw = prefs.getString(_iconPackKey);
+    return AppIconPack.fromName(raw);
+  }
+
+  Future<void> setIconPack(AppIconPack pack) async {
+    final SharedPreferences prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_iconPackKey, pack.name);
+  }
 }
 
-/// Global controller holding active [AppThemeMode] and [AppAccentColor].
+/// Global controller holding active [AppThemeMode], [AppAccentColor], and [AppIconPack].
 class ThemeController extends ChangeNotifier {
   ThemeController({ThemePrefs? prefs}) : _prefs = prefs ?? ThemePrefs.instance;
 
@@ -49,10 +61,12 @@ class ThemeController extends ChangeNotifier {
 
   AppThemeMode _themeMode = AppThemeMode.system;
   AppAccentColor _accentColor = AppAccentColor.blue;
+  AppIconPack _iconPack = AppIconPack.emojis;
   bool _loaded = false;
 
   AppThemeMode get appThemeMode => _themeMode;
   AppAccentColor get accentColor => _accentColor;
+  AppIconPack get appIconPack => _iconPack;
   bool get isOled => _themeMode == AppThemeMode.oled;
   bool get isLoaded => _loaded;
 
@@ -77,6 +91,7 @@ class ThemeController extends ChangeNotifier {
   Future<void> load() async {
     _themeMode = await _prefs.themeMode();
     _accentColor = await _prefs.accentColor();
+    _iconPack = await _prefs.iconPack();
     _loaded = true;
     notifyListeners();
   }
@@ -96,4 +111,13 @@ class ThemeController extends ChangeNotifier {
     notifyListeners();
     await _prefs.setAccentColor(accent);
   }
+
+  /// Sets and persists [AppIconPack].
+  Future<void> setIconPack(AppIconPack pack) async {
+    if (_iconPack == pack) return;
+    _iconPack = pack;
+    notifyListeners();
+    await _prefs.setIconPack(pack);
+  }
 }
+
