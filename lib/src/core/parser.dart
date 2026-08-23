@@ -85,8 +85,9 @@ const String _amt = r'(?<amount>[\d,]+(?:\.\d{1,2})?)';
 /// `_parseDate` reports whether the match actually included a clock time.
 const String _date = r'(?<date>'
     r'\d{4}-\d{2}-\d{2}:\d{2}:\d{2}:\d{2}' //          2026-08-13:07:19:26
-    r'|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\s+\d{1,2}:\d{2}:\d{2}\s*(?:am|pm)' // 13-08-2026 09:21:35 am
-    r'|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\s+\d{1,2}:\d{2}:\d{2}' //  11-08-26 12:30:45
+    r'|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}\s+(?:at\s+)?\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?' // 13-08-2026 09:21:35 am, 23-08-2026 10:29 am
+    r'|\d{1,2}-[A-Za-z]{3}-\d{2,4}\s+(?:at\s+)?\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?' // 11-Aug-26 12:30 pm
+    r'|\d{1,2}[A-Za-z]{3}\d{2,4}\s+(?:at\s+)?\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?' // 11Aug26 12:30 pm
     r'|\d{1,2}-[A-Za-z]{3}-\d{2,4}' //                          11-Aug-26
     r'|\d{1,2}[A-Za-z]{3}\d{2,4}' //                            11Aug26
     r'|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}' //                        10/08/26
@@ -105,11 +106,13 @@ class SmsParser {
 
     /// `INR 204.00 spent on YES BANK Card X2858 @UPI_GEORGE EGG CENTRE
     ///  13-08-2026 09:21:35 am. Avl Lmt INR 281,496.08.`
+    /// `INR 750.00 spent on YES BANK Card X2858 @UPI_VALLI A 23-08-2026 10:29:37 am.`
     SmsTemplate(
       id: 'yes_card',
       direction: TxnDirection.debit,
       pattern: _re('$_cur$_amt\\s+(?:spent on|debited from)\\s+'
-          r'(?<instrument>[^\n]*?)\s+@(?<merchant>[^\n]*?)\s+'
+          r'(?<instrument>[^\n]*?)\s+(?:@|at|to)\s*(?<merchant>[^\n]*?)\s+'
+          r'(?:on\s+)?'
           '$_date'),
     ),
 
@@ -121,7 +124,8 @@ class SmsParser {
       id: 'hdfc_card',
       direction: TxnDirection.debit,
       pattern: _re('Spent\\s+$_cur$_amt\\s+(?:On|From)\\s+'
-          r'(?<instrument>[^\n]*?)\s+At\s+(?<merchant>[^\n]*?)\s+On\s+'
+          r'(?<instrument>[^\n]*?)\s+(?:At|@|to)\s*(?<merchant>[^\n]*?)\s+'
+          r'(?:On\s+)?'
           '$_date'),
     ),
 
@@ -133,7 +137,8 @@ class SmsParser {
       id: 'hdfc_upi_sent',
       direction: TxnDirection.debit,
       pattern: _re('Sent\\s+$_cur$_amt\\s+From\\s+'
-          r'(?<instrument>[^\n]*?)\s+To\s+(?<merchant>[^\n]*?)\s+On\s+'
+          r'(?<instrument>[^\n]*?)\s+(?:To|@|at)\s*(?<merchant>[^\n]*?)\s+'
+          r'(?:On\s+)?'
           '$_date$_ref'),
     ),
 
@@ -145,7 +150,7 @@ class SmsParser {
       pattern: _re('$_cur$_amt\\s+spent using\\s+'
           r'(?<instrument>[^\n]*?)\s+on\s+'
           '$_date'
-          r'\s+on\s+(?<merchant>[^.\n]*?)\s*(?:[.\n]|$)'),
+          r'\s+(?:on|at|@|for)\s+(?<merchant>[^.\n]*?)\s*(?:[.\n]|$)'),
     ),
 
     // -- Unverified: written from each issuer's documented wording, not from
@@ -159,9 +164,9 @@ class SmsParser {
       direction: TxnDirection.debit,
       pattern: _re(r'(?<instrument>A/[Cc]\s*[Xx*]*\d+)\s+debited\s+by\s+'
           '$_amt'
-          r'\s+on\s+date\s+'
+          r'\s+(?:on\s+date|on)\s+'
           '$_date'
-          r'\s+trf\s+to\s+(?<merchant>[^.\n]*?)\s+'
+          r'\s+(?:trf\s+to|to|at|@)\s+(?<merchant>[^.\n]*?)\s+'
           r'(?:Ref(?:no)?|UTR)\.?\s*:?\s*(?<ref>\w+)'),
     ),
 
@@ -173,7 +178,7 @@ class SmsParser {
       pattern: _re('$_cur$_amt\\s+debited\\s+from\\s+'
           r'(?<instrument>[^\n]*?)\s+on\s+'
           '$_date'
-          r'\s+(?:at|to|towards)\s+(?<merchant>[^.\n]*?)\s*(?:[.\n]|$)'),
+          r'\s+(?:at|to|towards|@)\s+(?<merchant>[^.\n]*?)\s*(?:[.\n]|$)'),
     ),
 
     /// Kotak-style card debit: `Rs.500.00 spent on Kotak Bank Card X1234 on
@@ -184,7 +189,7 @@ class SmsParser {
       pattern: _re('$_cur$_amt\\s+spent\\s+(?:on|using)\\s+'
           r'(?<instrument>[^\n]*?)\s+on\s+'
           '$_date'
-          r'\s+at\s+(?<merchant>[^.\n]*?)\s*(?:[.\n]|$)'),
+          r'\s+(?:at|to|@|towards)\s+(?<merchant>[^.\n]*?)\s*(?:[.\n]|$)'),
     ),
 
     /// `Rs.500.00 credited to HDFC Bank A/c XX0444 from RAPIDO on 11/08/26
@@ -203,7 +208,7 @@ class SmsParser {
       id: 'generic_received_in',
       direction: TxnDirection.credit,
       pattern: _re('Received\\s+$_cur$_amt\\s+(?:in|to|into)\\s+'
-          r'(?<instrument>[^\n]*?)\s+from\s+(?<merchant>[^.\n]*?)\s+on\s+'
+          r'(?<instrument>[^\n]*?)\s+(?:from|by)\s+(?<merchant>[^.\n]*?)\s+on\s+'
           '$_date$_ref'),
     ),
 
@@ -216,7 +221,7 @@ class SmsParser {
           '$_cur$_amt'
           r'\s+on\s+'
           '$_date'
-          r'\s+by\s+(?<merchant>[^.\n]*?)\s*(?:[.\n]|$)'),
+          r'\s+(?:by|from)\s+(?<merchant>[^.\n]*?)\s*(?:[.\n]|$)'),
     ),
   ];
 
@@ -295,17 +300,17 @@ class SmsParser {
   static final RegExp _isoish =
       RegExp(r'^(\d{4})-(\d{2})-(\d{2}):(\d{2}):(\d{2}):(\d{2})$');
 
-  /// `dd-MM-yyyy`, `dd/MM/yy`, each with an optional `HH:mm:ss` and `am`/`pm`.
+  /// `dd-MM-yyyy`, `dd/MM/yy`, each with an optional `HH:mm[:ss]` and `am`/`pm`.
   static final RegExp _numeric = RegExp(
     r'^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})'
-    r'(?:\s+(\d{1,2}):(\d{2}):(\d{2})\s*(am|pm)?)?$',
+    r'(?:\s+(?:at\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?)?$',
     caseSensitive: false,
   );
 
-  /// `11-Aug-26`, `11Aug26`, `11-Aug-2026`, with an optional time.
+  /// `11-Aug-26`, `11Aug26`, `11-Aug-2026`, with an optional `HH:mm[:ss]` and `am`/`pm`.
   static final RegExp _named = RegExp(
     r'^(\d{1,2})-?([A-Za-z]{3})-?(\d{2,4})'
-    r'(?:\s+(\d{1,2}):(\d{2}):(\d{2})\s*(am|pm)?)?$',
+    r'(?:\s+(?:at\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?)?$',
     caseSensitive: false,
   );
 
@@ -375,7 +380,9 @@ class SmsParser {
       day: int.parse(day),
       hour: hour,
       minute: hasTime ? int.parse(match.group(5)!) : 0,
-      second: hasTime ? int.parse(match.group(6)!) : 0,
+      second: (hasTime && match.group(6) != null)
+          ? int.parse(match.group(6)!)
+          : 0,
       hasTime: hasTime,
     );
   }

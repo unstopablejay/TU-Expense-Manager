@@ -8,6 +8,7 @@ import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.Executors
 
 class MainActivity : FlutterActivity() {
     private val tag = "TuExpenseTelephony"
@@ -15,6 +16,8 @@ class MainActivity : FlutterActivity() {
     private var channel: MethodChannel? = null
     private var mmsObserver: ContentObserver? = null
     private val emittedSignatures = mutableSetOf<String>()
+    private val backgroundExecutor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -23,13 +26,19 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "readInbox" -> {
                     val since = (call.argument<Number>("since"))?.toLong()
-                    try {
-                        val messages = readAllMessages(since)
-                        Log.d(tag, "readInbox returned ${messages.size} messages (since: $since)")
-                        result.success(messages)
-                    } catch (e: Exception) {
-                        Log.e(tag, "readInbox error: ${e.message}", e)
-                        result.error("INBOX_ERROR", e.message, null)
+                    backgroundExecutor.execute {
+                        try {
+                            val messages = readAllMessages(since)
+                            Log.d(tag, "readInbox returned ${messages.size} messages (since: $since)")
+                            mainHandler.post {
+                                result.success(messages)
+                            }
+                        } catch (e: Exception) {
+                            Log.e(tag, "readInbox error: ${e.message}", e)
+                            mainHandler.post {
+                                result.error("INBOX_ERROR", e.message, null)
+                            }
+                        }
                     }
                 }
                 "startListening" -> {
@@ -55,25 +64,48 @@ class MainActivity : FlutterActivity() {
 
     private fun readSms(sinceMillis: Long?): List<Map<String, Any>> {
         val results = mutableListOf<Map<String, Any>>()
-        val uri = Uri.parse("content://sms/inbox")
-        val projection = arrayOf("_id", "body", "date")
-        val selection = if (sinceMillis != null && sinceMillis > 0) "date > ?" else null
-        val selectionArgs = if (sinceMillis != null && sinceMillis > 0) arrayOf(sinceMillis.toString()) else null
+        val seen = mutableSetOf<String>()
+        val uris = listOf(
+            Uri.parse("content://sms/inbox"),
+            Uri.parse("content://sms")
+        )
 
-        try {
-            contentResolver.query(uri, projection, selection, selectionArgs, "date ASC")?.use { cursor ->
-                val bodyIndex = cursor.getColumnIndex("body")
-                val dateIndex = cursor.getColumnIndex("date")
-                while (cursor.moveToNext()) {
-                    val body = if (bodyIndex >= 0) cursor.getString(bodyIndex) else null
-                    val date = if (dateIndex >= 0) cursor.getLong(dateIndex) else null
-                    if (!body.isNullOrBlank() && date != null) {
-                        results.add(mapOf("body" to body, "date" to date))
+        for (uri in uris) {
+            val projection = arrayOf("_id", "body", "date")
+            val isInboxUri = uri.toString().endsWith("/inbox")
+            val selection = if (sinceMillis != null && sinceMillis > 0) {
+                if (isInboxUri) "date > ?" else "date > ? AND (type = 1 OR type IS NULL)"
+            } else {
+                if (isInboxUri) null else "type = 1 OR type IS NULL"
+            }
+            val selectionArgs = if (sinceMillis != null && sinceMillis > 0) {
+                arrayOf(sinceMillis.toString())
+            } else {
+                null
+            }
+
+            try {
+                contentResolver.query(uri, projection, selection, selectionArgs, "date ASC")?.use { cursor ->
+                    val bodyIndex = cursor.getColumnIndex("body")
+                    val dateIndex = cursor.getColumnIndex("date")
+                    while (cursor.moveToNext()) {
+                        val body = if (bodyIndex >= 0) cursor.getString(bodyIndex) else null
+                        val date = if (dateIndex >= 0) cursor.getLong(dateIndex) else null
+                        if (!body.isNullOrBlank() && date != null) {
+                            val key = "$date:$body"
+                            if (seen.add(key)) {
+                                results.add(mapOf("body" to body, "date" to date))
+                            }
+                        }
                     }
                 }
+            } catch (e: Exception) {
+                Log.e(tag, "readSms failed for $uri: ${e.message}")
             }
-        } catch (e: Exception) {
-            Log.e(tag, "readSms failed: ${e.message}")
+
+            if (results.isNotEmpty()) {
+                break
+            }
         }
         return results
     }
@@ -94,6 +126,44 @@ class MainActivity : FlutterActivity() {
         }
 
         try {
+            // 1. Fetch text parts efficiently in batch
+            val textByMmsId = mutableMapOf<Long, String>()
+            val partUri = Uri.parse("content://mms/part")
+            val partProjection = arrayOf("_id", "mid", "ct", "text")
+            val partSelection = "ct = ?"
+            val partSelectionArgs = arrayOf("text/plain")
+
+            try {
+                contentResolver.query(partUri, partProjection, partSelection, partSelectionArgs, null)?.use { partCursor ->
+                    val midIndex = partCursor.getColumnIndex("mid")
+                    val textIndex = partCursor.getColumnIndex("text")
+                    val idIndex = partCursor.getColumnIndex("_id")
+
+                    while (partCursor.moveToNext()) {
+                        val mid = if (midIndex >= 0) partCursor.getLong(midIndex) else continue
+                        val text = if (textIndex >= 0) partCursor.getString(textIndex) else null
+                        if (!text.isNullOrBlank()) {
+                            textByMmsId[mid] = text
+                        } else {
+                            val partId = if (idIndex >= 0) partCursor.getLong(idIndex) else -1L
+                            if (partId >= 0 && !textByMmsId.containsKey(mid)) {
+                                try {
+                                    contentResolver.openInputStream(Uri.parse("content://mms/part/$partId"))?.use { stream ->
+                                        val streamText = String(stream.readBytes(), Charsets.UTF_8)
+                                        if (streamText.isNotBlank()) {
+                                            textByMmsId[mid] = streamText
+                                        }
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(tag, "batch mms part query failed: ${e.message}")
+            }
+
+            // 2. Match text parts with MMS dates
             contentResolver.query(mmsUri, projection, selection, selectionArgs, "date ASC")?.use { cursor ->
                 val idIndex = cursor.getColumnIndex("_id")
                 val dateIndex = cursor.getColumnIndex("date")
@@ -103,7 +173,7 @@ class MainActivity : FlutterActivity() {
                     val dateSeconds = if (dateIndex >= 0) cursor.getLong(dateIndex) else continue
                     val dateMillis = dateSeconds * 1000L
 
-                    val body = getMmsText(mmsId)
+                    val body = textByMmsId[mmsId]
                     if (!body.isNullOrBlank()) {
                         results.add(mapOf("body" to body, "date" to dateMillis))
                     }
@@ -115,51 +185,14 @@ class MainActivity : FlutterActivity() {
         return results
     }
 
-    private fun getMmsText(mmsId: Long): String? {
-        val partUri = Uri.parse("content://mms/part")
-        val projection = arrayOf("_id", "mid", "ct", "text")
-        val selection = "mid = ?"
-        val selectionArgs = arrayOf(mmsId.toString())
-
-        try {
-            contentResolver.query(partUri, projection, selection, selectionArgs, null)?.use { cursor ->
-                val idIndex = cursor.getColumnIndex("_id")
-                val ctIndex = cursor.getColumnIndex("ct")
-                val textIndex = cursor.getColumnIndex("text")
-
-                while (cursor.moveToNext()) {
-                    val ct = if (ctIndex >= 0) cursor.getString(ctIndex) else null
-                    if (ct == "text/plain") {
-                        val text = if (textIndex >= 0) cursor.getString(textIndex) else null
-                        if (!text.isNullOrBlank()) {
-                            return text
-                        }
-                        val partId = if (idIndex >= 0) cursor.getLong(idIndex) else -1L
-                        if (partId >= 0) {
-                            try {
-                                contentResolver.openInputStream(Uri.parse("content://mms/part/$partId"))?.use { stream ->
-                                    val streamText = String(stream.readBytes(), Charsets.UTF_8)
-                                    if (streamText.isNotBlank()) {
-                                        return streamText
-                                    }
-                                }
-                            } catch (_: Exception) {}
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(tag, "getMmsText failed for mid=$mmsId: ${e.message}")
-        }
-        return null
-    }
-
     private fun startListening() {
         if (mmsObserver != null) return
         val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
             override fun onChange(selfChange: Boolean, uri: Uri?) {
                 super.onChange(selfChange, uri)
-                handleContentChange()
+                backgroundExecutor.execute {
+                    handleContentChange()
+                }
             }
         }
         mmsObserver = observer
@@ -175,7 +208,7 @@ class MainActivity : FlutterActivity() {
 
     private fun handleContentChange() {
         val now = System.currentTimeMillis()
-        val cutoff = now - 60_000L
+        val cutoff = now - 300_000L // 5-minute window for carrier timestamp tolerance
         val recent = readAllMessages(cutoff)
         for (msg in recent) {
             val body = msg["body"] as? String ?: continue
@@ -187,7 +220,9 @@ class MainActivity : FlutterActivity() {
                     emittedSignatures.removeAll(toRemove)
                 }
                 Log.d(tag, "Emitting real-time message: $body")
-                channel?.invokeMethod("onIncomingMessage", mapOf("body" to body, "date" to date))
+                mainHandler.post {
+                    channel?.invokeMethod("onIncomingMessage", mapOf("body" to body, "date" to date))
+                }
             }
         }
     }
@@ -204,6 +239,7 @@ class MainActivity : FlutterActivity() {
         stopListening()
         channel?.setMethodCallHandler(null)
         channel = null
+        backgroundExecutor.shutdown()
         super.cleanUpFlutterEngine(flutterEngine)
     }
 }

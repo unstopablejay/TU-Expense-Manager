@@ -882,6 +882,9 @@ Worth walking by hand, since none of it is covered by `flutter test`:
   untouched. Worth also trying a workbook whose `schema_version` you have edited upwards,
   which must be refused outright.
 - **Wipe and recover.** Uninstall, reinstall, restore. The whole ledger comes back.
+- **Asynchronous Background Ingestion & Non-Blocking Rescan.** Native Android SMS and MMS/RCS queries run on a dedicated background worker executor (`Executors.newSingleThreadExecutor()`) with batch text part loading (`content://mms/part`), completely decoupling inbox rescans from the UI thread and Flutter rasterizer.
+- **Flexible Bank Template Parsing.** The parser supports optional seconds (`HH:mm[:ss]`), flexible merchant separators (`@`, `at`, `to`, `towards`, `for`), and optional `on <date>` prefixes across YES Bank, HDFC, ICICI, SBI, Axis, and Kotak alerts.
+- **Development Safety Rules.** Always test on an Android Virtual Device (VD / `emulator-5554`) and never on physical devices containing real financial data. Strictly use local Docker for server development and never touch production/ZIMA OS Docker instances.
 
 The database filename is still `expense_manager.db` — it predates the rename and is left
 alone deliberately, since `getDatabasesPath()` resolves it under whatever the current
