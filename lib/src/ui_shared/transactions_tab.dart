@@ -792,6 +792,7 @@ class _TransactionTile extends StatelessWidget {
               )
             : CategoryAvatar(
                 category: txn.categoryName,
+                explicitIcon: txn.categoryIcon,
                 isCredit: txn.isCredit,
                 size: 44,
               ),

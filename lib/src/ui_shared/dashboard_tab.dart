@@ -443,9 +443,14 @@ class _BarsBody extends StatelessWidget {
               children: <Widget>[
                 Row(
                   children: <Widget>[
-                    Text(
-                      categoryEmoji(slice.name),
-                      style: const TextStyle(fontSize: 15),
+                    CategoryAvatar(
+                      category: slice.name,
+                      size: 20,
+                      fontSize: 14,
+                      iconSize: 14,
+                      borderRadius: 4,
+                      backgroundColor: Colors.transparent,
+                      borderColor: Colors.transparent,
                     ),
                     const SizedBox(width: 6),
                     Expanded(
@@ -550,9 +555,14 @@ class _CategoryRow extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 10),
-          Text(
-            categoryEmoji(slice.name),
-            style: const TextStyle(fontSize: 15),
+          CategoryAvatar(
+            category: slice.name,
+            size: 20,
+            fontSize: 14,
+            iconSize: 14,
+            borderRadius: 4,
+            backgroundColor: Colors.transparent,
+            borderColor: Colors.transparent,
           ),
           const SizedBox(width: 6),
           Expanded(

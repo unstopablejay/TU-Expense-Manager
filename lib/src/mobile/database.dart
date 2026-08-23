@@ -389,7 +389,8 @@ class AppDatabase {
     final db = await database;
     final rows = await db.rawQuery('''
       SELECT t.id, t.amount, t.payment_type, t.merchant, t.date, t.category_id,
-             t.direction, t.reference, t.note, c.name AS category_name
+             t.direction, t.reference, t.note, c.name AS category_name,
+             c.icon AS category_icon
       FROM transactions t
       JOIN categories c ON c.id = t.category_id
       ORDER BY t.date DESC, t.id DESC
@@ -398,7 +399,8 @@ class AppDatabase {
     // sweep, grouped in memory. The table holds rows only for transactions that
     // were actually split, so it stays a great deal smaller than the ledger.
     final splitRows = await db.rawQuery('''
-      SELECT s.transaction_id, s.category_id, s.amount, c.name AS category_name
+      SELECT s.transaction_id, s.category_id, s.amount, c.name AS category_name,
+             c.icon AS category_icon
       FROM transaction_splits s
       JOIN categories c ON c.id = s.category_id
       ORDER BY s.transaction_id, s.position, s.id
@@ -489,7 +491,8 @@ class AppDatabase {
   Future<List<TxnSplit>> splitsFor(int transactionId) async {
     final db = await database;
     final rows = await db.rawQuery('''
-      SELECT s.category_id, s.amount, c.name AS category_name
+      SELECT s.category_id, s.amount, c.name AS category_name,
+             c.icon AS category_icon
       FROM transaction_splits s
       JOIN categories c ON c.id = s.category_id
       WHERE s.transaction_id = ?
@@ -1309,7 +1312,7 @@ class AppDatabase {
       SELECT d.amount, d.merchant, d.date, d.direction, d.reference,
              d.payment_type, d.category_id, d.original_id, d.deleted_at,
              d.splits_json, d.note,
-             c.name AS category_name
+             c.name AS category_name, c.icon AS category_icon
       FROM deleted_transactions d
       LEFT JOIN categories c ON c.id = d.category_id
       ORDER BY d.deleted_at DESC, d.date DESC
