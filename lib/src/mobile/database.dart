@@ -552,7 +552,7 @@ class AppDatabase {
   Future<List<CategoryUsage>> categoryUsage() async {
     final db = await database;
     final rows = await db.rawQuery('''
-      SELECT c.id, c.name,
+      SELECT c.id, c.name, c.icon,
              (SELECT COUNT(*)
                 FROM transactions t
                WHERE t.category_id = c.id
@@ -705,6 +705,7 @@ class AppDatabase {
       return CategoryDeletion(
         categoryId: category.id,
         categoryName: category.name,
+        categoryIcon: category.icon,
         transactionIds: transactionIds,
         splitIds: splitIds,
         merchantNames: merchantNames,
@@ -725,7 +726,11 @@ class AppDatabase {
     await db.transaction((Transaction txn) async {
       int id = await txn.insert(
         'categories',
-        <String, Object?>{'id': deletion.categoryId, 'name': deletion.categoryName},
+        <String, Object?>{
+          'id': deletion.categoryId,
+          'name': deletion.categoryName,
+          'icon': deletion.categoryIcon,
+        },
         conflictAlgorithm: ConflictAlgorithm.ignore,
       );
       if (id == 0) {
