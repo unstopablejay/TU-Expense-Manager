@@ -18,22 +18,28 @@ class TxnSplit {
   const TxnSplit({
     required this.categoryId,
     required this.categoryName,
+    this.categoryIcon = '',
     required this.amount,
   });
 
   factory TxnSplit.fromMap(Map<String, Object?> map) => TxnSplit(
         categoryId: map['category_id'] as int,
         categoryName: (map['category_name'] ?? map['name']) as String,
+        categoryIcon: (map['category_icon'] as String?) ??
+            (map['icon'] as String?) ??
+            '',
         amount: (map['amount'] as num).toDouble(),
       );
 
   final int categoryId;
   final String categoryName;
+  final String categoryIcon;
   final double amount;
 
   Map<String, Object?> toJson() => <String, Object?>{
         'category_id': categoryId,
         'name': categoryName,
+        'icon': categoryIcon,
         'amount': amount,
       };
 }

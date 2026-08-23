@@ -73,6 +73,7 @@ class TransactionActionsSheet extends StatelessWidget {
                   Chip(
                     avatar: CategoryAvatar(
                       category: line.categoryName,
+                      explicitIcon: line.categoryIcon,
                       size: 20,
                       fontSize: 14,
                       iconSize: 14,

@@ -40,9 +40,14 @@ class SnapshotStore {
         if (row['id'] is int && row['name'] is String)
           row['id']! as int: row['name']! as String,
     };
+    final Map<int, String> categoryIcons = <int, String>{
+      for (final Map<String, Object?> row in data.categories)
+        if (row['id'] is int && row['icon'] is String)
+          row['id']! as int: row['icon']! as String,
+    };
 
     return SnapshotStore._(
-      transactions: _ledger(data, categoryNames),
+      transactions: _ledger(data, categoryNames, categoryIcons),
       categories: _categories(data),
       meta: data.meta,
     );
@@ -99,7 +104,11 @@ List<ExpenseCategory> _categories(BackupData data) {
 }
 
 /// `AppDatabase.transactions()` without the SQL.
-List<ExpenseTxn> _ledger(BackupData data, Map<int, String> categoryNames) {
+List<ExpenseTxn> _ledger(
+  BackupData data,
+  Map<int, String> categoryNames,
+  Map<int, String> categoryIcons,
+) {
   // Grouped in one sweep, exactly as the two-query version does. The splits
   // table holds rows only for transactions that were actually split, so it stays
   // a great deal smaller than the ledger.
@@ -115,6 +124,7 @@ List<ExpenseTxn> _ledger(BackupData data, Map<int, String> categoryNames) {
       ...row,
       // TxnSplit.fromMap wants the joined name; SQL supplies it via the JOIN.
       'category_name': categoryNames[categoryId] ?? kUncategorized,
+      'category_icon': categoryIcons[categoryId] ?? '',
     }));
   }
 
@@ -130,6 +140,8 @@ List<ExpenseTxn> _ledger(BackupData data, Map<int, String> categoryNames) {
               ...row,
               'category_name':
                   categoryNames[row['category_id']] ?? kUncategorized,
+              'category_icon':
+                  categoryIcons[row['category_id']] ?? '',
             },
             splits: splits[row['id']] ?? const <TxnSplit>[],
           ),

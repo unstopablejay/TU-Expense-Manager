@@ -213,6 +213,7 @@ class ExpenseTxn {
     required this.date,
     required this.categoryId,
     required this.categoryName,
+    this.categoryIcon = '',
     required this.direction,
     required this.reference,
     this.note = '',
@@ -235,6 +236,9 @@ class ExpenseTxn {
         date: DateTime.fromMillisecondsSinceEpoch(map['date'] as int),
         categoryId: map['category_id'] as int,
         categoryName: map['category_name'] as String,
+        categoryIcon: (map['category_icon'] as String?) ??
+            (map['icon'] as String?) ??
+            '',
         direction: (map['direction'] as String?) == 'credit'
             ? TxnDirection.credit
             : TxnDirection.debit,
@@ -252,6 +256,7 @@ class ExpenseTxn {
   final DateTime date;
   final int categoryId;
   final String categoryName;
+  final String categoryIcon;
   final TxnDirection direction;
   final String reference;
 
@@ -283,6 +288,7 @@ class ExpenseTxn {
         date: date,
         categoryId: categoryId,
         categoryName: categoryName,
+        categoryIcon: categoryIcon,
         direction: direction,
         reference: reference,
         note: note,
