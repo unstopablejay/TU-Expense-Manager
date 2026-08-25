@@ -24,6 +24,8 @@ import 'package:tu_expense_tracker/src/core/link_state.dart';
 import 'package:tu_expense_tracker/src/ui_shared/connection_dot.dart';
 import 'package:tu_expense_tracker/src/ui_shared/dashboard_tab.dart';
 import 'package:tu_expense_tracker/src/ui_shared/shared_controls.dart';
+import 'package:tu_expense_tracker/src/ui_shared/theme_controller.dart';
+import 'package:tu_expense_tracker/src/ui_shared/theme_models.dart';
 import 'package:tu_expense_tracker/src/ui_shared/transactions_tab.dart';
 import 'package:tu_expense_tracker/src/web/api_client.dart';
 import 'package:tu_expense_tracker/src/web/login_screen.dart';
@@ -1251,6 +1253,96 @@ void main() {
       );
       expect(visibleField, findsOneWidget);
       expect(find.byIcon(Icons.visibility_off_outlined), findsOneWidget);
+    });
+  });
+
+  group('Category icons and Icon Pack in WebShell', () {
+    testWidgets('reflects custom category icon in web table pill and facet dropdown',
+        (WidgetTester tester) async {
+      final DateTime now = DateTime.now();
+      final DateTime when = DateTime(now.year, now.month, 15, 12);
+
+      final String snapshotWithCustomIcon = encodeBackupJson(BackupData(
+        categories: <Map<String, Object?>>[
+          <String, Object?>{'id': 1, 'name': kUncategorized, 'icon': ''},
+          <String, Object?>{'id': 2, 'name': 'CustomDining', 'icon': '🍕'},
+        ],
+        merchantMappings: const <Map<String, Object?>>[],
+        transactions: <Map<String, Object?>>[
+          <String, Object?>{
+            'id': 1,
+            'amount': 450.0,
+            'payment_type': kTestPaymentType,
+            'merchant': 'PIZZAHUT',
+            'date': when.millisecondsSinceEpoch,
+            'category_id': 2,
+            'direction': 'debit',
+            'reference': '',
+            'note': '',
+          },
+        ],
+        splits: const <Map<String, Object?>>[],
+        deleted: const <Map<String, Object?>>[],
+        aliases: const <Map<String, Object?>>[],
+        appMeta: const <Map<String, Object?>>[],
+        meta: buildBackupMeta(
+          appVersion: '1.1.0',
+          appBuild: '2',
+          exportedAt: now,
+          transactions: 1,
+          splits: 0,
+          categories: 2,
+          merchantDefaults: 0,
+          nameAliases: 0,
+          deleted: 0,
+        ),
+      ));
+
+      final StubServer server = StubServer()
+        ..devices['phone'] = "Jay's Pixel"
+        ..snapshots['phone'] = snapshotWithCustomIcon;
+
+      await pumpShell(tester, server, surface: const Size(1600, 1000));
+
+      // Switch to Transactions tab
+      await tester.tap(find.text('Transactions'));
+      await tester.pumpAndSettle();
+
+      // Custom icon 🍕 should be visible in the category pill
+      expect(find.text('🍕'), findsWidgets);
+      expect(find.text('CustomDining'), findsWidgets);
+
+      // Open the Category facet menu
+      await tester.tap(find.text('Category'));
+      await tester.pumpAndSettle();
+
+      // Custom icon 🍕 should be in the dropdown option leading
+      expect(find.text('🍕'), findsWidgets);
+    });
+
+    testWidgets('Appearance menu contains Icon Pack switcher and changes active icon pack',
+        (WidgetTester tester) async {
+      final StubServer server = StubServer()
+        ..devices['phone'] = "Jay's Pixel"
+        ..snapshots['phone'] = snapshotFor(merchant: 'SWIGGY');
+
+      await pumpShell(tester, server, surface: const Size(1600, 1000));
+
+      // Open theme menu
+      await tester.tap(find.byIcon(Icons.palette_outlined));
+      await tester.pumpAndSettle();
+
+      // ICON PACK header and options should be present
+      expect(find.text('ICON PACK'), findsOneWidget);
+      expect(find.text('Vibrant Emojis'), findsOneWidget);
+      expect(find.text('Minimalist Outlined'), findsOneWidget);
+      expect(find.text('Modern Filled'), findsOneWidget);
+
+      // Tap Minimalist Outlined
+      await tester.tap(find.text('Minimalist Outlined'));
+      await tester.pumpAndSettle();
+
+      expect(ThemeController.instance.appIconPack, AppIconPack.outlined);
     });
   });
 }

@@ -607,6 +607,37 @@ class _WebShellState extends State<WebShell> {
               ],
             ),
           ),
+        const PopupMenuDivider(),
+        const PopupMenuItem<void>(
+          enabled: false,
+          child: Text(
+            'ICON PACK',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
+          ),
+        ),
+        for (final AppIconPack pack in AppIconPack.values)
+          PopupMenuItem<void>(
+            onTap: () => controller.setIconPack(pack),
+            child: Row(
+              children: <Widget>[
+                Icon(
+                  pack.icon,
+                  size: 18,
+                  color: controller.appIconPack == pack
+                      ? Theme.of(context).colorScheme.primary
+                      : null,
+                ),
+                const SizedBox(width: 12),
+                Expanded(child: Text(pack.label)),
+                if (controller.appIconPack == pack)
+                  Icon(
+                    Icons.check,
+                    size: 18,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+              ],
+            ),
+          ),
       ],
     );
   }

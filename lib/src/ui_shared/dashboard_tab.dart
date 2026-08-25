@@ -13,6 +13,7 @@ import 'package:intl/intl.dart';
 
 import '../core/ledger.dart';
 import '../core/models.dart';
+import '../core/splits.dart';
 import 'palette.dart';
 import 'shared_controls.dart';
 
@@ -100,6 +101,14 @@ class _DashboardTabState extends State<DashboardTab> {
     // trusted when it is still on offer.
     final DashboardView view = views.contains(_view) ? _view : DashboardView.pie;
 
+    final Map<String, String> categoryIcons = <String, String>{
+      for (final ExpenseTxn t in widget.transactions) ...<String, String>{
+        if (t.categoryIcon.isNotEmpty) t.categoryName: t.categoryIcon,
+        for (final TxnSplit s in t.splits)
+          if (s.categoryIcon.isNotEmpty) s.categoryName: s.categoryIcon,
+      },
+    };
+
     return Column(
       children: <Widget>[
         PeriodBar(
@@ -135,6 +144,7 @@ class _DashboardTabState extends State<DashboardTab> {
                           onViewChanged: (DashboardView v) =>
                               setState(() => _view = v),
                           byCategory: byCategory,
+                          categoryIcons: categoryIcons,
                           entries: entries,
                           months: widget.months,
                           money: widget.money,
@@ -229,6 +239,7 @@ class _DashboardChartCard extends StatelessWidget {
     required this.views,
     required this.onViewChanged,
     required this.byCategory,
+    this.categoryIcons = const <String, String>{},
     required this.entries,
     required this.months,
     required this.money,
@@ -238,6 +249,7 @@ class _DashboardChartCard extends StatelessWidget {
   final List<DashboardView> views;
   final ValueChanged<DashboardView> onViewChanged;
   final Map<String, double> byCategory;
+  final Map<String, String> categoryIcons;
   final List<LedgerEntry> entries;
   final Set<YearMonth> months;
   final NumberFormat money;
@@ -255,13 +267,25 @@ class _DashboardChartCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final Widget body = switch (view) {
-      DashboardView.pie => _PieBody(byCategory: byCategory, money: money),
-      DashboardView.bars => _BarsBody(byCategory: byCategory, money: money),
+      DashboardView.pie => _PieBody(
+          byCategory: byCategory,
+          money: money,
+          categoryIcons: categoryIcons,
+        ),
+      DashboardView.bars => _BarsBody(
+          byCategory: byCategory,
+          money: money,
+          categoryIcons: categoryIcons,
+        ),
       DashboardView.trend =>
         _TrendBody(entries: entries, months: months, money: money),
       DashboardView.compareMonths =>
         _CompareMonthsBody(entries: entries, months: months, money: money),
-      DashboardView.table => _TableBody(byCategory: byCategory, money: money),
+      DashboardView.table => _TableBody(
+          byCategory: byCategory,
+          money: money,
+          categoryIcons: categoryIcons,
+        ),
     };
 
     return Card(
@@ -374,10 +398,15 @@ class _ViewMenuButton extends StatelessWidget {
 /// exact figures have to be readable somewhere — and that is also what keeps
 /// the chart legible for anyone who cannot separate two of the hues.
 class _PieBody extends StatelessWidget {
-  const _PieBody({required this.byCategory, required this.money});
+  const _PieBody({
+    required this.byCategory,
+    required this.money,
+    this.categoryIcons = const <String, String>{},
+  });
 
   final Map<String, double> byCategory;
   final NumberFormat money;
+  final Map<String, String> categoryIcons;
 
   @override
   Widget build(BuildContext context) {
@@ -407,7 +436,12 @@ class _PieBody extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 16),
-        for (final CategorySlice slice in slices) _CategoryRow(slice: slice, money: money),
+        for (final CategorySlice slice in slices)
+          _CategoryRow(
+            slice: slice,
+            money: money,
+            categoryIcons: categoryIcons,
+          ),
       ],
     );
   }
@@ -416,10 +450,15 @@ class _PieBody extends StatelessWidget {
 /// The same breakdown as [_PieBody], but led with the bars rather than the
 /// donut — easier than a slice angle for telling two close categories apart.
 class _BarsBody extends StatelessWidget {
-  const _BarsBody({required this.byCategory, required this.money});
+  const _BarsBody({
+    required this.byCategory,
+    required this.money,
+    this.categoryIcons = const <String, String>{},
+  });
 
   final Map<String, double> byCategory;
   final NumberFormat money;
+  final Map<String, String> categoryIcons;
 
   @override
   Widget build(BuildContext context) {
@@ -445,6 +484,7 @@ class _BarsBody extends StatelessWidget {
                   children: <Widget>[
                     CategoryAvatar(
                       category: slice.name,
+                      explicitIcon: categoryIcons[slice.name],
                       size: 20,
                       fontSize: 14,
                       iconSize: 14,
@@ -506,10 +546,15 @@ class _BarsBody extends StatelessWidget {
 /// The full breakdown as plain figures — every category, none folded into
 /// "Other" — for whoever wants exact numbers rather than a shape.
 class _TableBody extends StatelessWidget {
-  const _TableBody({required this.byCategory, required this.money});
+  const _TableBody({
+    required this.byCategory,
+    required this.money,
+    this.categoryIcons = const <String, String>{},
+  });
 
   final Map<String, double> byCategory;
   final NumberFormat money;
+  final Map<String, String> categoryIcons;
 
   @override
   Widget build(BuildContext context) {
@@ -523,7 +568,12 @@ class _TableBody extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        for (final CategorySlice slice in slices) _CategoryRow(slice: slice, money: money),
+        for (final CategorySlice slice in slices)
+          _CategoryRow(
+            slice: slice,
+            money: money,
+            categoryIcons: categoryIcons,
+          ),
       ],
     );
   }
@@ -533,10 +583,15 @@ class _TableBody extends StatelessWidget {
 /// [_TableBody] both list, so the two can never disagree on how a category is
 /// drawn.
 class _CategoryRow extends StatelessWidget {
-  const _CategoryRow({required this.slice, required this.money});
+  const _CategoryRow({
+    required this.slice,
+    required this.money,
+    this.categoryIcons = const <String, String>{},
+  });
 
   final CategorySlice slice;
   final NumberFormat money;
+  final Map<String, String> categoryIcons;
 
   @override
   Widget build(BuildContext context) {
@@ -557,6 +612,7 @@ class _CategoryRow extends StatelessWidget {
           const SizedBox(width: 10),
           CategoryAvatar(
             category: slice.name,
+            explicitIcon: categoryIcons[slice.name],
             size: 20,
             fontSize: 14,
             iconSize: 14,
