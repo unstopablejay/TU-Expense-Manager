@@ -53,6 +53,7 @@ The project is structured as a multi-platform Flutter app and a Dart CLI server:
   - **No Keyword Scanning for Direction**: Transaction direction (debit vs. credit) comes strictly from the matched regex template, not keyword scans (prevents issues with merchant names containing words like "CREDIT").
   - **Flexible Merchant Separators & Time Formats**: Templates flexibly match `@`, `at`, `to`, `towards`, and `for` merchant separators, with support for timestamps with or without seconds (`HH:mm[:ss]` and optional `am`/`pm`).
   - **No Clock Time Fallback**: UPI alerts have no clock time; the parser adopts the SMS arrival time if it falls on the same date, otherwise defaulting to midnight.
+  - **Merchant Gateway Prefix Stripping (`cleanMerchantName`)**: Automatically strips bank gateway transport prefixes (`UPI_`, `UPI-`, `UPI/`, `UPI `) from raw merchant strings at SMS parse time while preserving original merchant casing and non-empty fallbacks.
 - **Testing Safety Rule**: **NEVER test or install builds on real physical devices** (including CMF Phone 1 or any other device connected via wireless debugging or USB) because they hold real user financial data. **ALWAYS use an Android Virtual Device (VD emulator, e.g., `emulator-5554`) for all testing, verification, and inspection.**
 - **Docker Environment Rule**: **STRICTLY use the local Docker server on your development machine.** **NEVER touch, connect to, or execute commands on the ZIMA OS Docker instance.**
 - **Notes**: Notes are sanitized using `cleanNote()`, collapsing white space and capping notes at 140 characters (`kNoteMaxLength`).
@@ -113,7 +114,7 @@ When filters change:
 
 ## 5. Database Schema Reference
 
-SQLite database runs on version 8 (`kSchemaVersion = 8`):
+SQLite database runs on version 9 (`kSchemaVersion = 9`):
 - `categories`: Available expense categories (`id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL COLLATE NOCASE, icon TEXT NOT NULL DEFAULT ''`).
 - `merchant_mappings`: Direct `merchant_name` (PK, NOCASE) to `category_id` mapping.
 - `name_aliases`: Merged merchant or payment type labels.
@@ -124,6 +125,7 @@ SQLite database runs on version 8 (`kSchemaVersion = 8`):
 
 > [!NOTE]
 > - In schema v8, the `icon` column stores custom category emojis. When empty, `categoryEmoji(name)` falls back to seeded emojis and smart keyword matching.
+> - In schema v9, bank gateway transport prefixes (`UPI_`, `UPI-`, `UPI/`, `UPI `) are automatically stripped across `transactions`, `merchant_mappings`, `deleted_transactions`, and `name_aliases` during migration, with automatic collision resolution preserving non-UPI category mappings and deduplicating matching natural keys.
 > - For split transactions, `transactions.category_id` is a denormalized cache storing the ID of the split line with the highest amount. This dominant category is used for fallback sorting and display.
 
 ---

@@ -233,6 +233,9 @@ class AppDatabase {
   /// not a placeholder for missing data — a transaction imported before notes
   /// existed genuinely has no note. The tombstone's copy must be nullable for
   /// the usual reason, and NULL there says the same thing.
+  /// v8 adds `categories.icon` for custom category emojis.
+  /// v9 strips transport prefixes (UPI_, UPI-, UPI/, UPI ) from merchants
+  /// in transactions, merchant_mappings, deleted_transactions, and name_aliases.
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await db.execute(
@@ -301,6 +304,138 @@ class AppDatabase {
           where: "name = ? AND (icon IS NULL OR icon = '')",
           whereArgs: <Object?>[name],
         );
+      }
+    }
+    if (oldVersion < 9) {
+      // 1. Clean merchant_mappings
+      final mappings = await db.query('merchant_mappings');
+      for (final row in mappings) {
+        final raw = row['merchant_name'] as String;
+        final cleaned = cleanMerchantName(raw);
+        if (cleaned != raw) {
+          final existing = await db.query(
+            'merchant_mappings',
+            where: 'merchant_name = ? COLLATE NOCASE',
+            whereArgs: <Object?>[cleaned],
+            limit: 1,
+          );
+          if (existing.isNotEmpty) {
+            await db.delete(
+              'merchant_mappings',
+              where: 'merchant_name = ? COLLATE NOCASE',
+              whereArgs: <Object?>[raw],
+            );
+          } else {
+            await db.update(
+              'merchant_mappings',
+              <String, Object?>{'merchant_name': cleaned},
+              where: 'merchant_name = ? COLLATE NOCASE',
+              whereArgs: <Object?>[raw],
+            );
+          }
+        }
+      }
+
+      // 2. Clean transactions
+      final txns = await db.query('transactions');
+      for (final row in txns) {
+        final id = row['id'] as int;
+        final raw = row['merchant'] as String;
+        final cleaned = cleanMerchantName(raw);
+        if (cleaned != raw) {
+          final collision = await db.query(
+            'transactions',
+            columns: <String>['id'],
+            where:
+                'amount = ? AND merchant = ? COLLATE NOCASE AND date = ? AND direction = ? AND reference = ? AND id != ?',
+            whereArgs: <Object?>[
+              row['amount'],
+              cleaned,
+              row['date'],
+              row['direction'],
+              row['reference'],
+              id,
+            ],
+            limit: 1,
+          );
+          if (collision.isNotEmpty) {
+            await db.delete('transactions', where: 'id = ?', whereArgs: <Object?>[id]);
+          } else {
+            await db.update(
+              'transactions',
+              <String, Object?>{'merchant': cleaned},
+              where: 'id = ?',
+              whereArgs: <Object?>[id],
+            );
+          }
+        }
+      }
+
+      // 3. Clean deleted_transactions
+      final deleted = await db.query('deleted_transactions');
+      for (final row in deleted) {
+        final raw = row['merchant'] as String;
+        final cleaned = cleanMerchantName(raw);
+        if (cleaned != raw) {
+          final amount = row['amount'] as double;
+          final date = row['date'] as int;
+          final direction = row['direction'] as String;
+          final reference = row['reference'] as String;
+
+          await db.delete(
+            'deleted_transactions',
+            where:
+                'amount = ? AND merchant = ? COLLATE NOCASE AND date = ? AND direction = ? AND reference = ?',
+            whereArgs: <Object?>[amount, raw, date, direction, reference],
+          );
+
+          final existing = await db.query(
+            'deleted_transactions',
+            where:
+                'amount = ? AND merchant = ? COLLATE NOCASE AND date = ? AND direction = ? AND reference = ?',
+            whereArgs: <Object?>[amount, cleaned, date, direction, reference],
+            limit: 1,
+          );
+          if (existing.isEmpty) {
+            final updatedRow = Map<String, Object?>.from(row);
+            updatedRow['merchant'] = cleaned;
+            await db.insert('deleted_transactions', updatedRow);
+          }
+        }
+      }
+
+      // 4. Clean name_aliases
+      final aliases = await db.query('name_aliases');
+      for (final row in aliases) {
+        final kind = row['kind'] as String;
+        final rawAlias = row['alias'] as String;
+        final rawCanonical = row['canonical'] as String;
+        final cleanedAlias =
+            kind == 'merchant' ? cleanMerchantName(rawAlias) : rawAlias;
+        final cleanedCanonical =
+            kind == 'merchant' ? cleanMerchantName(rawCanonical) : rawCanonical;
+        if (cleanedAlias != rawAlias || cleanedCanonical != rawCanonical) {
+          await db.delete(
+            'name_aliases',
+            where: 'kind = ? AND alias = ? COLLATE NOCASE',
+            whereArgs: <Object?>[kind, rawAlias],
+          );
+          if (cleanedAlias.toLowerCase() != cleanedCanonical.toLowerCase()) {
+            final existing = await db.query(
+              'name_aliases',
+              where: 'kind = ? AND alias = ? COLLATE NOCASE',
+              whereArgs: <Object?>[kind, cleanedAlias],
+              limit: 1,
+            );
+            if (existing.isEmpty) {
+              await db.insert('name_aliases', <String, Object?>{
+                'kind': kind,
+                'alias': cleanedAlias,
+                'canonical': cleanedCanonical,
+              });
+            }
+          }
+        }
       }
     }
   }

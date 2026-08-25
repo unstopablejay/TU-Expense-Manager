@@ -89,10 +89,13 @@ Notes on the design:
   same timestamp — so ingestion stays idempotent.
 - `parse()` returns `null` when no template matches, which is how OTPs, promos
   and statement alerts are filtered out.
+- Bank transport prefixes (`UPI_`, `UPI-`, `UPI/`, `UPI `) are automatically stripped
+  from raw merchant names via `cleanMerchantName` at parse time while preserving the merchant's
+  original text casing.
 
 ### Database
 
-Schema version 8. Seven tables, created on first launch (`AppDatabase`):
+Schema version 9. Seven tables, created on first launch (`AppDatabase`):
 
 ```sql
 categories           (id INTEGER PK, name TEXT UNIQUE COLLATE NOCASE,
@@ -234,6 +237,13 @@ v5 `splits_json` one is, and for the same reason: a database arriving from v2 or
 #### Migration v7 → v8
 
 Adds `categories.icon` storing custom emojis. Pre-existing categories are backfilled with default seeded emojis (🛒 Grocery, 🍔 Food, ⛽ Fuel, 🛍️ Shopping, 💡 Bills & Utilities, ✈️ Travel, 🎬 Entertainment, 💊 Health, ❓ Uncategorized, 💰 Income) or smart keyword suggestions.
+
+#### Migration v8 → v9
+
+Automatically strips bank gateway transport prefixes (`UPI_`, `UPI-`, `UPI/`, `UPI `) across `transactions`, `merchant_mappings`, `deleted_transactions`, and `name_aliases`.
+- **Merchant Mappings**: If both `UPI_Merchant` and `Merchant` exist, the non-UPI rule is preserved and the `UPI_` entry is pruned. Orphaned mappings are renamed to the cleaned merchant name.
+- **Transactions & Deleted Tombstones**: Cleans the `merchant` column, deduplicating any natural key collisions created by the rename.
+- **Name Aliases**: Cleans merchant aliases and canonical names, automatically dropping redundant self-aliases.
 
 ### Category Emojis & Smart Matching
 
