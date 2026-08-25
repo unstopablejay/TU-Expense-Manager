@@ -624,6 +624,14 @@ class _SummaryHeader extends StatelessWidget {
     final breakdown = spendByCategory(entries).entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
 
+    final Map<String, String> categoryIcons = <String, String>{
+      for (final LedgerEntry e in entries) ...<String, String>{
+        if (e.txn.categoryIcon.isNotEmpty) e.txn.categoryName: e.txn.categoryIcon,
+        for (final TxnSplit l in e.lines)
+          if (l.categoryIcon.isNotEmpty) l.categoryName: l.categoryIcon,
+      },
+    };
+
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
       child: Padding(
@@ -677,6 +685,7 @@ class _SummaryHeader extends StatelessWidget {
                   Chip(
                     avatar: CategoryAvatar(
                       category: entry.key,
+                      explicitIcon: categoryIcons[entry.key],
                       size: 20,
                       fontSize: 14,
                       iconSize: 14,

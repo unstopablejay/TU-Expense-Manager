@@ -480,6 +480,16 @@ class _TableRowState extends State<_TableRow> {
     return '${lines.first.categoryName} +${lines.length - 1}';
   }
 
+  String get _categoryIcon {
+    final List<TxnSplit> lines = widget.entry.lines;
+    if (lines.length <= 1) {
+      return lines.isEmpty
+          ? widget.entry.txn.categoryIcon
+          : lines.first.categoryIcon;
+    }
+    return lines.first.categoryIcon;
+  }
+
   @override
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
@@ -619,6 +629,7 @@ class _TableRowState extends State<_TableRow> {
 
   Widget _categoryPill(ThemeData theme, bool needsCategory) {
     final String label = needsCategory ? kUncategorized : _categoryLabel;
+    final String? icon = needsCategory ? null : _categoryIcon;
     final Color hue = categoryColor(label, theme.brightness);
 
     return Align(
@@ -636,6 +647,7 @@ class _TableRowState extends State<_TableRow> {
           children: <Widget>[
             CategoryAvatar(
               category: label,
+              explicitIcon: icon,
               size: 16,
               fontSize: 12,
               iconSize: 12,
@@ -767,6 +779,7 @@ class _FilterToolbar extends StatelessWidget {
                 optionLabel: (int id) => _categoryName(id),
                 optionLeading: (int id) => CategoryAvatar(
                   category: _categoryName(id),
+                  explicitIcon: _categoryIcon(id),
                   size: 20,
                   fontSize: 14,
                   iconSize: 14,
@@ -813,6 +826,11 @@ class _FilterToolbar extends StatelessWidget {
       .firstWhere((ExpenseCategory c) => c.id == id,
           orElse: () => const ExpenseCategory(id: -1, name: kUncategorized))
       .name;
+
+  String _categoryIcon(int id) => categoryChoices
+      .firstWhere((ExpenseCategory c) => c.id == id,
+          orElse: () => const ExpenseCategory(id: -1, name: kUncategorized))
+      .icon;
 }
 
 /// A facet as a dropdown: a button that says what is picked, and a menu of the
@@ -1101,6 +1119,14 @@ class _SummaryStrip extends StatelessWidget {
           ..sort((MapEntry<String, double> a, MapEntry<String, double> b) =>
               b.value.compareTo(a.value));
 
+    final Map<String, String> categoryIcons = <String, String>{
+      for (final LedgerEntry e in entries) ...<String, String>{
+        if (e.txn.categoryIcon.isNotEmpty) e.txn.categoryName: e.txn.categoryIcon,
+        for (final TxnSplit l in e.lines)
+          if (l.categoryIcon.isNotEmpty) l.categoryName: l.categoryIcon,
+      },
+    };
+
     return Container(
       decoration: BoxDecoration(
         color: theme.colorScheme.surfaceContainerLow,
@@ -1140,6 +1166,7 @@ class _SummaryStrip extends StatelessWidget {
             Chip(
               avatar: CategoryAvatar(
                 category: item.key,
+                explicitIcon: categoryIcons[item.key],
                 size: 18,
                 fontSize: 13,
                 iconSize: 13,

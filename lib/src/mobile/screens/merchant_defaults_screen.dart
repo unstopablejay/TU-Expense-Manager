@@ -126,6 +126,14 @@ class _MerchantDefaultsScreenState extends State<MerchantDefaultsScreen> {
       ));
   }
 
+  String? _categoryIcon(int? categoryId) {
+    if (categoryId == null) return null;
+    for (final ExpenseCategory c in _categories) {
+      if (c.id == categoryId) return c.icon;
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -137,10 +145,10 @@ class _MerchantDefaultsScreenState extends State<MerchantDefaultsScreen> {
           : _merchants.isEmpty
               ? Center(
                   child: Padding(
-                    padding: const EdgeInsets.all(32),
+                    padding: const EdgeInsets.all(24),
                     child: Text(
-                      'No merchants yet. They appear here as transactions '
-                      'arrive.',
+                      'No merchants yet. Import transactions from SMS and '
+                      'they will appear here.',
                       textAlign: TextAlign.center,
                       style: theme.textTheme.bodyMedium,
                     ),
@@ -159,6 +167,9 @@ class _MerchantDefaultsScreenState extends State<MerchantDefaultsScreen> {
                         category: alwaysAsk || unset
                             ? kUncategorized
                             : m.defaultCategoryName!,
+                        explicitIcon: alwaysAsk || unset
+                            ? null
+                            : _categoryIcon(m.defaultCategoryId),
                         size: 40,
                         fontSize: 20,
                         iconSize: 20,
