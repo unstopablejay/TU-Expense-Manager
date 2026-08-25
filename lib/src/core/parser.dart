@@ -247,7 +247,7 @@ class SmsParser {
       final stamp = _parseDate(_group(match, 'date') ?? '');
       if (stamp == null) continue;
 
-      final merchant = _normalize(_group(match, 'merchant') ?? '');
+      final merchant = cleanMerchantName(_group(match, 'merchant') ?? '');
       if (merchant.isEmpty) continue;
 
       final instrument = _normalize(_group(match, 'instrument') ?? '');
@@ -276,6 +276,10 @@ class SmsParser {
   /// "GEORGE EGG CENTRE" become the same mapping key.
   static String _normalize(String value) =>
       value.trim().replaceAll(RegExp(r'\s+'), ' ');
+
+  /// Strips bank gateway transport prefixes like `UPI_`, `UPI-`, `UPI/`, or `UPI `
+  /// from raw merchant names while keeping the merchant's original text casing.
+  static String cleanMerchantName(String value) => tuCleanMerchantName(value);
 
   /// Keeps the message's own date and borrows only the time of day, and only
   /// when the SMS arrived on that same date — a re-scan of the inbox therefore
@@ -415,4 +419,18 @@ class _Stamp {
 
   final DateTime date;
   final bool hasTime;
+}
+
+/// Strips bank gateway transport prefixes like `UPI_`, `UPI-`, `UPI/`, or `UPI `
+/// from raw merchant names while keeping the merchant's original text casing.
+String cleanMerchantName(String value) => tuCleanMerchantName(value);
+
+/// Implementation of UPI prefix stripper.
+String tuCleanMerchantName(String value) {
+  final trimmed = value.trim().replaceAll(RegExp(r'\s+'), ' ');
+  final stripped = trimmed.replaceFirst(
+    RegExp(r'^upi[\s_\-\/]+', caseSensitive: false),
+    '',
+  );
+  return stripped.isEmpty ? trimmed : stripped;
 }

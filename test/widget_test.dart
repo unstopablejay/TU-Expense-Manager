@@ -50,7 +50,7 @@ void main() {
       // 204.00, not the 281,496.08 available limit later in the message.
       expect(parsed!.amount, 204.00);
       expect(parsed.paymentType, 'YES BANK Card X2858');
-      expect(parsed.merchant, 'UPI_GEORGE EGG CENTRE');
+      expect(parsed.merchant, 'GEORGE EGG CENTRE');
       expect(parsed.date, DateTime(2026, 8, 13, 9, 21, 35));
     });
 
@@ -95,7 +95,7 @@ void main() {
       expect(parsed, isNotNull);
       expect(parsed!.amount, 750.00);
       expect(parsed.paymentType, 'YES BANK Card X2858');
-      expect(parsed.merchant, 'UPI_VALLI A');
+      expect(parsed.merchant, 'VALLI A');
       expect(parsed.date, DateTime(2026, 8, 23, 10, 29, 37));
       expect(parsed.direction, TxnDirection.debit);
     });
@@ -109,8 +109,21 @@ void main() {
       expect(parsed, isNotNull);
       expect(parsed!.amount, 750.00);
       expect(parsed.paymentType, 'YES BANK Card X2858');
-      expect(parsed.merchant, 'UPI_VALLI A');
+      expect(parsed.merchant, 'VALLI A');
       expect(parsed.date, DateTime(2026, 8, 23, 10, 29));
+    });
+
+    test('cleanMerchantName strips UPI prefixes and retains merchant casing', () {
+      expect(cleanMerchantName('UPI_GEORGE EGG CENTRE'), 'GEORGE EGG CENTRE');
+      expect(cleanMerchantName('UPI_CHai point'), 'CHai point');
+      expect(cleanMerchantName('UPI_Rajammal'), 'Rajammal');
+      expect(cleanMerchantName('UPI-Swiggy'), 'Swiggy');
+      expect(cleanMerchantName('UPI/Zomato'), 'Zomato');
+      expect(cleanMerchantName('UPI George Egg Centre'), 'George Egg Centre');
+      expect(cleanMerchantName('upi_chai point'), 'chai point');
+      expect(cleanMerchantName('SWIGGY'), 'SWIGGY');
+      expect(cleanMerchantName('  UPI_  Tea Stall   '), 'Tea Stall');
+      expect(cleanMerchantName('UPI'), 'UPI');
     });
 
     test('returns null for messages that are not spend alerts', () {
@@ -2141,7 +2154,7 @@ void main() {
       expect(after.aliases, before.aliases);
       expect(after.appMeta, before.appMeta);
       expect(after.meta['format'], kBackupFormat);
-      expect(after.schemaVersion, 8);
+      expect(after.schemaVersion, kSchemaVersion);
     });
 
     // The one that would fail silently. `transactions.amount` is a REAL that
