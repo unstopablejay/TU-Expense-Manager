@@ -610,11 +610,11 @@ The settings destination on the navigation bar houses:
 ### Appearance & Themes
 
 - **Two-Tier Customization**: Choose your base theme mode (**System**, **Light**, **Dark**, or **OLED Black**) and customize your primary accent seed across 8 curated vibrant color palettes (**Classic Blue**, **Crimson Red**, **Emerald Green**, **Royal Purple**, **Sunset Orange**, **Rose Pink**, **Teal/Cyan**, and **Cyber Amber**).
-- **Multi-Style Icon Packs**: Switch between **Vibrant Emojis** (playful colorful emoji avatars), **Minimalist Outlined** (clean monochrome outlined vector icons), and **Modern Filled** (sharp solid filled vector icons). Accessible on mobile and via the web desktop header theme popup menu.
+- **Multi-Style Icon Packs & Smart Emojis**: Switch between **Vibrant Emojis** (playful colorful emoji avatars), **Minimalist Outlined** (clean monochrome outlined vector icons), and **Modern Filled** (sharp solid filled vector icons). Seeded and keyword-matched emojis automatically support essential categories including 🛒 Grocery, 🍔 Food, ⛽ Fuel, 🛍️ Shopping, 💡 Bills, ✈️ Travel, 🎬 Entertainment, 💊 Health, 💰 Income, 🏦 Loans/EMI, 🥚 Egg, and 🍗/🥩/🐟 Non-Veg/Meat/Fish, with dynamic legacy fallback upgrade for existing records.
 - **End-to-End Category Icon Synchronization**: Custom category icons assigned on the mobile app are preserved in JSON backup snapshots and accurately rendered across all web views (desktop transactions table category pills, facet dropdowns, breakdown chips, and dashboard category charts).
 - **OLED Pitch Black**: Built specifically for AMOLED/OLED displays to minimize battery consumption and eye strain, rendering true `#000000` pitch black scaffold and navigation bars with `#121418` obsidian elevated containers for clear card separation.
 - **Instant Persistence & Web Sync**: Theme preferences are persisted instantly and synchronized seamlessly across both the Android mobile application and the desktop web client.
-- **Web App Branding & Icons**: The web build includes custom crisp favicon and PWA application icons generated from the native TU Expense Tracker logo, alongside proper web page metadata and title.
+- **Web App Branding & Icons**: The web build includes custom crisp favicon and PWA application icons generated from the native TU Expense Tracker logo (`assets/icon/app_icon.png`), alongside a branded header logo badge in the web application bar and proper web page metadata.
 
 ### Deleted transactions
 

@@ -346,7 +346,48 @@ class _WebShellState extends State<WebShell> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('TU Expense Tracker'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: Image.asset(
+                'assets/icon/app_icon.png',
+                width: 28,
+                height: 28,
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stackTrace) => Container(
+                  width: 28,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    color: Theme.of(context)
+                        .colorScheme
+                        .primaryContainer
+                        .withValues(alpha: 0.7),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  alignment: Alignment.center,
+                  child: Icon(
+                    Icons.account_balance_wallet_rounded,
+                    size: 16,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            const Flexible(
+              child: Text(
+                'TU Expense Tracker',
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: -0.2,
+                ),
+              ),
+            ),
+          ],
+        ),
         bottom: _pendingEdits == 0 ? null : _pendingBanner(),
         actions: <Widget>[
           if (_devices.length > 1) _devicePicker(),

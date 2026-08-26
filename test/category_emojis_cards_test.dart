@@ -18,11 +18,24 @@ void main() {
       expect(categoryEmoji('Health'), '💊');
       expect(categoryEmoji('Uncategorized'), '❓');
       expect(categoryEmoji('Income'), '💰');
+      expect(categoryEmoji('Loans'), '🏦');
+      expect(categoryEmoji('Loan'), '🏦');
+      expect(categoryEmoji('Egg'), '🥚');
+      expect(categoryEmoji('Eggs'), '🥚');
+      expect(categoryEmoji('Non Veg'), '🍗');
+      expect(categoryEmoji('Non-Veg'), '🍗');
     });
 
-    test('explicit icon takes precedence over default and keyword matching', () {
+    test('explicit icon takes precedence over default and keyword matching unless legacy tag', () {
       expect(categoryEmoji('Food', explicitIcon: '🍕'), '🍕');
       expect(categoryEmoji('Custom Random', explicitIcon: '🏖️'), '🏖️');
+      expect(categoryEmoji('Loans', explicitIcon: '💳'), '💳');
+
+      // Legacy fallback tag '🏷️' upgrades dynamically to contextual emoji
+      expect(categoryEmoji('Loans', explicitIcon: '🏷️'), '🏦');
+      expect(categoryEmoji('Egg', explicitIcon: '🏷️'), '🥚');
+      expect(categoryEmoji('Non Veg', explicitIcon: '🏷️'), '🍗');
+      expect(categoryEmoji('Random Unknown', explicitIcon: '🏷️'), '🏷️');
     });
 
     test('smart keyword auto-matching maps common category concepts', () {
@@ -39,6 +52,11 @@ void main() {
       expect(suggestCategoryEmoji('Mutual Funds & Stocks'), '📈');
       expect(suggestCategoryEmoji('Life Insurance'), '🛡️');
       expect(suggestCategoryEmoji('Beer & Wine Bar'), '🍻');
+      expect(suggestCategoryEmoji('Personal Loan EMI'), '🏦');
+      expect(suggestCategoryEmoji('Organic Eggs'), '🥚');
+      expect(suggestCategoryEmoji('Chicken Biryani'), '🍗');
+      expect(suggestCategoryEmoji('Mutton Curry'), '🥩');
+      expect(suggestCategoryEmoji('Fresh Fish'), '🐟');
       expect(suggestCategoryEmoji('Unknown Random Name'), '🏷️');
     });
 
@@ -47,7 +65,12 @@ void main() {
       expect(kCuratedCategoryEmojis, contains('🍔'));
       expect(kCuratedCategoryEmojis, contains('☕'));
       expect(kCuratedCategoryEmojis, contains('🏠'));
-      expect(kCuratedCategoryEmojis.length, greaterThanOrEqualTo(30));
+      expect(kCuratedCategoryEmojis, contains('🏦'));
+      expect(kCuratedCategoryEmojis, contains('🥚'));
+      expect(kCuratedCategoryEmojis, contains('🍗'));
+      expect(kCuratedCategoryEmojis, contains('🥩'));
+      expect(kCuratedCategoryEmojis, contains('🐟'));
+      expect(kCuratedCategoryEmojis.length, greaterThanOrEqualTo(35));
     });
   });
 

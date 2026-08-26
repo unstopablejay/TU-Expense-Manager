@@ -72,6 +72,38 @@ void main() {
         categoryVectorIcon('Salary', filled: false),
         Icons.account_balance_wallet_outlined,
       );
+      expect(
+        categoryVectorIcon('Loans', filled: false),
+        Icons.account_balance_outlined,
+      );
+      expect(
+        categoryVectorIcon('Loans', filled: true),
+        Icons.account_balance,
+      );
+      expect(
+        categoryVectorIcon('Egg', filled: false),
+        Icons.egg_outlined,
+      );
+      expect(
+        categoryVectorIcon('Egg', filled: true),
+        Icons.egg,
+      );
+      expect(
+        categoryVectorIcon('Non Veg', filled: false),
+        Icons.kebab_dining_outlined,
+      );
+      expect(
+        categoryVectorIcon('Non Veg', filled: true),
+        Icons.kebab_dining,
+      );
+      expect(
+        categoryVectorIcon('Fish & Seafood', filled: false),
+        Icons.set_meal_outlined,
+      );
+      expect(
+        categoryVectorIcon('Fish & Seafood', filled: true),
+        Icons.set_meal,
+      );
     });
 
     testWidgets('CategoryAvatar renders emoji in emojis pack and vector icon in outlined/filled pack',
@@ -246,6 +278,41 @@ void main() {
 
       // Picker sheet should dismiss and return selected emoji
       expect(selectedEmoji, anyOf('☕️', '☕'));
+    });
+
+    testWidgets('showEmojiPickerSheet searches for egg, non veg, and loan emojis',
+        (WidgetTester tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => ElevatedButton(
+                onPressed: () => showEmojiPickerSheet(context),
+                child: const Text('Open Picker'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Open Picker'));
+      await tester.pumpAndSettle();
+
+      // Search egg
+      await tester.enterText(find.byType(TextField), 'egg');
+      await tester.pumpAndSettle();
+      expect(find.text('🥚'), findsWidgets);
+
+      // Search non veg / chicken
+      await tester.enterText(find.byType(TextField), 'chicken');
+      await tester.pumpAndSettle();
+      expect(find.text('🍗'), findsWidgets);
+
+      // Search loan / bank
+      await tester.enterText(find.byType(TextField), 'loan');
+      await tester.pumpAndSettle();
+      expect(find.text('🏦'), findsWidgets);
     });
   });
 }

@@ -28,6 +28,17 @@ const Map<String, String> _seededCategoryEmojis = <String, String>{
   'income': '💰',
   'salary': '💰',
   'credit': '💰',
+  'loans': '🏦',
+  'loan': '🏦',
+  'emi': '🏦',
+  'egg': '🥚',
+  'eggs': '🥚',
+  'non veg': '🍗',
+  'non-veg': '🍗',
+  'nonveg': '🍗',
+  'chicken': '🍗',
+  'meat': '🥩',
+  'fish': '🐟',
 };
 
 /// Popular emojis for category selection in pickers and sheets.
@@ -37,6 +48,7 @@ const List<String> kCuratedCategoryEmojis = <String>[
   '🐾', '📚', '🎁', '📺', '💻', '📱', '✂️', '👗',
   '🏖️', '🍿', '🥖', '🍎', '🍰', '🍜', '💰', '🧾',
   '📈', '🛡️', '🩺', '⚡', '🔧', '📦', '🎓', '🏷️',
+  '🏦', '🥚', '🍗', '🥩', '🐟', '💸', '🍳', '🍛',
 ];
 
 /// Smart emoji suggestions for any category name based on keyword matches.
@@ -47,6 +59,58 @@ String suggestCategoryEmoji(String category) {
     return _seededCategoryEmojis[key]!;
   }
 
+  if (key.contains('loan') ||
+      key.contains('emi') ||
+      key.contains('debt') ||
+      key.contains('lend') ||
+      key.contains('borrow') ||
+      key.contains('mortgage') ||
+      key.contains('credit card bill') ||
+      key.contains('repay') ||
+      key == 'loans') {
+    return '🏦';
+  }
+  if (key.contains('egg') ||
+      key.contains('omelet') ||
+      key.contains('omlet') ||
+      key.contains('anda') ||
+      key == 'eggs') {
+    return '🥚';
+  }
+  if (key.contains('non veg') ||
+      key.contains('non-veg') ||
+      key.contains('nonveg') ||
+      key.contains('non_veg') ||
+      key.contains('chicken') ||
+      key.contains('poultry') ||
+      key.contains('biryani') ||
+      key.contains('kebab') ||
+      key.contains('tikka') ||
+      key.contains('mutton') ||
+      key.contains('meat') ||
+      key.contains('fish') ||
+      key.contains('seafood') ||
+      key.contains('prawn') ||
+      key.contains('pork') ||
+      key.contains('beef') ||
+      key.contains('steak')) {
+    if (key.contains('fish') ||
+        key.contains('seafood') ||
+        key.contains('prawn') ||
+        key.contains('salmon') ||
+        key.contains('tuna') ||
+        key.contains('crab')) {
+      return '🐟';
+    }
+    if (key.contains('meat') ||
+        key.contains('mutton') ||
+        key.contains('beef') ||
+        key.contains('pork') ||
+        key.contains('steak')) {
+      return '🥩';
+    }
+    return '🍗';
+  }
   if (key.contains('coffee') ||
       key == 'tea' ||
       key.contains('tea ') ||
@@ -251,8 +315,9 @@ String suggestCategoryEmoji(String category) {
 
 /// Resolves the emoji for a category, honoring [explicitIcon] if provided.
 String categoryEmoji(String category, {String? explicitIcon}) {
-  if (explicitIcon != null && explicitIcon.trim().isNotEmpty) {
-    return explicitIcon.trim();
+  final String? trimmed = explicitIcon?.trim();
+  if (trimmed != null && trimmed.isNotEmpty && trimmed != '🏷️') {
+    return trimmed;
   }
   return suggestCategoryEmoji(category);
 }
@@ -266,6 +331,51 @@ IconData categoryVectorIcon(String category, {bool filled = false}) {
     return filled
         ? Icons.account_balance_wallet
         : Icons.account_balance_wallet_outlined;
+  }
+  if (key.contains('loan') ||
+      key.contains('emi') ||
+      key.contains('debt') ||
+      key.contains('lend') ||
+      key.contains('borrow') ||
+      key.contains('mortgage') ||
+      key.contains('credit card bill') ||
+      key.contains('repay') ||
+      key == 'loans') {
+    return filled ? Icons.account_balance : Icons.account_balance_outlined;
+  }
+  if (key.contains('egg') ||
+      key.contains('omelet') ||
+      key.contains('omlet') ||
+      key.contains('anda') ||
+      key == 'eggs') {
+    return filled ? Icons.egg : Icons.egg_outlined;
+  }
+  if (key.contains('non veg') ||
+      key.contains('non-veg') ||
+      key.contains('nonveg') ||
+      key.contains('non_veg') ||
+      key.contains('chicken') ||
+      key.contains('poultry') ||
+      key.contains('biryani') ||
+      key.contains('kebab') ||
+      key.contains('tikka') ||
+      key.contains('mutton') ||
+      key.contains('meat') ||
+      key.contains('fish') ||
+      key.contains('seafood') ||
+      key.contains('prawn') ||
+      key.contains('pork') ||
+      key.contains('beef') ||
+      key.contains('steak')) {
+    if (key.contains('fish') ||
+        key.contains('seafood') ||
+        key.contains('prawn') ||
+        key.contains('salmon') ||
+        key.contains('tuna') ||
+        key.contains('crab')) {
+      return filled ? Icons.set_meal : Icons.set_meal_outlined;
+    }
+    return filled ? Icons.kebab_dining : Icons.kebab_dining_outlined;
   }
   if (key.contains('coffee') ||
       key == 'tea' ||
@@ -467,14 +577,6 @@ IconData categoryVectorIcon(String category, {bool filled = false}) {
       key.contains('water') ||
       key == 'bills & utilities') {
     return filled ? Icons.receipt_long : Icons.receipt_long_outlined;
-  }
-  if (key.contains('shop') ||
-      key.contains('amazon') ||
-      key.contains('flipkart') ||
-      key.contains('store') ||
-      key.contains('mall') ||
-      key == 'shopping') {
-    return filled ? Icons.shopping_bag : Icons.shopping_bag_outlined;
   }
   if (key == 'uncategorized' || key == '❓') {
     return filled ? Icons.help : Icons.help_outline;
