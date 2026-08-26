@@ -1344,5 +1344,18 @@ void main() {
 
       expect(ThemeController.instance.appIconPack, AppIconPack.outlined);
     });
+
+    testWidgets('WebShell renders branded logo badge and title in app bar',
+        (WidgetTester tester) async {
+      final StubServer server = StubServer()
+        ..devices['phone'] = "Jay's Pixel"
+        ..snapshots['phone'] = snapshotFor(merchant: 'SWIGGY');
+
+      await pumpShell(tester, server, surface: const Size(1600, 1000));
+
+      // App bar should have app logo image and title
+      expect(find.byType(Image), findsOneWidget);
+      expect(find.text('TU Expense Tracker'), findsOneWidget);
+    });
   });
 }

@@ -94,6 +94,69 @@ void main() {
       expect(txn.splits.first.categoryName, 'Coffee');
       expect(txn.splits.first.categoryIcon, '☕️');
     });
+
+    test('CategoryAvatar upgrades legacy tag icon in transactions for Loans, Egg, Non Veg', () {
+      final backup = BackupData(
+        meta: <String, String>{'exported_at': '2026-08-23T10:00:00Z'},
+        categories: <Map<String, Object?>>[
+          <String, Object?>{'id': 10, 'name': 'Loans', 'icon': '🏷️'},
+          <String, Object?>{'id': 11, 'name': 'Egg', 'icon': ''},
+          <String, Object?>{'id': 12, 'name': 'Non Veg', 'icon': '🏷️'},
+        ],
+        transactions: <Map<String, Object?>>[
+          <String, Object?>{
+            'id': 201,
+            'amount': 15000.0,
+            'payment_type': 'NetBanking',
+            'merchant': 'HDFC Home Loan',
+            'date': 1700000000000,
+            'category_id': 10,
+            'direction': 'debit',
+            'reference': 'REF_LOAN',
+          },
+          <String, Object?>{
+            'id': 202,
+            'amount': 120.0,
+            'payment_type': 'UPI',
+            'merchant': 'Egg Store',
+            'date': 1700000000000,
+            'category_id': 11,
+            'direction': 'debit',
+            'reference': 'REF_EGG',
+          },
+          <String, Object?>{
+            'id': 203,
+            'amount': 850.0,
+            'payment_type': 'UPI',
+            'merchant': 'Bawarchi Biryani',
+            'date': 1700000000000,
+            'category_id': 12,
+            'direction': 'debit',
+            'reference': 'REF_NONVEG',
+          },
+        ],
+        splits: const <Map<String, Object?>>[],
+        aliases: const <Map<String, Object?>>[],
+        merchantMappings: const <Map<String, Object?>>[],
+        deleted: const <Map<String, Object?>>[],
+        appMeta: const <Map<String, Object?>>[],
+      );
+
+      final store = SnapshotStore.fromBackup(backup);
+      expect(store.transactions.length, 3);
+
+      final loanTxn = store.transactions.firstWhere((t) => t.id == 201);
+      expect(loanTxn.categoryName, 'Loans');
+      expect(categoryEmoji(loanTxn.categoryName, explicitIcon: loanTxn.categoryIcon), '🏦');
+
+      final eggTxn = store.transactions.firstWhere((t) => t.id == 202);
+      expect(eggTxn.categoryName, 'Egg');
+      expect(categoryEmoji(eggTxn.categoryName, explicitIcon: eggTxn.categoryIcon), '🥚');
+
+      final nonVegTxn = store.transactions.firstWhere((t) => t.id == 203);
+      expect(nonVegTxn.categoryName, 'Non Veg');
+      expect(categoryEmoji(nonVegTxn.categoryName, explicitIcon: nonVegTxn.categoryIcon), '🍗');
+    });
   });
 
   group('CategoryAvatar & Transaction Tiles with Custom Icons', () {

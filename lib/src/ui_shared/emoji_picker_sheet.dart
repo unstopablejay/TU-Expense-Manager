@@ -248,6 +248,13 @@ const Map<String, List<String>> _emojiKeywords = <String, List<String>>{
   '📦': <String>['package', 'box', 'delivery', 'courier', 'amazon', 'order', 'parcel'],
   '🎓': <String>['graduation', 'degree', 'college', 'university', 'student', 'education'],
   '🏷️': <String>['tag', 'label', 'category', 'item', 'other', 'custom', 'price'],
+  '🥚': <String>['egg', 'eggs', 'omelette', 'omlet', 'anda', 'breakfast', 'food', 'protein', 'yolk'],
+  '🍳': <String>['egg', 'fried egg', 'omelette', 'breakfast', 'cook', 'cooking', 'food'],
+  '🍗': <String>['chicken', 'poultry', 'non veg', 'non-veg', 'nonveg', 'meat', 'biryani', 'kebab', 'tikka', 'dinner', 'food'],
+  '🥩': <String>['meat', 'steak', 'beef', 'pork', 'mutton', 'non veg', 'non-veg', 'raw', 'butcher'],
+  '🐟': <String>['fish', 'seafood', 'prawn', 'salmon', 'tuna', 'non veg', 'non-veg'],
+  '🏦': <String>['bank', 'loan', 'loans', 'emi', 'debt', 'mortgage', 'lending', 'borrow', 'finance', 'interest'],
+  '💸': <String>['money', 'spend', 'loan', 'transfer', 'fly', 'loss', 'payment'],
 };
 
 /// Presents a WhatsApp-style emoji selection bottom sheet.
