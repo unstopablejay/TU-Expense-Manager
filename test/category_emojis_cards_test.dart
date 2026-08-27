@@ -57,6 +57,13 @@ void main() {
       expect(suggestCategoryEmoji('Chicken Biryani'), '🍗');
       expect(suggestCategoryEmoji('Mutton Curry'), '🥩');
       expect(suggestCategoryEmoji('Fresh Fish'), '🐟');
+      expect(suggestCategoryEmoji('papa'), '👨');
+      expect(suggestCategoryEmoji('Dad & Mom Family'), '👨');
+      expect(suggestCategoryEmoji('Emergency Savings Fund'), '💰');
+      expect(suggestCategoryEmoji('Nykaa Cosmetics & Makeup'), '💄');
+      expect(suggestCategoryEmoji('Fresh Milk & Dairy'), '🥛');
+      expect(suggestCategoryEmoji('Evening Snacks & Biscuits'), '🍿');
+      expect(suggestCategoryEmoji('Fresh Veggies and Fruits'), '🥗');
       expect(suggestCategoryEmoji('Unknown Random Name'), '🏷️');
     });
 

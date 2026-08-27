@@ -157,6 +157,77 @@ void main() {
       expect(nonVegTxn.categoryName, 'Non Veg');
       expect(categoryEmoji(nonVegTxn.categoryName, explicitIcon: nonVegTxn.categoryIcon), '🍗');
     });
+
+    test('ExpenseTxn.effectiveSplits retains categoryIcon for unsplit transactions', () {
+      final txn = ExpenseTxn(
+        id: 100,
+        amount: 50.0,
+        paymentType: 'UPI',
+        merchant: 'Milk Dairy',
+        date: DateTime(2026, 8, 27),
+        categoryId: 5,
+        categoryName: 'milk',
+        categoryIcon: '🥛',
+        direction: TxnDirection.debit,
+        reference: 'REF_1',
+      );
+
+      expect(txn.effectiveSplits.length, 1);
+      expect(txn.effectiveSplits.first.categoryName, 'milk');
+      expect(txn.effectiveSplits.first.categoryIcon, '🥛');
+    });
+
+    test('SnapshotStore preserves mobile user custom category icons across all categories', () {
+      final backup = BackupData(
+        meta: <String, String>{'exported_at': '2026-08-27T10:00:00Z'},
+        categories: <Map<String, Object?>>[
+          <String, Object?>{'id': 1, 'name': 'papa', 'icon': '👨'},
+          <String, Object?>{'id': 2, 'name': 'Savings', 'icon': '💰'},
+          <String, Object?>{'id': 3, 'name': 'Cosmetics', 'icon': '💄'},
+          <String, Object?>{'id': 4, 'name': 'milk', 'icon': '🥛'},
+          <String, Object?>{'id': 5, 'name': 'snacks', 'icon': '🍿'},
+          <String, Object?>{'id': 6, 'name': 'veegies and fruits', 'icon': '🥗'},
+        ],
+        transactions: <Map<String, Object?>>[
+          <String, Object?>{
+            'id': 1,
+            'amount': 500.0,
+            'payment_type': 'UPI',
+            'merchant': 'Papa Transfer',
+            'date': 1700000000000,
+            'category_id': 1,
+            'direction': 'debit',
+            'reference': 'REF_1',
+          },
+          <String, Object?>{
+            'id': 2,
+            'amount': 2000.0,
+            'payment_type': 'UPI',
+            'merchant': 'Savings Deposit',
+            'date': 1700000000000,
+            'category_id': 2,
+            'direction': 'debit',
+            'reference': 'REF_2',
+          },
+        ],
+        splits: const <Map<String, Object?>>[],
+        aliases: const <Map<String, Object?>>[],
+        merchantMappings: const <Map<String, Object?>>[],
+        deleted: const <Map<String, Object?>>[],
+        appMeta: const <Map<String, Object?>>[],
+      );
+
+      final store = SnapshotStore.fromBackup(backup);
+      final t1 = store.transactions.firstWhere((t) => t.id == 1);
+      expect(t1.categoryName, 'papa');
+      expect(t1.categoryIcon, '👨');
+      expect(t1.effectiveSplits.first.categoryIcon, '👨');
+
+      final t2 = store.transactions.firstWhere((t) => t.id == 2);
+      expect(t2.categoryName, 'Savings');
+      expect(t2.categoryIcon, '💰');
+      expect(t2.effectiveSplits.first.categoryIcon, '💰');
+    });
   });
 
   group('CategoryAvatar & Transaction Tiles with Custom Icons', () {

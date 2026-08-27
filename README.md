@@ -250,7 +250,7 @@ Automatically strips bank gateway transport prefixes (`UPI_`, `UPI-`, `UPI/`, `U
 Every category in the app features a colorful, unique emoji representation (WhatsApp / Fluent emoji style).
 
 - **Integrated Emoji Picker**: When creating or editing categories in **Settings › Categories**, users get a live squircle avatar preview, real-time emoji auto-suggestion based on category name typing, a curated quick-pick emoji scrollbar, and custom keyboard emoji input.
-- **Smart Automatic Keyword Matching**: Automatically matches typed keywords to relevant emojis (e.g. coffee/tea/cafe → ☕, rent/house/flat → 🏠, gym/fitness → 🏋️, cab/uber/taxi → 🚕, pet/dog/cat → 🐾, gaming/steam → 🎮, books/college → 📚, salon/hair → ✂️, bills → 💡, investment/stocks/mutual funds → 📈, insurance → 🛡️, etc.).
+- **Smart Automatic Keyword Matching**: Automatically matches typed keywords to relevant emojis and vector icons (e.g. coffee/tea/cafe → ☕, loans/emi/debt → 🏦, egg/anda → 🥚, non-veg/chicken/meat/fish → 🍗/🥩/🐟, papa/dad/family → 👨, savings/deposit → 💰, cosmetics/makeup → 💄, milk/dairy → 🥛, snacks/bakery → 🍿, veggies/fruits/salad → 🥗, rent/house/flat → 🏠, gym/fitness → 🏋️, cab/uber/taxi → 🚕, pet/dog/cat → 🐾, gaming/steam → 🎮, books/college → 📚, salon/hair → ✂️, bills → 💡, investment/stocks/mutual funds → 📈, insurance → 🛡️, etc.).
 - **Dynamic Fallbacks**: Unconfigured or custom categories without an explicit icon gracefully fall back to keyword matching or `🏷️`.
 
 ### Modern Fintech Rounded Transaction Cards
