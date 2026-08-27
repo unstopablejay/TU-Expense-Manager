@@ -250,7 +250,7 @@ Automatically strips bank gateway transport prefixes (`UPI_`, `UPI-`, `UPI/`, `U
 Every category in the app features a colorful, unique emoji representation (WhatsApp / Fluent emoji style).
 
 - **Integrated Emoji Picker**: When creating or editing categories in **Settings › Categories**, users get a live squircle avatar preview, real-time emoji auto-suggestion based on category name typing, a curated quick-pick emoji scrollbar, and custom keyboard emoji input.
-- **Smart Automatic Keyword Matching**: Automatically matches typed keywords to relevant emojis (e.g. coffee/tea/cafe → ☕, rent/house/flat → 🏠, gym/fitness → 🏋️, cab/uber/taxi → 🚕, pet/dog/cat → 🐾, gaming/steam → 🎮, books/college → 📚, salon/hair → ✂️, bills → 💡, investment/stocks/mutual funds → 📈, insurance → 🛡️, etc.).
+- **Smart Automatic Keyword Matching**: Automatically matches typed keywords to relevant emojis and vector icons (e.g. coffee/tea/cafe → ☕, loans/emi/debt → 🏦, egg/anda → 🥚, non-veg/chicken/meat/fish → 🍗/🥩/🐟, papa/dad/family → 👨, savings/deposit → 💰, cosmetics/makeup → 💄, milk/dairy → 🥛, snacks/bakery → 🍿, veggies/fruits/salad → 🥗, rent/house/flat → 🏠, gym/fitness → 🏋️, cab/uber/taxi → 🚕, pet/dog/cat → 🐾, gaming/steam → 🎮, books/college → 📚, salon/hair → ✂️, bills → 💡, investment/stocks/mutual funds → 📈, insurance → 🛡️, etc.).
 - **Dynamic Fallbacks**: Unconfigured or custom categories without an explicit icon gracefully fall back to keyword matching or `🏷️`.
 
 ### Modern Fintech Rounded Transaction Cards
@@ -662,9 +662,10 @@ listener. Ingestion is protected by a multi-layer deduplication pipeline:
   in an asynchronous FIFO queue in `HomeShell`, preventing concurrent read/write race conditions.
 - **Database-Level Composite Deduplication**: `AppDatabase.insertParsed` enforces deduplication
   not only by exact natural key `(amount, merchant, date, direction, reference)`, but also by
-  reference code uniqueness (`Refno` / `UTR` / `UPI Ref`) and time-window tolerance (±120 seconds
-  for identical amount, merchant, and direction) to prevent duplicate transactions caused by
-  carrier timestamp jitter or date-only clock fallbacks.
+  reference code uniqueness (`Refno` / `UTR` / `UPI Ref`) and time-window tolerance (±60 seconds
+  for identical amount, merchant, and direction). Same-day whole-day fallback deduplication applies
+  only to date-only SMS alerts lacking an explicit clock time (`hasExplicitTime == false`), ensuring
+  that multiple same-day card transactions outside the 60-second window are safely preserved.
 
 ### Export, backup and restore
 

@@ -104,6 +104,62 @@ void main() {
         categoryVectorIcon('Fish & Seafood', filled: true),
         Icons.set_meal,
       );
+      expect(
+        categoryVectorIcon('papa', filled: false),
+        Icons.person_outline,
+      );
+      expect(
+        categoryVectorIcon('papa', filled: true),
+        Icons.person,
+      );
+      expect(
+        categoryVectorIcon('Savings', filled: false),
+        Icons.savings_outlined,
+      );
+      expect(
+        categoryVectorIcon('Savings', filled: true),
+        Icons.savings,
+      );
+      expect(
+        categoryVectorIcon('Cosmetics', filled: false),
+        Icons.face_outlined,
+      );
+      expect(
+        categoryVectorIcon('Cosmetics', filled: true),
+        Icons.face,
+      );
+      expect(
+        categoryVectorIcon('milk', filled: false),
+        Icons.local_drink_outlined,
+      );
+      expect(
+        categoryVectorIcon('milk', filled: true),
+        Icons.local_drink,
+      );
+      expect(
+        categoryVectorIcon('snacks', filled: false),
+        Icons.fastfood_outlined,
+      );
+      expect(
+        categoryVectorIcon('snacks', filled: true),
+        Icons.fastfood,
+      );
+      expect(
+        categoryVectorIcon('veggies and fruits', filled: false),
+        Icons.eco_outlined,
+      );
+      expect(
+        categoryVectorIcon('veggies and fruits', filled: true),
+        Icons.eco,
+      );
+      expect(
+        categoryVectorIcon('Bills and Utilities', filled: false),
+        Icons.receipt_long_outlined,
+      );
+      expect(
+        categoryVectorIcon('Bills and Utilities', filled: true),
+        Icons.receipt_long,
+      );
     });
 
     testWidgets('CategoryAvatar renders emoji in emojis pack and vector icon in outlined/filled pack',

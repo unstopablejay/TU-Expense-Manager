@@ -330,6 +330,7 @@ class ExpenseTxn {
           TxnSplit(
             categoryId: categoryId,
             categoryName: categoryName,
+            categoryIcon: categoryIcon,
             amount: amount,
           ),
         ]

@@ -20,6 +20,7 @@ const Map<String, String> _seededCategoryEmojis = <String, String>{
   'fuel': '⛽',
   'shopping': '🛍️',
   'bills & utilities': '💡',
+  'bills and utilities': '💡',
   'bills': '💡',
   'travel': '✈️',
   'entertainment': '🎬',
@@ -28,6 +29,8 @@ const Map<String, String> _seededCategoryEmojis = <String, String>{
   'income': '💰',
   'salary': '💰',
   'credit': '💰',
+  'savings': '💰',
+  'saving': '💰',
   'loans': '🏦',
   'loan': '🏦',
   'emi': '🏦',
@@ -39,6 +42,24 @@ const Map<String, String> _seededCategoryEmojis = <String, String>{
   'chicken': '🍗',
   'meat': '🥩',
   'fish': '🐟',
+  'papa': '👨',
+  'dad': '👨',
+  'mom': '👩',
+  'family': '👪',
+  'cosmetics': '💄',
+  'cosmetic': '💄',
+  'milk': '🥛',
+  'dairy': '🥛',
+  'snacks': '🍿',
+  'snack': '🍿',
+  'veggies and fruits': '🥗',
+  'veegies and fruits': '🥗',
+  'fruits and veggies': '🥗',
+  'veggies': '🥗',
+  'veegies': '🥗',
+  'vegetables': '🥗',
+  'fruits': '🍎',
+  'fruit': '🍎',
 };
 
 /// Popular emojis for category selection in pickers and sheets.
@@ -49,6 +70,7 @@ const List<String> kCuratedCategoryEmojis = <String>[
   '🏖️', '🍿', '🥖', '🍎', '🍰', '🍜', '💰', '🧾',
   '📈', '🛡️', '🩺', '⚡', '🔧', '📦', '🎓', '🏷️',
   '🏦', '🥚', '🍗', '🥩', '🐟', '💸', '🍳', '🍛',
+  '👨', '🥛', '💄', '🥗', '🥦', '🥕', '🍪', '🪙', '🐖',
 ];
 
 /// Smart emoji suggestions for any category name based on keyword matches.
@@ -70,12 +92,40 @@ String suggestCategoryEmoji(String category) {
       key == 'loans') {
     return '🏦';
   }
-  if (key.contains('egg') ||
-      key.contains('omelet') ||
-      key.contains('omlet') ||
-      key.contains('anda') ||
-      key == 'eggs') {
-    return '🥚';
+  if (key.contains('savings') ||
+      key.contains('saving') ||
+      key.contains('deposit') ||
+      key.contains('emergency fund') ||
+      key.contains('piggy')) {
+    return '💰';
+  }
+  if (key.contains('papa') ||
+      key.contains('dad') ||
+      key.contains('father') ||
+      key.contains('mom') ||
+      key.contains('mother') ||
+      key.contains('family') ||
+      key.contains('parent') ||
+      key.contains('amma') ||
+      key.contains('appa')) {
+    return '👨';
+  }
+  if (key.contains('cosmetic') ||
+      key.contains('makeup') ||
+      key.contains('skincare') ||
+      key.contains('perfume') ||
+      key.contains('lotion') ||
+      key.contains('cream')) {
+    return '💄';
+  }
+  if (key.contains('milk') ||
+      key.contains('dairy') ||
+      key.contains('curd') ||
+      key.contains('cheese') ||
+      key.contains('butter') ||
+      key.contains('paneer') ||
+      key.contains('ghee')) {
+    return '🥛';
   }
   if (key.contains('non veg') ||
       key.contains('non-veg') ||
@@ -111,6 +161,23 @@ String suggestCategoryEmoji(String category) {
     }
     return '🍗';
   }
+  if (key.contains('veg') ||
+      key.contains('veeg') ||
+      key.contains('fruit') ||
+      key.contains('salad') ||
+      key.contains('produce') ||
+      key.contains('greens') ||
+      key.contains('apple') ||
+      key.contains('banana')) {
+    return '🥗';
+  }
+  if (key.contains('egg') ||
+      key.contains('omelet') ||
+      key.contains('omlet') ||
+      key.contains('anda') ||
+      key == 'eggs') {
+    return '🥚';
+  }
   if (key.contains('coffee') ||
       key == 'tea' ||
       key.contains('tea ') ||
@@ -120,11 +187,20 @@ String suggestCategoryEmoji(String category) {
       key.contains('starbucks')) {
     return '☕';
   }
+  if (key.contains('snack') ||
+      key.contains('bakery') ||
+      key.contains('biscuit') ||
+      key.contains('cookie') ||
+      key.contains('chips') ||
+      key.contains('namkeen') ||
+      key.contains('popcorn') ||
+      key.contains('sandwich')) {
+    return '🍿';
+  }
   if (key.contains('food') ||
       key.contains('din') ||
       key.contains('pizza') ||
       key.contains('burger') ||
-      key.contains('snack') ||
       key.contains('restau') ||
       key.contains('swiggy') ||
       key.contains('zomato')) {
@@ -343,12 +419,40 @@ IconData categoryVectorIcon(String category, {bool filled = false}) {
       key == 'loans') {
     return filled ? Icons.account_balance : Icons.account_balance_outlined;
   }
-  if (key.contains('egg') ||
-      key.contains('omelet') ||
-      key.contains('omlet') ||
-      key.contains('anda') ||
-      key == 'eggs') {
-    return filled ? Icons.egg : Icons.egg_outlined;
+  if (key.contains('savings') ||
+      key.contains('saving') ||
+      key.contains('deposit') ||
+      key.contains('emergency fund') ||
+      key.contains('piggy')) {
+    return filled ? Icons.savings : Icons.savings_outlined;
+  }
+  if (key.contains('papa') ||
+      key.contains('dad') ||
+      key.contains('father') ||
+      key.contains('mom') ||
+      key.contains('mother') ||
+      key.contains('family') ||
+      key.contains('parent') ||
+      key.contains('amma') ||
+      key.contains('appa')) {
+    return filled ? Icons.person : Icons.person_outline;
+  }
+  if (key.contains('cosmetic') ||
+      key.contains('makeup') ||
+      key.contains('skincare') ||
+      key.contains('perfume') ||
+      key.contains('lotion') ||
+      key.contains('cream')) {
+    return filled ? Icons.face : Icons.face_outlined;
+  }
+  if (key.contains('milk') ||
+      key.contains('dairy') ||
+      key.contains('curd') ||
+      key.contains('cheese') ||
+      key.contains('butter') ||
+      key.contains('paneer') ||
+      key.contains('ghee')) {
+    return filled ? Icons.local_drink : Icons.local_drink_outlined;
   }
   if (key.contains('non veg') ||
       key.contains('non-veg') ||
@@ -377,6 +481,23 @@ IconData categoryVectorIcon(String category, {bool filled = false}) {
     }
     return filled ? Icons.kebab_dining : Icons.kebab_dining_outlined;
   }
+  if (key.contains('veg') ||
+      key.contains('veeg') ||
+      key.contains('fruit') ||
+      key.contains('salad') ||
+      key.contains('produce') ||
+      key.contains('greens') ||
+      key.contains('apple') ||
+      key.contains('banana')) {
+    return filled ? Icons.eco : Icons.eco_outlined;
+  }
+  if (key.contains('egg') ||
+      key.contains('omelet') ||
+      key.contains('omlet') ||
+      key.contains('anda') ||
+      key == 'eggs') {
+    return filled ? Icons.egg : Icons.egg_outlined;
+  }
   if (key.contains('coffee') ||
       key == 'tea' ||
       key.contains('tea ') ||
@@ -386,10 +507,19 @@ IconData categoryVectorIcon(String category, {bool filled = false}) {
       key.contains('starbucks')) {
     return filled ? Icons.local_cafe : Icons.local_cafe_outlined;
   }
+  if (key.contains('snack') ||
+      key.contains('bakery') ||
+      key.contains('biscuit') ||
+      key.contains('cookie') ||
+      key.contains('chips') ||
+      key.contains('namkeen') ||
+      key.contains('popcorn') ||
+      key.contains('sandwich')) {
+    return filled ? Icons.fastfood : Icons.fastfood_outlined;
+  }
   if (key.contains('food') ||
       key.contains('pizza') ||
       key.contains('burger') ||
-      key.contains('snack') ||
       key.contains('dine') ||
       key.contains('restau') ||
       key.contains('swiggy') ||

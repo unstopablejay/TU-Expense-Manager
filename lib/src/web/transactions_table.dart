@@ -482,12 +482,9 @@ class _TableRowState extends State<_TableRow> {
 
   String get _categoryIcon {
     final List<TxnSplit> lines = widget.entry.lines;
-    if (lines.length <= 1) {
-      return lines.isEmpty
-          ? widget.entry.txn.categoryIcon
-          : lines.first.categoryIcon;
-    }
-    return lines.first.categoryIcon;
+    if (lines.isEmpty) return widget.entry.txn.categoryIcon;
+    if (lines.first.categoryIcon.isNotEmpty) return lines.first.categoryIcon;
+    return widget.entry.txn.categoryIcon;
   }
 
   @override

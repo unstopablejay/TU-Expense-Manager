@@ -104,7 +104,7 @@ class _DashboardTabState extends State<DashboardTab> {
     final Map<String, String> categoryIcons = <String, String>{
       for (final ExpenseTxn t in widget.transactions) ...<String, String>{
         if (t.categoryIcon.isNotEmpty) t.categoryName: t.categoryIcon,
-        for (final TxnSplit s in t.splits)
+        for (final TxnSplit s in t.effectiveSplits)
           if (s.categoryIcon.isNotEmpty) s.categoryName: s.categoryIcon,
       },
     };
