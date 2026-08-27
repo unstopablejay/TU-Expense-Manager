@@ -662,9 +662,10 @@ listener. Ingestion is protected by a multi-layer deduplication pipeline:
   in an asynchronous FIFO queue in `HomeShell`, preventing concurrent read/write race conditions.
 - **Database-Level Composite Deduplication**: `AppDatabase.insertParsed` enforces deduplication
   not only by exact natural key `(amount, merchant, date, direction, reference)`, but also by
-  reference code uniqueness (`Refno` / `UTR` / `UPI Ref`) and time-window tolerance (±120 seconds
-  for identical amount, merchant, and direction) to prevent duplicate transactions caused by
-  carrier timestamp jitter or date-only clock fallbacks.
+  reference code uniqueness (`Refno` / `UTR` / `UPI Ref`) and time-window tolerance (±60 seconds
+  for identical amount, merchant, and direction). Same-day whole-day fallback deduplication applies
+  only to date-only SMS alerts lacking an explicit clock time (`hasExplicitTime == false`), ensuring
+  that multiple same-day card transactions outside the 60-second window are safely preserved.
 
 ### Export, backup and restore
 

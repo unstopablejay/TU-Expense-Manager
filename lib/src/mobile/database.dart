@@ -994,11 +994,11 @@ class AppDatabase {
       );
       if (refTombstone.isNotEmpty) return 0;
     } else {
-      // Time-window tombstone check (within 120 seconds) for same merchant and amount
+      // Time-window tombstone check (within 60 seconds) for same merchant and amount
       final timeTombstone = await db.rawQuery(
         'SELECT merchant FROM deleted_transactions '
         'WHERE amount = ? AND merchant = ? COLLATE NOCASE AND direction = ? '
-        'AND ABS(date - ?) <= 120000 LIMIT 1',
+        'AND ABS(date - ?) <= 60000 LIMIT 1',
         <Object?>[
           sms.amount,
           sms.merchant,
@@ -1036,11 +1036,11 @@ class AppDatabase {
       );
       if (refTxn.isNotEmpty) return 0;
     } else {
-      // If reference is empty, check time window (within 120 seconds) for identical merchant, amount, direction
+      // If reference is empty, check time window (within 60 seconds) for identical merchant, amount, direction
       final timeTxn = await db.rawQuery(
         'SELECT id FROM transactions '
         'WHERE amount = ? AND merchant = ? COLLATE NOCASE AND direction = ? '
-        'AND ABS(date - ?) <= 120000 LIMIT 1',
+        'AND ABS(date - ?) <= 60000 LIMIT 1',
         <Object?>[
           sms.amount,
           sms.merchant,
@@ -1050,36 +1050,38 @@ class AppDatabase {
       );
       if (timeTxn.isNotEmpty) return 0;
 
-      // Also check same calendar day if hour/minute/second were default/arrival-time
-      final startOfDay = DateTime(sms.date.year, sms.date.month, sms.date.day)
-          .millisecondsSinceEpoch;
-      final endOfDay = DateTime(
-              sms.date.year, sms.date.month, sms.date.day, 23, 59, 59, 999)
-          .millisecondsSinceEpoch;
-      final sameDayTxn = await db.query(
-        'transactions',
-        columns: <String>['id', 'payment_type'],
-        where: 'amount = ? AND merchant = ? COLLATE NOCASE AND direction = ? '
-            'AND reference = ? AND date >= ? AND date <= ?',
-        whereArgs: <Object?>[
-          sms.amount,
-          sms.merchant,
-          sms.direction.name,
-          '',
-          startOfDay,
-          endOfDay,
-        ],
-        limit: 1,
-      );
-      if (sameDayTxn.isNotEmpty) {
-        final existingPayment =
-            (sameDayTxn.first['payment_type'] as String?) ?? '';
-        if (existingPayment.isEmpty ||
-            sms.paymentType.isEmpty ||
-            existingPayment == 'Unknown' ||
-            sms.paymentType == 'Unknown' ||
-            existingPayment.toLowerCase() == sms.paymentType.toLowerCase()) {
-          return 0;
+      // Only check same calendar day if the alert lacked an explicit clock time (date-only fallback)
+      if (!sms.hasExplicitTime) {
+        final startOfDay = DateTime(sms.date.year, sms.date.month, sms.date.day)
+            .millisecondsSinceEpoch;
+        final endOfDay = DateTime(
+                sms.date.year, sms.date.month, sms.date.day, 23, 59, 59, 999)
+            .millisecondsSinceEpoch;
+        final sameDayTxn = await db.query(
+          'transactions',
+          columns: <String>['id', 'payment_type'],
+          where: 'amount = ? AND merchant = ? COLLATE NOCASE AND direction = ? '
+              'AND reference = ? AND date >= ? AND date <= ?',
+          whereArgs: <Object?>[
+            sms.amount,
+            sms.merchant,
+            sms.direction.name,
+            '',
+            startOfDay,
+            endOfDay,
+          ],
+          limit: 1,
+        );
+        if (sameDayTxn.isNotEmpty) {
+          final existingPayment =
+              (sameDayTxn.first['payment_type'] as String?) ?? '';
+          if (existingPayment.isEmpty ||
+              sms.paymentType.isEmpty ||
+              existingPayment == 'Unknown' ||
+              sms.paymentType == 'Unknown' ||
+              existingPayment.toLowerCase() == sms.paymentType.toLowerCase()) {
+            return 0;
+          }
         }
       }
     }

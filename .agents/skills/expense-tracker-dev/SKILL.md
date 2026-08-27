@@ -47,7 +47,7 @@ The project is structured as a multi-platform Flutter app and a Dart CLI server:
   - **Database-Level Composite Deduplication (`AppDatabase.insertParsed`)**:
     - **Exact Natural Key**: `(amount, merchant, date, direction, reference)`.
     - **Reference Code Uniqueness**: Non-empty reference codes (UPI Ref, UTR, Refno) deduplicate across identical `amount + direction + reference`.
-    - **Time Window & Date Fallback Tolerance**: Empty-reference transactions deduplicate across identical `amount + merchant (NOCASE) + direction` within a ±120-second window or across same-day arrival time fallbacks.
+    - **Time Window & Date Fallback Tolerance**: Empty-reference transactions deduplicate across identical `amount + merchant (NOCASE) + direction` within a ±60-second window. Same-day whole-day fallback deduplication applies only to date-only SMS alerts lacking an explicit clock time (`hasExplicitTime == false`). Transactions with explicit clock times (e.g. card alerts) outside the 60-second window are recognized as distinct same-day transactions.
 - **Tombstones**: Deletions write natural keys to `deleted_transactions`. Inbox rescans check this table to avoid re-importing deleted SMS alerts.
 - **SMS Parsing**:
   - **No Keyword Scanning for Direction**: Transaction direction (debit vs. credit) comes strictly from the matched regex template, not keyword scans (prevents issues with merchant names containing words like "CREDIT").

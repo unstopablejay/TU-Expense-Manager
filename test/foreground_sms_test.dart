@@ -53,7 +53,7 @@ class FakeDatabase implements AppDatabase {
           t.merchant.toLowerCase() == sms.merchant.toLowerCase() &&
           t.amount == sms.amount &&
           t.direction == sms.direction &&
-          t.date.difference(sms.date).inSeconds.abs() <= 120) {
+          t.date.difference(sms.date).inSeconds.abs() <= 60) {
         return 0;
       }
     }

@@ -29,6 +29,7 @@ class ParsedSms {
     required this.direction,
     this.reference = '',
     this.templateId = '',
+    this.hasExplicitTime = true,
   });
 
   final double amount;
@@ -45,11 +46,15 @@ class ParsedSms {
   /// Id of the [SmsTemplate] that matched. Diagnostic only.
   final String templateId;
 
+  /// True when the SMS spelled out an explicit clock time (e.g. HH:mm:ss); false
+  /// when only a calendar date was present and time was defaulted/borrowed.
+  final bool hasExplicitTime;
+
   bool get isCredit => direction == TxnDirection.credit;
 
   @override
   String toString() => 'ParsedSms($amount, $paymentType, $merchant, '
-      '${date.toIso8601String()}, ${direction.name}, $reference, $templateId)';
+      '${date.toIso8601String()}, ${direction.name}, $reference, $templateId, hasExplicitTime: $hasExplicitTime)';
 }
 
 /// One recognised message shape. Every pattern is anchored end to end and uses
@@ -262,6 +267,7 @@ class SmsParser {
         direction: template.direction,
         reference: _normalize(_group(match, 'ref') ?? ''),
         templateId: template.id,
+        hasExplicitTime: stamp.hasTime,
       );
     }
     return null;
