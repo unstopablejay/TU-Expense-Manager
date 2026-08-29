@@ -1,6 +1,189 @@
 # TU Expense Tracker
 
-An Android app that turns bank SMS alerts into a categorized expense ledger, and supports manually adding transactions (such as cash/manual entries). It parses incoming spend and credit alerts, stores them in a local SQLite database, and learns a merchant → category mapping so that categorizing a merchant once applies to every past *and* future transaction from that merchant.
+<p align="center">
+  <img src="assets/icon/app_icon.png" alt="TU Expense Tracker Logo" width="96" height="96" />
+</p>
+
+<p align="center">
+  <strong>Smart, 100% private, and automated personal expense tracking for Android.</strong><br>
+  Turns bank SMS alerts into a categorized ledger instantly — no account logins, no cloud requirement, and zero ads.
+</p>
+
+<p align="center">
+  <a href="#-overview-what-is-tu-expense-tracker">Overview</a> •
+  <a href="#-key-features">Key Features</a> •
+  <a href="#-visual-tour">Visual Tour</a> •
+  <a href="#-how-to-install-simple-step-by-step-guide">Install Guide</a> •
+  <a href="#-technical-architecture--developer-guide">Technical Guide</a> •
+  <a href="#self-hosting-optional">Self-Hosting</a>
+</p>
+
+---
+
+## ✨ Overview: What is TU Expense Tracker?
+
+**TU Expense Tracker** is a modern personal finance app designed for simplicity, privacy, and speed.
+
+Instead of manually typing every daily expense or giving third-party apps access to your bank accounts, TU Expense Tracker **automatically reads your incoming bank transaction SMS alerts** (YES Bank, HDFC, ICICI, SBI, Axis, Kotak, UPI, credit cards, and debit cards) directly on your device.
+
+- 🔒 **100% Private & Offline First**: Everything stays strictly on your phone in a local SQLite database. No data ever leaves your device unless you choose to sync with your own self-hosted server.
+- ⚡ **Zero Manual Effort for Routine Purchases**: Categorize a store once (e.g., *Swiggy → Food*), and the app remembers it forever.
+- ✂️ **Smart Multi-Category Splitting**: Easily split multi-item receipts (e.g., *Amazon* or *Supermarkets*) across several categories.
+- 🎨 **Beautiful Modern UI**: Built with Flutter featuring smooth rounded fintech cards, vibrant category emojis, customizable accent palettes, and a true battery-saving OLED pitch black mode.
+
+---
+
+## 🌟 Key Features
+
+### 1. 🏷️ Smart Merchant Defaults & Memory
+Categorizing a merchant once applies to every past and future transaction from that merchant.
+- **Set Once, Categorize Forever**: When you assign a category (e.g., *Zepto → Grocery*), check *"Also make this the default for Zepto"* to auto-categorize all future alerts.
+- **"Always Ask Me" Mode**: For multi-purpose merchants like Amazon or department stores, set them to *"Always ask me"*. The app leaves them for you to review and split without guessing incorrectly.
+- **Retroactive Backfill**: Setting a default asks if you'd like to update all past transactions from that merchant in one tap.
+
+### 2. ✂️ Multi-Category Transaction Splitting
+Real-world spending rarely fits into a single bucket. When a single ₹3,450 payment covers groceries, home supplies, and snacks:
+- **Instant Split Editor**: Split any transaction into multiple custom categories and amounts.
+- **Auto-Balanced Remainder**: The last row automatically calculates the remaining balance as you type, ensuring your figures always add up down to the paisa.
+- **Accurate Charting**: Filtered views and monthly reports count only the exact split lines corresponding to each category.
+
+### 3. ⚡ Automated Bank SMS Ingestion & Manual Cash Entry
+- **Automatic Intake**: Reads transactional SMS from major banks and UPI gateways in real time without waking up unnecessary background services.
+- **Manual Cash Tracking**: Need to record cash payments or transactions from unlinked accounts? Tap **+ Add Transaction** to log entries manually in seconds.
+- **Safe & Idempotent**: Multi-layer deduplication prevents double-counting, even if bank alerts are received multiple times or rescanned.
+
+### 4. 📊 Visual Spending Dashboard & Monthly Reports
+- **Hero Spend Overview**: Instant snapshot of total spending, income received, and net cash flow for the selected month.
+- **Single-Month Donut Chart**: Clear breakdown of where your money went, ranked by category share with exact amounts.
+- **Multi-Month Comparison Bars**: Compare 2 to 6 months side-by-side to understand spending trends over time.
+
+### 5. 🔍 Fast Search & Interlinked Smart Filters
+- **Instant Search**: Search notes and merchant names across your entire ledger with zero lag.
+- **Interlinked Facets**: Filter by Month, Category, Merchant, or Card/Account. Filters dynamically constrain each other so you never hit a dead end.
+- **Active Filter Chips**: See all active filters as removable token chips with a single-click **Clear all** button.
+
+### 6. 🔗 Duplicate Cleaner & Name Merging
+Banks often send inconsistent names for the exact same account or shop (e.g., `HDFC Bank A/C *0444`, `BANK A/c XX0444`, or `UPI_SWIGGY`).
+- **Merge Merchants & Accounts**: Combine multiple variations into a single clean display name under **Settings › Cleanup**.
+- **Non-Destructive & Undoable**: Merging only changes the display layer — original bank labels and raw data are never corrupted.
+
+### 7. 🎨 Themes, Pitch Black OLED & Emoji Icon Packs
+- **OLED Pitch Black**: True `#000000` pixel shut-off for AMOLED displays to maximize battery life.
+- **8 Curated Accent Colors**: Classic Blue, Crimson Red, Emerald Green, Royal Purple, Sunset Orange, Rose Pink, Teal/Cyan, and Cyber Amber.
+- **Icon Packs & Smart Emoji Avatars**: Choose between Vibrant Emojis (WhatsApp/Fluent style), Clean Minimalist Outlines, or Modern Filled icons with smart keyword auto-matching.
+
+### 8. 💾 Human-Readable Excel Backup & Optional Web Sync
+- **1-Click Spreadsheet Backup**: Export your entire financial history to a standard `.xlsx` workbook viewable directly in Google Sheets or Excel. Restore with full database validation anytime.
+- **Optional Self-Hosted Web Client**: Spin up the lightweight Docker backend to view your ledger on desktop web browsers and queue edits across your private home network.
+
+---
+
+## 📸 Visual Tour
+
+<div align="center">
+  <table>
+    <tr>
+      <td align="center" width="50%">
+        <img src="docs/screenshots/dashboard.png" alt="Dashboard & Spend Breakdown" width="100%" />
+        <br />
+        <strong>📊 Spending Dashboard & Donut Breakdown</strong>
+      </td>
+      <td align="center" width="50%">
+        <img src="docs/screenshots/transactions.png" alt="Transactions Ledger" width="100%" />
+        <br />
+        <strong>💳 Transactions Ledger & Smart Filters</strong>
+      </td>
+    </tr>
+    <tr>
+      <td align="center" width="50%">
+        <img src="docs/screenshots/split_editor.png" alt="Transaction Split Editor" width="100%" />
+        <br />
+        <strong>✂️ Multi-Category Split Editor</strong>
+      </td>
+      <td align="center" width="50%">
+        <img src="docs/screenshots/merchant_defaults.png" alt="Merchant Defaults Settings" width="100%" />
+        <br />
+        <strong>🏷️ Smart Merchant Defaults & Memory</strong>
+      </td>
+    </tr>
+    <tr>
+      <td align="center" colspan="2">
+        <img src="docs/screenshots/themes.png" alt="Themes & Appearance Settings" width="50%" />
+        <br />
+        <strong>🎨 Appearance, OLED Pitch Black & Icon Packs</strong>
+      </td>
+    </tr>
+  </table>
+</div>
+
+---
+
+## 📥 How to Install (Simple Step-by-Step Guide)
+
+Follow these simple steps to install the app on your Android phone:
+
+---
+
+### Step 1: Download the App
+1. Go to the [Releases](https://github.com/unstopablejay/TU-Expense-Manager/releases) page.
+2. Tap on the latest file ending in **`.apk`** (for example: `tu-expense-tracker.apk`) to start downloading.
+3. If your web browser shows a message saying *"File might be harmful"*, tap **Download anyway**.
+
+---
+
+### Step 2: Install the App & Handle Play Protect
+
+Open the downloaded `.apk` file from your phone's notification bar or Downloads folder:
+
+<div align="center">
+  <img src="docs/screenshots/install_play_protect.png" alt="Google Play Protect Dialog" width="340" />
+</div>
+
+- **Option A (Most Common)**: If a Google Play Protect popup appears:
+  1. Tap **More details** (or the small down arrow).
+  2. Tap **Install anyway**.
+
+- **Option B (If the Install Button is Blocked)**: Temporarily turn off Play Protect:
+  1. Open the **Google Play Store** app on your phone.
+  2. Tap your **Profile picture** in the top-right corner.
+  3. Tap **Play Protect**.
+  4. Tap the **Settings gear icon ⚙️** in the top-right.
+  5. Turn **OFF** *"Scan apps with Play Protect"*.
+  6. Return to your download and install the app. *(You can safely turn Play Protect back on afterwards!)*
+
+---
+
+### Step 3: Turn On "Restricted Settings" (For Android 13 and Newer)
+
+Because this app reads bank SMS alerts on your device and was downloaded outside the Play Store, Android requires one quick confirmation:
+
+<div align="center">
+  <img src="docs/screenshots/install_restricted_settings.png" alt="Allow Restricted Settings in App Info" width="340" />
+</div>
+
+1. Find the **TU Expense Tracker** app icon on your home screen or app drawer.
+2. **Press and hold** the app icon for 2 seconds.
+3. Tap **App info** (or the small **(i)** info circle).
+4. Tap the **3 vertical dots ⋮** in the top-right corner of your screen.
+5. Tap **Allow restricted settings**.
+6. Enter your phone's screen lock (PIN, pattern, or fingerprint) to confirm.
+
+---
+
+### Step 4: Allow SMS Permission & Start Tracking
+
+<div align="center">
+  <img src="docs/screenshots/install_sms_permission.png" alt="App Permissions Screen" width="340" />
+</div>
+
+1. On that same **App info** screen, tap **Permissions**.
+2. Tap **SMS**.
+3. Select **Allow**.
+4. Open **TU Expense Tracker**. The app will immediately read your bank messages and organize your expenses! 🎉
+
+---
+
+# 🛠️ Technical Architecture & Developer Guide
 
 Everything stays on the device by default. There is no backend and no network call unless you choose to run one — see [Self-hosting](#self-hosting-optional), which is entirely optional and off until you configure it.
 

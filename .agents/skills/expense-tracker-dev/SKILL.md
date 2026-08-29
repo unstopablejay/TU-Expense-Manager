@@ -22,6 +22,12 @@ This skill covers the project structure, design invariants, database schema, SMS
 >    - Add and update unit, widget, or integration tests covering all new logic, UI states, lifecycle hooks, and error handling.
 >    - Always execute the full test suite (`flutter test`) and static analysis (`dart analyze`) to ensure a 100% pass rate and zero warnings.
 >    - Never conclude a task or mark a feature complete without running and verifying the automated test suites.
+>
+> 3. **Mandatory Visual Asset & Screenshot Synchronization Protocol**:
+>    Whenever any UI component, screen layout, theme/palette, feature workflow, or Android installation/permission step is added, redesigned, or updated, **THE RELEVANT SCREENSHOTS IN `docs/screenshots/` AND THEIR REFERENCES IN `README.md` MUST BE IMMEDIATELY RE-CAPTURED AND UPDATED**:
+>    - If a feature or UI page changes (e.g. Dashboard donut/charts, Transactions cards/filters, Split editor, Merchant Defaults, Themes/OLED), launch the Android Virtual Device (`emulator-5554`), seed realistic demo data, navigate to the screen, and capture fresh high-resolution screenshots.
+>    - If installation, permission, or Play Protect handling flows change, re-capture or update the system walkthrough graphics (`install_play_protect.png`, `install_restricted_settings.png`, `install_sms_permission.png`, `install_app_info.png`).
+>    - Never leave stale, outdated, or mismatched screenshots in `docs/screenshots/` or `README.md` after modifying UI or user-facing flows.
 
 ---
 
@@ -209,3 +215,44 @@ adb -s emulator-5554 shell "run-as com.tu.expense.manager sqlite3 databases/expe
 adb -s emulator-5554 push seed.sql /data/local/tmp/seed.sql
 adb -s emulator-5554 shell "run-as com.tu.expense.manager sqlite3 databases/expense_manager.db < /data/local/tmp/seed.sql"
 ```
+
+---
+
+## 10. 📸 Visual Asset & Screenshot Capture Workflow
+
+Whenever a UI redesign, new feature, theme update, or installation step changes, developers must update the screenshot assets in `docs/screenshots/` and update `README.md`.
+
+### Screenshot Standards
+- **Device & Environment**: Exclusively use the Android Virtual Device (e.g., `emulator-5554` / `cmd_phone_1`). **Never** connect or capture physical devices.
+- **Theme**: Default to Dark Mode / Pitch Black OLED for visual consistency across documentation.
+- **Sample Data**: Ensure realistic demo data (realistic merchant names, amounts, categories, and split rows) is seeded into the database before capturing so cards and charts look clean and professional.
+- **Resolution**: Native device resolution (1080x2400 or crisp 1080px width).
+
+### Capture Commands & Navigation
+1. **Inspect UI Layout & Tap Coordinates**:
+   ```bash
+   android layout --device=emulator-5554
+   ```
+2. **Navigate & Tap Elements**:
+   ```bash
+   # Tap specific coordinates (e.g. Transactions tab)
+   adb -s emulator-5554 shell input tap <X> <Y>
+   ```
+3. **Capture PNG Directly to `docs/screenshots/`**:
+   ```bash
+   # Capture active screen
+   adb -s emulator-5554 exec-out screencap -p > docs/screenshots/<screen_name>.png
+   ```
+
+### Standard Screenshot Asset Index
+| File Name | Screen / Purpose | Location in README |
+| :--- | :--- | :--- |
+| `dashboard.png` | Spend overview card, donut chart, category rank list | Visual Tour (Row 1) |
+| `transactions.png` | Rounded cards, category badges, split indicators, search & filter chips | Visual Tour (Row 1) |
+| `split_editor.png` | Multi-category split editor with remainder calculation | Visual Tour (Row 2) |
+| `merchant_defaults.png` | Merchant category defaults (*Always ask me*, *Default*, *Not set*) | Visual Tour (Row 2) |
+| `themes.png` | Theme mode selector, OLED toggle, accent color palette, icon packs | Visual Tour (Row 3) |
+| `install_play_protect.png` | Play Protect dialog with expanded "More details" and "Install anyway" | Installation Guide (Step 2) |
+| `install_restricted_settings.png` | App info screen with 3-dots menu open showing "Allow restricted settings" | Installation Guide (Step 3) |
+| `install_sms_permission.png` | App permissions screen showing SMS permission set to Allow | Installation Guide (Step 4) |
+
