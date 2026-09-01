@@ -34,6 +34,7 @@ dependencies:
   sqflite: ^2.3.0             # To store your expenses locally
   path: ^1.9.0                # Needed for sqflite database paths
   intl: ^0.19.0               # To format the dates and currency on your dashboard
+  clock: ^1.1.2
   another_telephony: ^0.4.1
   # The self-update feature, which reads GitHub Releases and sideloads the APK.
   http: ^1.6.0                # To query the GitHub releases API and fetch the APK
