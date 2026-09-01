@@ -126,7 +126,8 @@ class ConnectionMonitor with WidgetsBindingObserver {
                 // The authority as typed — host and port — so the tooltip names
                 // the server the user configured rather than a normalised
                 // spelling of it they would have to recognise.
-                'Connected to ${base.authority}.',
+                'Connected to ${base.authority}'
+                '${result.serverVersion != null ? ' (server v${result.serverVersion})' : ''}.',
               ),
         answered: true,
       );

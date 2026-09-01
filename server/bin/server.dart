@@ -26,7 +26,7 @@ import 'package:tu_expense_server/edit_queue.dart';
 import 'package:tu_expense_server/json_store.dart';
 import 'package:tu_expense_server/snapshots.dart';
 
-const String kVersion = '1.0.0';
+const String kVersion = String.fromEnvironment('APP_VERSION', defaultValue: 'dev');
 
 Future<void> main(List<String> argv) async {
   final ArgParser parser = ArgParser()

@@ -138,8 +138,10 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF_NAME#[vV]}"
             echo "tags=$REPO:$VERSION,$REPO:latest" >> "$GITHUB_OUTPUT"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           else
             echo "tags=$REPO:dev" >> "$GITHUB_OUTPUT"
+            echo "version=dev" >> "$GITHUB_OUTPUT"
           fi
 
       # linux/amd64 only. ZimaOS is x86_64, and adding arm64 would double a build
@@ -152,6 +154,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
           # No cache-from/cache-to: type=gha here. The Actions cache backend has
           # broken across service versions more than once, it fails at the *start*
           # of a build rather than at the end, and a caching layer that can fail a

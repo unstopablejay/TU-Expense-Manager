@@ -1,6 +1,8 @@
 /// Signing in from a browser.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'api_client.dart';
@@ -24,6 +26,19 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _busy = false;
   bool _obscurePassword = true;
   String? _error;
+  String? _serverVersion;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadVersion());
+  }
+
+  Future<void> _loadVersion() async {
+    final ApiResult<Map<String, Object?>> result = await widget.api.health();
+    if (!mounted || result.failed) return;
+    setState(() => _serverVersion = result.value?['version'] as String?);
+  }
 
   @override
   void dispose() {
@@ -98,6 +113,15 @@ class _LoginScreenState extends State<LoginScreen> {
                       textAlign: TextAlign.center,
                       style: theme.textTheme.bodySmall,
                     ),
+                    if (_serverVersion != null) ...<Widget>[
+                      const SizedBox(height: 2),
+                      Text(
+                        'Server v$_serverVersion',
+                        textAlign: TextAlign.center,
+                        style: theme.textTheme.bodySmall
+                            ?.copyWith(color: theme.colorScheme.outline),
+                      ),
+                    ],
                     const SizedBox(height: 24),
                     TextField(
                       controller: _username,
