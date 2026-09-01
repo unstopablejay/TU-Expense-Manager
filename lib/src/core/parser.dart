@@ -232,6 +232,11 @@ class SmsParser {
 
   static RegExp _re(String source) => RegExp(source, caseSensitive: false);
 
+  /// Fallback check for messages that failed strict parsing but still look like transactions.
+  static bool looksLikeTransaction(String body) {
+    return RegExp(r'\b(rs\.?|inr|spent|debited|credited|txn|deducted)\b', caseSensitive: false).hasMatch(body);
+  }
+
   /// Returns `null` when no template matches, which is how OTPs, promos and
   /// statement alerts get filtered out.
   ///

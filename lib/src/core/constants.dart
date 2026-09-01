@@ -13,7 +13,7 @@ const String kUncategorized = 'Uncategorized';
 /// The database schema this build understands. A backup or snapshot stamped
 /// with a *higher* number is refused rather than imported — it may hold columns
 /// this build has never heard of.
-const int kSchemaVersion = 9;
+const int kSchemaVersion = 10;
 
 /// The longest note that is stored. Generous for the sentence a note actually
 /// is, and short enough that no single one can dominate the tile it annotates.
