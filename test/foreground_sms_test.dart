@@ -174,7 +174,7 @@ void main() {
     }
 
     testWidgets('incoming SMS parses and immediately updates UI with toast',
-        (WidgetTester tester) async {
+        (WidgetTester tester) async => withClock(Clock.fixed(DateTime(2026, 8, 25)), () async {
       setLargeViewport(tester);
 
       final db = FakeDatabase();
@@ -215,10 +215,10 @@ void main() {
 
       // Verify watermark was updated
       expect(await db.lastScannedSmsDate(), isNotNull);
-    });
+    }));
 
     testWidgets('non-transaction incoming SMS is ignored and does not change state',
-        (WidgetTester tester) async {
+        (WidgetTester tester) async => withClock(Clock.fixed(DateTime(2026, 8, 25)), () async {
       setLargeViewport(tester);
 
       final db = FakeDatabase();
@@ -247,10 +247,10 @@ void main() {
       expect(find.byType(SnackBar), findsNothing);
       final txns = await db.transactions();
       expect(txns, isEmpty);
-    });
+    }));
 
     testWidgets('duplicate incoming SMS is ignored safely',
-        (WidgetTester tester) async {
+        (WidgetTester tester) async => withClock(Clock.fixed(DateTime(2026, 8, 25)), () async {
       setLargeViewport(tester);
 
       final db = FakeDatabase();
@@ -286,10 +286,10 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
 
       expect((await db.transactions()).length, 1);
-    });
+    }));
 
     testWidgets('app resume triggers catch-up scan and ensures listener is active',
-        (WidgetTester tester) async {
+        (WidgetTester tester) async => withClock(Clock.fixed(DateTime(2026, 8, 25)), () async {
       setLargeViewport(tester);
 
       final db = FakeDatabase();
@@ -324,10 +324,10 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
 
       expect(find.text('AMAZON'), findsOneWidget);
-    });
+    }));
 
     testWidgets('initial launch scan displays LoadingModal and dismisses cleanly',
-        (WidgetTester tester) async {
+        (WidgetTester tester) async => withClock(Clock.fixed(DateTime(2026, 8, 25)), () async {
       setLargeViewport(tester);
 
       final db = FakeDatabase();
@@ -353,10 +353,10 @@ void main() {
 
       expect(find.byType(LoadingModal), findsNothing);
       expect((await db.transactions()).length, 1);
-    });
+    }));
 
     testWidgets('toolbar rescan triggers LoadingModal and dismisses cleanly',
-        (WidgetTester tester) async {
+        (WidgetTester tester) async => withClock(Clock.fixed(DateTime(2026, 8, 25)), () async {
       setLargeViewport(tester);
 
       final db = FakeDatabase();
@@ -384,10 +384,10 @@ void main() {
       await tester.pump();
 
       expect(find.byType(LoadingModal), findsNothing);
-    });
+    }));
 
     testWidgets('duplicate SMS with timestamp jitter within window creates only 1 transaction',
-        (WidgetTester tester) async {
+        (WidgetTester tester) async => withClock(Clock.fixed(DateTime(2026, 8, 25)), () async {
       setLargeViewport(tester);
 
       final db = FakeDatabase();
@@ -417,10 +417,10 @@ void main() {
       expect(txns.length, 1);
       expect(txns.single.merchant, 'STARBUCKS');
       expect(txns.single.amount, 250.0);
-    });
+    }));
 
     testWidgets('duplicate UPI alerts with same Ref code create only 1 transaction',
-        (WidgetTester tester) async {
+        (WidgetTester tester) async => withClock(Clock.fixed(DateTime(2026, 8, 25)), () async {
       setLargeViewport(tester);
 
       final db = FakeDatabase();
@@ -452,10 +452,10 @@ void main() {
       final txns = await db.transactions();
       expect(txns.length, 1);
       expect(txns.single.reference, '213313774670');
-    });
+    }));
 
     testWidgets('concurrent live incoming SMS and inbox catch-up scan does not duplicate',
-        (WidgetTester tester) async {
+        (WidgetTester tester) async => withClock(Clock.fixed(DateTime(2026, 8, 25)), () async {
       setLargeViewport(tester);
 
       final db = FakeDatabase();
@@ -485,6 +485,6 @@ void main() {
       expect(txns.length, 1);
       expect(txns.single.merchant, 'UBER');
       expect(txns.single.amount, 350.0);
-    });
+    }));
   });
 }
