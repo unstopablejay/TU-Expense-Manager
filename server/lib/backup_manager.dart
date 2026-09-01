@@ -153,39 +153,79 @@ class BackupManager {
         .whereType<File>()
         .where((File f) => f.path.endsWith('.json') && !f.path.endsWith('.tmp'))) {
       try {
-        final String content = await file.readAsString();
-        final Object? parsed = jsonDecode(content);
-        if (parsed is! Map<String, Object?>) continue;
-        if (parsed['format'] != kServerBackupFormat) continue;
+        final RandomAccessFile raf = await file.open();
+        try {
+          final int length = await raf.length();
+          if (length == 0) continue;
 
-        final String id = parsed['id'] as String? ??
-            file.uri.pathSegments.last
-                .replaceFirst(RegExp(r'^backup_'), '')
-                .replaceFirst(RegExp(r'\.json$'), '');
+          // Read the first 2KB for top-level metadata
+          final List<int> headBytes = await raf.read(length < 2048 ? length : 2048);
+          final String headContent = utf8.decode(headBytes, allowMalformed: true);
+          
+          if (!headContent.contains(kServerBackupFormat)) continue;
 
-        final DateTime at = parsed['created_at'] is String
-            ? DateTime.tryParse(parsed['created_at']! as String) ??
-                file.statSync().modified.toUtc()
-            : file.statSync().modified.toUtc();
+          final String id = RegExp(r'"id"\s*:\s*"([^"]+)"')
+                  .firstMatch(headContent)
+                  ?.group(1) ??
+              file.uri.pathSegments.last
+                  .replaceFirst(RegExp(r'^backup_'), '')
+                  .replaceFirst(RegExp(r'\.json$'), '');
 
-        final Map<String, String> counts = <String, String>{
-          if (parsed['meta'] is Map)
-            for (final MapEntry<Object?, Object?> e
-                in (parsed['meta']! as Map).entries)
-              '${e.key}': '${e.value}',
-        };
+          final String? createdAtRaw = RegExp(r'"created_at"\s*:\s*"([^"]+)"')
+              .firstMatch(headContent)
+              ?.group(1);
 
-        out.add(BackupItem(
-          id: id,
-          at: at,
-          bytes: file.statSync().size,
-          type: parsed['type'] as String? ?? 'auto',
-          note: parsed['note'] as String?,
-          counts: counts,
-          serverVersion: parsed['server_version'] as String?,
-        ));
-      } on Object {
-        // Skip unreadable or corrupted files in listing
+          final DateTime at = createdAtRaw != null
+              ? DateTime.tryParse(createdAtRaw) ?? file.statSync().modified.toUtc()
+              : file.statSync().modified.toUtc();
+
+          final String type = RegExp(r'"type"\s*:\s*"([^"]+)"')
+                  .firstMatch(headContent)
+                  ?.group(1) ??
+              'unknown';
+              
+          final String? note = RegExp(r'"note"\s*:\s*"([^"]+)"')
+              .firstMatch(headContent)
+              ?.group(1);
+              
+          final String? serverVersion = RegExp(r'"server_version"\s*:\s*"([^"]+)"')
+              .firstMatch(headContent)
+              ?.group(1);
+
+          // Read the last 1KB for 'meta' object
+          final Map<String, String> counts = <String, String>{};
+          if (length > 1024) {
+             await raf.setPosition(length - 1024);
+          } else {
+             await raf.setPosition(0);
+          }
+          final List<int> tailBytes = await raf.read(1024);
+          final String tailContent = utf8.decode(tailBytes, allowMalformed: true);
+          
+          final RegExpMatch? metaMatch = RegExp(r'"meta"\s*:\s*(\{[^}]+\})').firstMatch(tailContent);
+          if (metaMatch != null) {
+             try {
+               final Map<String, dynamic> metaMap = jsonDecode(metaMatch.group(1)!) as Map<String, dynamic>;
+               for (final MapEntry<String, dynamic> e in metaMap.entries) {
+                 counts[e.key] = '${e.value}';
+               }
+             } catch (_) {}
+          }
+
+          out.add(BackupItem(
+            id: id,
+            at: at,
+            bytes: length,
+            type: type,
+            note: note,
+            counts: counts,
+            serverVersion: serverVersion,
+          ));
+        } finally {
+          await raf.close();
+        }
+      } catch (e) {
+        print('Error reading backup ${file.path}: $e');
       }
     }
 
