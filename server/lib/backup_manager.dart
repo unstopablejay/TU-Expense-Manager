@@ -6,8 +6,10 @@ library;
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'json_store.dart';
+import 'xlsx_backup.dart';
 
 /// The format marker that identifies full server state backup bundles.
 const String kServerBackupFormat = 'tu-expense-server-backup';
@@ -117,6 +119,12 @@ class BackupManager {
         final File tmp = File('${target.path}.tmp');
         await tmp.writeAsString(encoded, flush: true);
         await tmp.rename(target.path);
+
+        // A spreadsheet sibling per device, so the transactions can be opened
+        // directly — the JSON above is still the only thing a restore reads.
+        if (type == 'auto' || type == 'manual') {
+          await _writeXlsxExports(id);
+        }
 
         final BackupItem item = BackupItem(
           id: id,
@@ -285,7 +293,8 @@ class BackupManager {
         all.where((BackupItem b) => b.type == 'auto' || b.type == 'manual').toList();
 
     for (final BackupItem old in rolling.skip(keep)) {
-      final File file = File('${directory.path}/backup_${_safeId(old.id)}.json');
+      final String safeId = _safeId(old.id);
+      final File file = File('${directory.path}/backup_$safeId.json');
       if (file.existsSync()) {
         try {
           await file.delete();
@@ -293,7 +302,73 @@ class BackupManager {
           // Ignore deletion errors
         }
       }
+      // Every XLSX sibling this backup wrote, one per device — the "__" is the
+      // delimiter written in _writeXlsxExports, so a shorter id that happens to
+      // be a text-prefix of a longer one (e.g. from the `-1` de-dupe suffix in
+      // _freshId) can never match another backup's files.
+      for (final File sibling in directory
+          .listSync()
+          .whereType<File>()
+          .where((File f) =>
+              f.uri.pathSegments.last.startsWith('backup_${safeId}__') &&
+              f.path.endsWith('.xlsx'))) {
+        try {
+          await sibling.delete();
+        } on Object {
+          // Ignore deletion errors
+        }
+      }
     }
+  }
+
+  /// Writes `backup_<id>__<user>__<device>.xlsx` for every device with a
+  /// current snapshot — the same 7-sheet workbook the phone's own "Export to
+  /// Excel" produces, so it can be opened directly without a restore.
+  ///
+  /// Best-effort per device: one snapshot that fails to decode (an old format,
+  /// a corrupt file) is skipped rather than failing the backup — the JSON just
+  /// written is the only thing a restore actually needs.
+  Future<void> _writeXlsxExports(String id) async {
+    final Directory usersDir = Directory('${paths.root.path}/users');
+    if (!usersDir.existsSync()) return;
+
+    for (final Directory uDir in usersDir.listSync().whereType<Directory>()) {
+      final String user = uDir.path.split(Platform.pathSeparator).last;
+      for (final String device in paths.deviceIds(user)) {
+        try {
+          final String? body = await _latestSnapshotBody(user, device);
+          if (body == null) continue;
+
+          final BackupData data = decodeBackupJson(body);
+          final Uint8List bytes = encodeBackupWorkbook(data);
+
+          final File target = File(
+            '${directory.path}/backup_${_safeId(id)}__${_safeId(user)}__'
+            '${_safeId(device)}.xlsx',
+          );
+          final File tmp = File('${target.path}.tmp');
+          await tmp.writeAsBytes(bytes, flush: true);
+          await tmp.rename(target.path);
+        } on Object catch (error) {
+          stdout.writeln(
+            'backup $id: could not write the XLSX export for $user/$device: '
+            '$error',
+          );
+        }
+      }
+    }
+  }
+
+  /// [device]'s current snapshot body, straight off disk via its `latest.json`
+  /// pointer — the same two-step lookup `SnapshotStore.latestBody` does,
+  /// without adding a `SnapshotStore` dependency here just for this.
+  Future<String?> _latestSnapshotBody(String user, String device) async {
+    final Object? latestRaw = await paths.latest(user, device).read();
+    if (latestRaw is! Map<String, Object?>) return null;
+    final Object? idRaw = latestRaw['id'];
+    if (idRaw is! String) return null;
+    final File file = paths.snapshot(user, device, idRaw);
+    return file.existsSync() ? file.readAsString() : null;
   }
 
   Future<Map<String, Object?>> _collectState(
