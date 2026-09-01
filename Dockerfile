@@ -27,6 +27,12 @@ FROM debian:bookworm-slim AS builder
 
 ARG FLUTTER_VERSION=3.47.0
 
+# The release tag (without the leading v), e.g. "2.0.14". Baked into the compiled
+# server binary so `/api/health` reports exactly which build is running — a
+# `docker pull` that did not actually get picked up otherwise looks identical to
+# a redeploy that did.
+ARG APP_VERSION=dev
+
 # Flutter's own dependencies. `--no-install-recommends` keeps this from pulling in
 # a hundred megabytes of suggestions that never get used.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -101,7 +107,8 @@ RUN flutter build web --release --no-web-resources-cdn --pwa-strategy=none \
 
 # A native binary rather than `dart run`: it starts in milliseconds, needs no SDK
 # in the runtime image, and cannot be affected by a stray pub cache.
-RUN cd server && dart compile exe bin/server.dart -o /home/builder/server
+RUN cd server && dart compile exe bin/server.dart -o /home/builder/server \
+      --define=APP_VERSION=${APP_VERSION}
 
 # -----------------------------------------------------------------------------
 # Stage 2 — the runtime

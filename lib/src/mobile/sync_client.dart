@@ -56,6 +56,7 @@ class SyncOutcome {
     this.editsSkipped = 0,
     this.editsRejected = 0,
     this.pushed = true,
+    this.serverVersion,
   })  : error = null,
         signedOut = false;
 
@@ -64,9 +65,14 @@ class SyncOutcome {
         editsApplied = 0,
         editsSkipped = 0,
         editsRejected = 0,
-        pushed = false;
+        pushed = false,
+        serverVersion = null;
 
   final String? error;
+
+  /// The running server's version, from `/api/health`, when this outcome came
+  /// from [SyncClient.testConnection]. Null for every other kind of outcome.
+  final String? serverVersion;
 
   /// Whether the failure was the session expiring, so the screen can ask for a
   /// password rather than offering a pointless retry.
@@ -146,7 +152,10 @@ class SyncClient {
           'Something answered at that address, but it is not an expense server.',
         );
       }
-      return const SyncOutcome.ok(transactions: 0);
+      return SyncOutcome.ok(
+        transactions: 0,
+        serverVersion: body['version'] as String?,
+      );
     } on Object catch (error) {
       return SyncOutcome.failed(_explain(error));
     }

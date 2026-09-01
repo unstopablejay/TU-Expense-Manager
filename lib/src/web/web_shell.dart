@@ -98,6 +98,10 @@ class _WebShellState extends State<WebShell> {
   /// own sync interval explains.
   LinkStatus _link = const LinkStatus(LinkState.unknown, 'Not checked yet.');
 
+  /// The running server's version, from `/api/health`. Shown in the theme menu
+  /// so a redeploy can be confirmed at a glance instead of via `curl`.
+  String? _serverVersion;
+
   Timer? _poll;
 
   final Random _random = Random();
@@ -107,6 +111,7 @@ class _WebShellState extends State<WebShell> {
     super.initState();
     _filters = LedgerFilters(months: <YearMonth>{_currentMonth});
     _load();
+    unawaited(_loadVersion());
     // Only the device list, and only every half minute: a few hundred bytes, and
     // it is what keeps the light and the pending-edits banner from being as old
     // as the tab has been open. The ledger is deliberately not re-fetched —
@@ -118,6 +123,12 @@ class _WebShellState extends State<WebShell> {
   void dispose() {
     _poll?.cancel();
     super.dispose();
+  }
+
+  Future<void> _loadVersion() async {
+    final ApiResult<Map<String, Object?>> result = await widget.api.health();
+    if (!mounted || result.failed) return;
+    setState(() => _serverVersion = result.value?['version'] as String?);
   }
 
   /// Re-reads the device list and updates the light and the pending count.
@@ -392,6 +403,7 @@ class _WebShellState extends State<WebShell> {
         actions: <Widget>[
           if (_devices.length > 1) _devicePicker(),
           _syncedLabel(),
+          _versionLabel(),
           _themeMenu(context),
           IconButton(
             // A mouse cannot pull to refresh, so the shared tabs'
@@ -680,6 +692,25 @@ class _WebShellState extends State<WebShell> {
             ),
           ),
       ],
+    );
+  }
+
+  /// The running server's version, shown plainly in the app bar so a redeploy
+  /// can be confirmed at a glance instead of via `curl`.
+  Widget _versionLabel() {
+    if (_serverVersion == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Tooltip(
+        message: 'The version of the server answering this page.',
+        child: Text(
+          'v$_serverVersion',
+          style: TextStyle(
+            fontSize: 12,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+      ),
     );
   }
 
