@@ -211,7 +211,8 @@ class AppDatabase {
       CREATE TABLE unadded_sms (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         body TEXT NOT NULL,
-        received_at INTEGER NOT NULL
+        received_at INTEGER NOT NULL,
+        is_read INTEGER NOT NULL DEFAULT 0
       )
     ''';
 
@@ -250,6 +251,8 @@ class AppDatabase {
   /// v8 adds `categories.icon` for custom category emojis.
   /// v9 strips transport prefixes (UPI_, UPI-, UPI/, UPI ) from merchants
   /// in transactions, merchant_mappings, deleted_transactions, and name_aliases.
+  /// v11 adds `unadded_sms.is_read`, so a message can be marked read without
+  /// removing it from the inbox the way dismissing it does.
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       await db.execute(
@@ -323,6 +326,18 @@ class AppDatabase {
     if (oldVersion < 10) {
       await db.execute(_createUnaddedSms);
       await db.execute(_createUnaddedSmsIndex);
+    }
+
+    if (oldVersion < 11) {
+      // Same shape of reasoning as the v5/v7 branches above: a database coming
+      // from before v10 had unadded_sms created just above, from the const
+      // that already carries is_read. Only one that already had the v10 table
+      // is missing the column.
+      if (oldVersion >= 10) {
+        await db.execute(
+          'ALTER TABLE unadded_sms ADD COLUMN is_read INTEGER NOT NULL DEFAULT 0',
+        );
+      }
     }
 
     if (oldVersion < 9) {
@@ -1718,6 +1733,7 @@ class AppDatabase {
         id: row['id']! as int,
         body: row['body']! as String,
         receivedAt: DateTime.fromMillisecondsSinceEpoch(row['received_at']! as int),
+        isRead: (row['is_read']! as int) != 0,
       );
     }).toList();
   }
@@ -1735,5 +1751,16 @@ class AppDatabase {
 
   Future<void> deleteUnaddedSms(int id) async {
     await (await database).delete('unadded_sms', where: 'id = ?', whereArgs: <Object?>[id]);
+  }
+
+  /// Marks every currently-unread inbox message read, without removing any of
+  /// them — dismissing (or adding) a message is still the only way one leaves
+  /// the inbox.
+  Future<void> markAllUnaddedSmsRead() async {
+    await (await database).update(
+      'unadded_sms',
+      <String, Object?>{'is_read': 1},
+      where: 'is_read = 0',
+    );
   }
 }

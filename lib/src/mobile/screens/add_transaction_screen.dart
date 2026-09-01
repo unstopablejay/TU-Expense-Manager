@@ -37,11 +37,17 @@ class AddTransactionScreen extends StatefulWidget {
     super.key,
     required this.categories,
     this.merchants = const <String>[],
+    this.paymentTypes = const <String>[],
     this.initialSmsBody,
   });
 
   final List<ExpenseCategory> categories;
   final List<String> merchants;
+
+  /// Every card and account the ledger has already seen (from parsed SMS as
+  /// well as earlier manual entries), so a real saved card can be picked
+  /// instead of just the five generic payment methods.
+  final List<String> paymentTypes;
   final String? initialSmsBody;
 
   @override
@@ -49,6 +55,26 @@ class AddTransactionScreen extends StatefulWidget {
 }
 
 class _AddTransactionScreenState extends State<AddTransactionScreen> {
+  /// The five methods every install has, before anything has been synced.
+  static const List<String> _basePaymentTypes = <String>[
+    'Cash',
+    'UPI',
+    'Debit Card',
+    'Credit Card',
+    'Other',
+  ];
+
+  /// The base methods, plus every real card or account the ledger has
+  /// already seen (see [AddTransactionScreen.paymentTypes]) that isn't one of
+  /// them already — alphabetical, so a growing list of cards stays scannable.
+  List<String> get _paymentTypeChoices {
+    final List<String> extra = widget.paymentTypes
+        .where((String t) => !_basePaymentTypes.contains(t))
+        .toList()
+      ..sort();
+    return <String>[..._basePaymentTypes, ...extra];
+  }
+
   final _formKey = GlobalKey<FormState>();
   final TextEditingController _amountController = TextEditingController();
   final TextEditingController _notesController = TextEditingController();
@@ -84,6 +110,14 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
       _ManualSplitLine(category: _selectedCategory),
       _ManualSplitLine(),
     ];
+
+    // From the unadded-SMS inbox: the message failed a full parse, but the
+    // amount alone is often still readable. Left blank, as today, when it
+    // isn't — the field stays editable either way.
+    if (widget.initialSmsBody case final String body) {
+      final double? amount = SmsParser.extractAmountOnly(body);
+      if (amount != null) _amountController.text = amount.toStringAsFixed(2);
+    }
   }
 
   @override
@@ -562,8 +596,8 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
                 const SizedBox(height: 8),
                 Wrap(
                   spacing: 8,
-                  children: <String>['Cash', 'UPI', 'Debit Card', 'Credit Card', 'Other']
-                      .map((String type) {
+                  runSpacing: 8,
+                  children: _paymentTypeChoices.map((String type) {
                     final isSelected = _paymentType == type;
                     return ChoiceChip(
                       label: Text(type),
