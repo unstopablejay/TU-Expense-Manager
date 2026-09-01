@@ -105,4 +105,22 @@ void main() {
       expect(spendByDayPerMonth(const <LedgerEntry>[]), isEmpty);
     });
   });
+
+  group('deltaAmount and deltaPercent', () {
+    test('deltaAmount computes B - A', () {
+      expect(deltaAmount(1000, 1100), 100);
+      expect(deltaAmount(1100, 1000), -100);
+      expect(deltaAmount(1000, 1000), 0);
+    });
+
+    test('deltaPercent computes percentage change', () {
+      expect(deltaPercent(1000, 1100), 10.0);
+      expect(deltaPercent(1000, 900), -10.0);
+    });
+
+    test('deltaPercent handles zero baseline', () {
+      expect(deltaPercent(0, 500), isNull);
+      expect(deltaPercent(0, 0), isNull);
+    });
+  });
 }
