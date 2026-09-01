@@ -28,6 +28,7 @@ class _SplitRow {
 
   ExpenseCategory? category;
   final TextEditingController controller;
+  final GlobalKey key = GlobalKey();
 
   double get amount => double.tryParse(controller.text.trim()) ?? 0;
 
@@ -65,6 +66,8 @@ class SplitScreen extends StatefulWidget {
 class _SplitScreenState extends State<SplitScreen> {
   late List<_SplitRow> _rows;
   bool _saving = false;
+  bool _attemptedSave = false;
+  late String _initialSnapshot;
 
   @override
   void initState() {
@@ -85,6 +88,7 @@ class _SplitScreenState extends State<SplitScreen> {
         _SplitRow(amount: widget.txn.amount),
       ];
     }
+    _initialSnapshot = _takeSnapshot();
   }
 
   @override
@@ -94,6 +98,12 @@ class _SplitScreenState extends State<SplitScreen> {
     }
     super.dispose();
   }
+
+  String _takeSnapshot() {
+    return _rows.map((r) => '${r.category?.id}:${r.controller.text}').join('|');
+  }
+
+  bool get _isDirty => _takeSnapshot() != _initialSnapshot;
 
   ExpenseCategory? _categoryById(int id) => widget.categories
       .where((ExpenseCategory c) => c.id == id)
@@ -147,6 +157,29 @@ class _SplitScreenState extends State<SplitScreen> {
 
   Future<void> _save() async {
     if (_saving) return;
+    setState(() => _attemptedSave = true);
+
+    final bool complete = _rows.isNotEmpty && _rows.every((_SplitRow r) => r.category != null);
+    final bool positive = _rows.every((_SplitRow r) => r.amount > 0);
+    final bool balanced = isBalanced(_amounts, widget.txn.amount);
+
+    if (!complete || !positive || !balanced) {
+      // Find first error and scroll to it
+      for (final _SplitRow row in _rows) {
+        if (row.category == null || row.amount <= 0) {
+          if (row.key.currentContext != null) {
+            Scrollable.ensureVisible(
+              row.key.currentContext!,
+              duration: const Duration(milliseconds: 300),
+              alignment: 0.1,
+            );
+          }
+          break;
+        }
+      }
+      return;
+    }
+
     setState(() => _saving = true);
 
     // The last line absorbs the rounding drift, so what is stored sums to the
@@ -174,188 +207,246 @@ class _SplitScreenState extends State<SplitScreen> {
     Navigator.pop(context, true);
   }
 
+  Future<void> _showConfirmDialog() async {
+    final bool? leave = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) => AlertDialog(
+        title: const Text('Discard changes?'),
+        content: const Text("Your changes haven't been saved."),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Stay'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Leave'),
+          ),
+        ],
+      ),
+    );
+    if (leave == true && mounted) {
+      Navigator.pop(context, false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final ThemeData theme = Theme.of(context);
     final double left = unallocated(_amounts, widget.txn.amount);
     final bool balanced = isBalanced(_amounts, widget.txn.amount);
-    final bool complete =
-        _rows.isNotEmpty && _rows.every((_SplitRow r) => r.category != null);
-    final bool positive = _rows.every((_SplitRow r) => r.amount > 0);
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Split'),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(28),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: Row(
-              children: <Widget>[
-                Expanded(
-                  child: Text(
-                    widget.txn.merchant,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodyMedium,
+    return PopScope(
+      canPop: !_isDirty || _saving,
+      onPopInvokedWithResult: (bool didPop, Object? result) {
+        if (didPop) return;
+        _showConfirmDialog();
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Split'),
+          actions: <Widget>[
+            if (_saving)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: Center(
+                  child: SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
                   ),
                 ),
-                Text(
-                  widget.money.format(widget.txn.amount),
-                  style: theme.textTheme.titleMedium
-                      ?.copyWith(fontWeight: FontWeight.bold),
+              )
+            else
+              TextButton(
+                onPressed: _save,
+                style: TextButton.styleFrom(
+                  foregroundColor: theme.colorScheme.primary,
                 ),
-              ],
-            ),
-          ),
-        ),
-      ),
-      body: ListView.builder(
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
-        itemCount: _rows.length + 1,
-        itemBuilder: (BuildContext context, int index) {
-          if (index == _rows.length) {
-            return Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                onPressed: _addRow,
-                icon: const Icon(Icons.add),
-                label: const Text('Add row'),
+                child: const Text('Save'),
               ),
-            );
-          }
-          final _SplitRow row = _rows[index];
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Row(
-              children: <Widget>[
-                Expanded(
-                  flex: 3,
-                  child: OutlinedButton(
-                    onPressed: () => _pickCategoryFor(row),
-                    child: Row(
-                      children: <Widget>[
-                        if (row.category != null)
-                          CategoryAvatar(
-                            category: row.category!.name,
-                            explicitIcon: row.category!.icon,
-                            size: 24,
-                            fontSize: 14,
-                            iconSize: 14,
-                            borderRadius: 6,
-                          )
-                        else
-                          Icon(
-                            Icons.category_outlined,
-                            size: 18,
-                            color: theme.colorScheme.primary,
-                          ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            row.category?.name ?? 'Choose category',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: row.category == null
-                                ? TextStyle(color: theme.colorScheme.error)
-                                : null,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  flex: 2,
-                  child: TextField(
-                    controller: row.controller,
-                    textAlign: TextAlign.end,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: const InputDecoration(
-                      isDense: true,
-                      border: OutlineInputBorder(),
-                      prefixText: '₹',
-                    ),
-                    onChanged: (_) => _rebalance(editedIndex: index),
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Remove row',
-                  // Below two rows there is nothing left to split.
-                  onPressed:
-                      _rows.length > 2 ? () => _removeRow(index) : null,
-                  icon: const Icon(Icons.close),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
-      bottomNavigationBar: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(
-                balanced
-                    ? 'Allocated ${widget.money.format(widget.txn.amount)} '
-                        'of ${widget.money.format(widget.txn.amount)}'
-                    : left > 0
-                        ? '${widget.money.format(left)} unallocated'
-                        : '${widget.money.format(left.abs())} over',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: balanced
-                      ? theme.colorScheme.primary
-                      : theme.colorScheme.error,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              if (!complete)
-                Text(
-                  'Every row needs a category.',
-                  style: theme.textTheme.bodySmall
-                      ?.copyWith(color: theme.colorScheme.error),
-                ),
-              const SizedBox(height: 8),
-              Row(
+          ],
+          bottom: PreferredSize(
+            preferredSize: const Size.fromHeight(28),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Row(
                 children: <Widget>[
-                  if (widget.txn.isSplit)
-                    TextButton(
-                      onPressed: _saving ? null : _removeSplit,
-                      child: const Text('Remove split'),
+                  Expanded(
+                    child: Text(
+                      widget.txn.merchant,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyMedium,
                     ),
-                  const Spacer(),
-                  FilledButton(
-                    onPressed:
-                        balanced && complete && positive && !_saving
-                            ? _save
-                            : null,
-                    child: _saving
-                        ? const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: <Widget>[
-                              SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              ),
-                              SizedBox(width: 8),
-                              Text('Saving…'),
-                            ],
-                          )
-                        : const Text('Save'),
+                  ),
+                  Text(
+                    widget.money.format(widget.txn.amount),
+                    style: theme.textTheme.titleMedium
+                        ?.copyWith(fontWeight: FontWeight.bold),
                   ),
                 ],
               ),
-            ],
+            ),
+          ),
+        ),
+        body: ListView.builder(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+          itemCount: _rows.length + 1,
+          itemBuilder: (BuildContext context, int index) {
+            if (index == _rows.length) {
+              return Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: _addRow,
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add row'),
+                ),
+              );
+            }
+            final _SplitRow row = _rows[index];
+            final bool catError = _attemptedSave && row.category == null;
+            final bool amtError = _attemptedSave && row.amount <= 0;
+
+            return Padding(
+              key: row.key,
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Expanded(
+                    flex: 3,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        OutlinedButton(
+                          style: catError
+                              ? OutlinedButton.styleFrom(
+                                  side: BorderSide(color: theme.colorScheme.error),
+                                )
+                              : null,
+                          onPressed: () => _pickCategoryFor(row),
+                          child: Row(
+                            children: <Widget>[
+                              if (row.category != null)
+                                CategoryAvatar(
+                                  category: row.category!.name,
+                                  explicitIcon: row.category!.icon,
+                                  size: 24,
+                                  fontSize: 14,
+                                  iconSize: 14,
+                                  borderRadius: 6,
+                                )
+                              else
+                                Icon(
+                                  Icons.category_outlined,
+                                  size: 18,
+                                  color: theme.colorScheme.primary,
+                                ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  row.category?.name ?? 'Choose category',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: row.category == null
+                                      ? TextStyle(color: theme.colorScheme.error)
+                                      : null,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (catError)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 12, top: 4),
+                            child: Text(
+                              'Required',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.error,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    flex: 2,
+                    child: TextField(
+                      controller: row.controller,
+                      textAlign: TextAlign.end,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        border: const OutlineInputBorder(),
+                        prefixText: '₹',
+                        errorText: amtError ? 'Must be > 0' : null,
+                      ),
+                      onChanged: (_) => _rebalance(editedIndex: index),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: IconButton(
+                      tooltip: 'Remove row',
+                      // Below two rows there is nothing left to split.
+                      onPressed:
+                          _rows.length > 2 ? () => _removeRow(index) : null,
+                      icon: const Icon(Icons.close),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+        bottomNavigationBar: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  balanced
+                      ? 'Allocated ${widget.money.format(widget.txn.amount)} '
+                          'of ${widget.money.format(widget.txn.amount)}'
+                      : left > 0
+                          ? '${widget.money.format(left)} unallocated'
+                          : '${widget.money.format(left.abs())} over',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: balanced
+                        ? theme.colorScheme.primary
+                        : theme.colorScheme.error,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                if (!balanced && _attemptedSave)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      'Amounts must add up to the total.',
+                      style: theme.textTheme.bodySmall
+                          ?.copyWith(color: theme.colorScheme.error),
+                    ),
+                  ),
+                if (widget.txn.isSplit) ...<Widget>[
+                  const SizedBox(height: 8),
+                  Row(
+                    children: <Widget>[
+                      TextButton(
+                        onPressed: _saving ? null : _removeSplit,
+                        child: const Text('Remove split'),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
       ),
