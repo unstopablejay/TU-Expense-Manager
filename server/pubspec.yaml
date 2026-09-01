@@ -20,6 +20,7 @@ dependencies:
   pointycastle: ^4.0.0       # Argon2id for password hashing — never hand-rolled
   crypto: ^3.0.7             # constant-time comparison, snapshot id hashing
   args: ^2.7.0               # --add-user and friends
+  excel: ^4.0.6              # writes the auto-backup's per-device .xlsx export
 
 dev_dependencies:
   test: ^1.25.0

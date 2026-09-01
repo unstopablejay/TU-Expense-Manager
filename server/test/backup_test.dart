@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:excel/excel.dart' hide Border, BorderStyle, TextSpan;
 import 'package:shelf/shelf.dart';
 import 'package:test/test.dart';
 
@@ -125,6 +126,87 @@ void main() {
       final Map<String, Object?> listJson = await h.json(listResp);
       final List<Object?> backups = listJson['backups']! as List<Object?>;
       expect(backups.length, 1);
+    });
+
+    test('writes a per-device XLSX sibling next to the JSON backup', () async {
+      await h.send(
+        'POST',
+        '/api/v1/snapshot',
+        token: token,
+        device: 'pixel',
+        body: snapshotBody(4, merchant: 'XLSXTEST'),
+      );
+
+      final Response create = await h.send(
+        'POST',
+        '/api/v1/backups',
+        token: token,
+        body: <String, Object?>{'note': 'XLSX test'},
+      );
+      final String id = ((await h.json(create))['backup']! as Map<String, Object?>)['id']!
+          as String;
+
+      final File xlsx =
+          File('${h.backupManager.directory.path}/backup_${id}__jay__pixel.xlsx');
+      expect(xlsx.existsSync(), isTrue);
+
+      final Excel workbook = Excel.decodeBytes(await xlsx.readAsBytes());
+      final Sheet? sheet = workbook.tables['Transactions'];
+      expect(sheet, isNotNull);
+      // Header row plus the 4 transactions just pushed.
+      expect(sheet!.rows.length, 5);
+      expect(
+        sheet.rows[1]
+            .map((Data? cell) => cell?.value?.toString())
+            .contains('XLSXTEST-0'),
+        isTrue,
+      );
+    });
+
+    test('prunes XLSX siblings along with their JSON backup', () async {
+      await h.send(
+        'POST',
+        '/api/v1/snapshot',
+        token: token,
+        device: 'pixel',
+        body: snapshotBody(1),
+      );
+
+      final List<String> ids = <String>[];
+      for (int i = 1; i <= 5; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        final Response res = await h.send(
+          'POST',
+          '/api/v1/backups',
+          token: token,
+          body: <String, Object?>{'note': 'Backup #$i'},
+        );
+        ids.add(((await h.json(res))['backup']! as Map<String, Object?>)['id']!
+            as String);
+      }
+
+      final List<File> xlsxFiles = h.backupManager.directory
+          .listSync()
+          .whereType<File>()
+          .where((File f) => f.path.endsWith('.xlsx'))
+          .toList();
+
+      // backupKeep: 3 — the same cap that left 3 JSON backups on disk.
+      expect(xlsxFiles.length, 3);
+      for (final String keptId in ids.sublist(2)) {
+        expect(
+          File('${h.backupManager.directory.path}/backup_${keptId}__jay__pixel.xlsx')
+              .existsSync(),
+          isTrue,
+        );
+      }
+      for (final String prunedId in ids.sublist(0, 2)) {
+        expect(
+          File('${h.backupManager.directory.path}/backup_${prunedId}__jay__pixel.xlsx')
+              .existsSync(),
+          isFalse,
+        );
+      }
     });
 
     test('enforces FIFO rolling limit (backupKeep) deleting oldest auto/manual backups', () async {
