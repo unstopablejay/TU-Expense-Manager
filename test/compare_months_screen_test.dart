@@ -3,7 +3,6 @@ import 'package:intl/intl.dart';
 import 'package:flutter/material.dart';
 import 'package:tu_expense_tracker/src/core/ledger.dart';
 import 'package:tu_expense_tracker/src/core/models.dart';
-import 'package:tu_expense_tracker/src/core/parser.dart';
 import 'package:tu_expense_tracker/src/ui_shared/compare_months_screen.dart';
 
 void main() {
