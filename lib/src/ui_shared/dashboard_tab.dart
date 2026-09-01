@@ -14,6 +14,7 @@ import 'package:intl/intl.dart';
 import '../core/ledger.dart';
 import '../core/models.dart';
 import '../core/splits.dart';
+import 'compare_months_screen.dart';
 import 'palette.dart';
 import 'shared_controls.dart';
 
@@ -149,6 +150,11 @@ class _DashboardTabState extends State<DashboardTab> {
                           months: widget.months,
                           money: widget.money,
                         ),
+                      _CompareShortcutCard(
+                        transactions: widget.transactions,
+                        monthChoices: widget.monthChoices,
+                        money: widget.money,
+                      ),
                     ],
                   ),
                 ),
@@ -985,6 +991,70 @@ class _NothingToChart extends StatelessWidget {
                       'Transactions tab.',
               textAlign: TextAlign.center,
               style: theme.textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CompareShortcutCard extends StatelessWidget {
+  const _CompareShortcutCard({
+    required this.transactions,
+    required this.monthChoices,
+    required this.money,
+  });
+
+  final List<ExpenseTxn> transactions;
+  final List<YearMonth> monthChoices;
+  final NumberFormat money;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Card(
+      margin: const EdgeInsets.only(top: 12),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+        child: Row(
+          children: <Widget>[
+            Icon(
+              Icons.stacked_bar_chart_outlined,
+              color: theme.colorScheme.primary,
+              size: 28,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    'Month-over-month breakdown',
+                    style: theme.textTheme.titleSmall,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Compare category spending across 2–6 months',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.tonal(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => CompareMonthsScreen(
+                    transactions: transactions,
+                    monthChoices: monthChoices,
+                    money: money,
+                  ),
+                ),
+              ),
+              child: const Text('Compare →'),
             ),
           ],
         ),

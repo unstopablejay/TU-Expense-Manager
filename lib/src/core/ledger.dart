@@ -335,6 +335,13 @@ Map<YearMonth, Map<int, double>> spendByDayPerMonth(
 List<YearMonth> comparedMonths(Set<YearMonth> selected) =>
     selected.toList()..sort();
 
+/// How much spend changed from [a] to [b]: positive means more was spent.
+double deltaAmount(double a, double b) => b - a;
+
+/// Percentage change from [a] to [b], or `null` when [a] is zero (no baseline).
+double? deltaPercent(double a, double b) =>
+    a == 0 ? null : (b - a) / a * 100;
+
 /// One slice of the breakdown: a category, what went to it, and its share of
 /// the whole.
 class CategorySlice {

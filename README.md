@@ -53,6 +53,11 @@ Real-world spending rarely fits into a single bucket. When a single ₹3,450 pay
 - **Safe & Idempotent**: Multi-layer deduplication prevents double-counting, even if bank alerts are received multiple times or rescanned.
 
 ### 4. 📊 Visual Spending Dashboard & Monthly Reports
+
+- **Interactive charts**: View category breakdowns as pie charts or horizontal bars.
+- **Trend analysis**: Line charts showing daily spend pace compared to previous months.
+- **Multi-month comparison**: Select 2-6 months to view a side-by-side table of category spending with exact delta amounts (Δ₹) and percentage changes (Δ%).
+- **Summary cards**: High-level totals of spending and income.
 - **Hero Spend Overview**: Instant snapshot of total spending, income received, and net cash flow for the selected month.
 - **Single-Month Donut Chart**: Clear breakdown of where your money went, ranked by category share with exact amounts.
 - **Multi-Month Comparison Bars**: Compare 2 to 6 months side-by-side to understand spending trends over time.

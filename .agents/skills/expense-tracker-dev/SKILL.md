@@ -256,3 +256,6 @@ Whenever a UI redesign, new feature, theme update, or installation step changes,
 | `install_restricted_settings.png` | App info screen with 3-dots menu open showing "Allow restricted settings" | Installation Guide (Step 3) |
 | `install_sms_permission.png` | App permissions screen showing SMS permission set to Allow | Installation Guide (Step 4) |
 
+
+### Multi-Month Comparison
+The app features a full-screen `CompareMonthsScreen` that displays a side-by-side table of category spending across 2 to 6 selected months, along with delta columns (Δ amount and Δ %) for direct 2-month comparisons. The screen handles data from `spendByCategoryPerMonth`.
