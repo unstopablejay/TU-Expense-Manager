@@ -237,6 +237,19 @@ class SmsParser {
     return RegExp(r'\b(rs\.?|inr|spent|debited|credited|txn|deducted)\b', caseSensitive: false).hasMatch(body);
   }
 
+  /// A loose, standalone amount extraction for a message that failed a full
+  /// [parse] — just the first currency-prefixed number in the body, with none
+  /// of `parse`'s date/merchant requirements. Used only to pre-fill the Amount
+  /// field when a user picks one of these out of the unadded-SMS inbox; never
+  /// to auto-create a transaction on its own.
+  static double? extractAmountOnly(String body) {
+    final RegExpMatch? match = _re('$_cur$_amt').firstMatch(body);
+    if (match == null) return null;
+    final double? amount =
+        double.tryParse((_group(match, 'amount') ?? '').replaceAll(',', ''));
+    return (amount == null || amount <= 0) ? null : amount;
+  }
+
   /// Returns `null` when no template matches, which is how OTPs, promos and
   /// statement alerts get filtered out.
   ///

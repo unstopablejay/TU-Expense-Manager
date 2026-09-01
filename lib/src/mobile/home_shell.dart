@@ -34,6 +34,7 @@ import 'screens/merge_names_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/split_screen.dart';
 import 'screens/transaction_actions_sheet.dart';
+import 'screens/unadded_sms_screen.dart';
 import 'screens/update_dialog.dart';
 import 'sms_source.dart';
 import 'sync_client.dart';
@@ -842,6 +843,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         builder: (_) => AddTransactionScreen(
           categories: _categories,
           merchants: view.merchants,
+          paymentTypes: view.paymentTypes,
         ),
       ),
     );
@@ -874,15 +876,34 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// all of *those* — marking rows a filter has hidden would hand the delete
   /// button transactions the user cannot see.
   Widget _inboxAction() {
+    final int unread = _unaddedSms.where((UnaddedSms m) => !m.isRead).length;
     return Stack(
       alignment: Alignment.center,
       children: <Widget>[
         IconButton(
           icon: const Icon(Icons.inbox),
           tooltip: 'Unadded SMS',
-          onPressed: _showUnaddedSmsSheet,
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => UnaddedSmsScreen(
+                categories: _categories,
+                merchants: _derive().merchants,
+                paymentTypes: _derive().paymentTypes,
+                // Covers every reason this screen calls back: a dismiss or a
+                // mark-all-read only touch the inbox, but adding a message as
+                // a transaction changes the ledger too — and there is no way
+                // to tell which happened from out here, so both are always
+                // refreshed together.
+                onChanged: () => Future.wait(<Future<void>>[
+                  _fetchUnadded(),
+                  _load(),
+                ]),
+              ),
+            ),
+          ),
         ),
-        if (_unaddedSms.isNotEmpty)
+        if (unread > 0)
           Positioned(
             right: 8,
             top: 8,
@@ -893,7 +914,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                 shape: BoxShape.circle,
               ),
               child: Text(
-                '${_unaddedSms.length}',
+                '$unread',
                 style: const TextStyle(
                   color: Colors.white,
                   fontSize: 10,
@@ -904,72 +925,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           ),
       ],
     );
-  }
-
-  void _showUnaddedSmsSheet() {
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setSheetState) {
-            if (_unaddedSms.isEmpty) {
-              return const SafeArea(
-                child: Padding(
-                  padding: EdgeInsets.all(32.0),
-                  child: Text('No pending unadded SMS.', textAlign: TextAlign.center),
-                ),
-              );
-            }
-            return DraggableScrollableSheet(
-              expand: false,
-              builder: (context, scrollController) {
-                return ListView.builder(
-                  controller: scrollController,
-                  itemCount: _unaddedSms.length,
-                  itemBuilder: (context, i) {
-                    final msg = _unaddedSms[i];
-                    return ListTile(
-                      title: Text(msg.body, maxLines: 2, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(msg.receivedAt.toString()),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.close),
-                        onPressed: () async {
-                          await _db.deleteUnaddedSms(msg.id);
-                          await _fetchUnadded();
-                          setSheetState(() {});
-                        },
-                      ),
-                      onTap: () {
-                        Navigator.pop(context);
-                        _addFromUnadded(msg);
-                      },
-                    );
-                  },
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Future<void> _addFromUnadded(UnaddedSms msg) async {
-    final ExpenseCategory? category = await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => AddTransactionScreen(
-          categories: _categories,
-          merchants: _derive().merchants,
-          initialSmsBody: msg.body,
-        ),
-      ),
-    );
-    if (category != null) {
-      await _db.deleteUnaddedSms(msg.id);
-      await _fetchUnadded();
-    }
   }
 
   AppBar _selectionAppBar(List<LedgerEntry> visible) {

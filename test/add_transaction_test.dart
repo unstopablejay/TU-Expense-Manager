@@ -28,11 +28,15 @@ void main() {
   Widget buildScreen({
     List<ExpenseCategory> cats = categories,
     List<String> merchs = merchants,
+    List<String> paymentTypes = const <String>[],
+    String? initialSmsBody,
   }) {
     return MaterialApp(
       home: AddTransactionScreen(
         categories: cats,
         merchants: merchs,
+        paymentTypes: paymentTypes,
+        initialSmsBody: initialSmsBody,
       ),
     );
   }
@@ -147,6 +151,51 @@ void main() {
 
       // Should still render, falling back to Uncategorized as the default
       expect(find.text('Uncategorized'), findsOneWidget);
+    });
+  });
+
+  // =========================================================================
+  // SMS AUTO-FILL (unadded-SMS inbox)
+  // =========================================================================
+  group('AddTransactionScreen · SMS auto-fill', () {
+    testWidgets('pre-fills the amount when the SMS text has one',
+        (tester) async {
+      setLargeViewport(tester);
+
+      await tester.pumpWidget(buildScreen(
+        initialSmsBody: 'Amt Deducted! Rs.11500 from your HDFC Bank A/c '
+            'XX0444 for something the date/merchant patterns do not recognise',
+      ));
+      await tester.pumpAndSettle();
+
+      final amountField =
+          tester.widget<TextFormField>(find.byType(TextFormField).first);
+      expect(amountField.controller?.text, '11500.00');
+    });
+
+    testWidgets('leaves the amount blank when nothing is found',
+        (tester) async {
+      setLargeViewport(tester);
+
+      await tester.pumpWidget(
+        buildScreen(initialSmsBody: 'Your OTP is 123456'),
+      );
+      await tester.pumpAndSettle();
+
+      final amountField =
+          tester.widget<TextFormField>(find.byType(TextFormField).first);
+      expect(amountField.controller?.text, isEmpty);
+    });
+
+    testWidgets('leaves the amount blank without an SMS body', (tester) async {
+      setLargeViewport(tester);
+
+      await tester.pumpWidget(buildScreen());
+      await tester.pumpAndSettle();
+
+      final amountField =
+          tester.widget<TextFormField>(find.byType(TextFormField).first);
+      expect(amountField.controller?.text, isEmpty);
     });
   });
 
@@ -462,6 +511,44 @@ void main() {
         expect(chip.selected, isTrue,
             reason: '$label should be selected after tapping');
       }
+    });
+
+    testWidgets('shows real saved cards from the ledger alongside the base five',
+        (tester) async {
+      setLargeViewport(tester);
+
+      await tester.pumpWidget(buildScreen(
+        paymentTypes: const <String>['HDFC Bank Card 6824', 'ICICI XX8008'],
+      ));
+      await tester.pumpAndSettle();
+
+      for (final label in <String>[
+        'Cash', 'UPI', 'Debit Card', 'Credit Card', 'Other', // base five
+        'HDFC Bank Card 6824', 'ICICI XX8008', // real saved cards
+      ]) {
+        expect(find.widgetWithText(ChoiceChip, label), findsOneWidget);
+      }
+
+      await tester.tap(find.text('HDFC Bank Card 6824'));
+      await tester.pumpAndSettle();
+
+      final cardChip = tester.widget<ChoiceChip>(
+        find.widgetWithText(ChoiceChip, 'HDFC Bank Card 6824'),
+      );
+      expect(cardChip.selected, isTrue);
+    });
+
+    testWidgets('does not duplicate a saved value that matches a base chip',
+        (tester) async {
+      setLargeViewport(tester);
+
+      await tester.pumpWidget(buildScreen(
+        paymentTypes: const <String>['Cash', 'UPI'],
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.widgetWithText(ChoiceChip, 'Cash'), findsOneWidget);
+      expect(find.widgetWithText(ChoiceChip, 'UPI'), findsOneWidget);
     });
   });
 

@@ -210,11 +210,13 @@ class UnaddedSms {
     required this.id,
     required this.body,
     required this.receivedAt,
+    this.isRead = false,
   });
 
   final int id;
   final String body;
   final DateTime receivedAt;
+  final bool isRead;
 }
 class ExpenseTxn {
   const ExpenseTxn({
