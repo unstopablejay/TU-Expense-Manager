@@ -48,6 +48,7 @@ const Set<String> _safePackages = <String>{
   'flutter',
   'fl_chart',
   'intl',
+  'clock',
   'shared_preferences',
 };
 
