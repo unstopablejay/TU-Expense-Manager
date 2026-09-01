@@ -5,6 +5,8 @@
 /// implementation, and one `DateFormat` spells the month labels.
 library;
 
+import 'package:clock/clock.dart';
+
 import 'package:intl/intl.dart';
 
 import 'constants.dart';
@@ -40,7 +42,7 @@ class YearMonth implements Comparable<YearMonth> {
   /// [now] is injectable so "the current month" can be tested without waiting
   /// for one.
   factory YearMonth.current([DateTime? now]) =>
-      YearMonth.fromDate(now ?? DateTime.now());
+      YearMonth.fromDate(now ?? clock.now());
 
   final int year;
 

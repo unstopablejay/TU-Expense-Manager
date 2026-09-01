@@ -28,6 +28,10 @@ This skill covers the project structure, design invariants, database schema, SMS
 >    - If a feature or UI page changes (e.g. Dashboard donut/charts, Transactions cards/filters, Split editor, Merchant Defaults, Themes/OLED), launch the Android Virtual Device (`emulator-5554`), seed realistic demo data, navigate to the screen, and capture fresh high-resolution screenshots.
 >    - If installation, permission, or Play Protect handling flows change, re-capture or update the system walkthrough graphics (`install_play_protect.png`, `install_restricted_settings.png`, `install_sms_permission.png`, `install_app_info.png`).
 >    - Never leave stale, outdated, or mismatched screenshots in `docs/screenshots/` or `README.md` after modifying UI or user-facing flows.
+>
+> 4. **Mandatory Git Workflow Protocol**:
+>    - **NEVER merge or push code directly to the `main` branch under any circumstances.**
+>    - All changes must be made on a feature or bugfix branch and merged exclusively via Pull Requests.
 
 ---
 
