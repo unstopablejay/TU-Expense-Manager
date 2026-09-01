@@ -37,10 +37,12 @@ class AddTransactionScreen extends StatefulWidget {
     super.key,
     required this.categories,
     this.merchants = const <String>[],
+    this.initialSmsBody,
   });
 
   final List<ExpenseCategory> categories;
   final List<String> merchants;
+  final String? initialSmsBody;
 
   @override
   State<AddTransactionScreen> createState() => _AddTransactionScreenState();

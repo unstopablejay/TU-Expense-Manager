@@ -6,6 +6,15 @@ import 'package:tu_expense_tracker/main.dart';
 import 'package:tu_expense_tracker/src/ui_shared/loading_dialog.dart';
 
 class FakeDatabase implements AppDatabase {
+  @override
+  Future<List<UnaddedSms>> unaddedSms() async => [];
+  
+  @override
+  Future<void> addUnaddedSms(String body, DateTime receivedAt) async {}
+  
+  @override
+  Future<void> deleteUnaddedSms(int id) async {}
+
   final List<ExpenseTxn> _txns = <ExpenseTxn>[];
   final List<ExpenseCategory> _cats = <ExpenseCategory>[
     const ExpenseCategory(id: 1, name: 'Uncategorized'),

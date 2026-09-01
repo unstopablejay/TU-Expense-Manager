@@ -204,6 +204,18 @@ String canonicalAmountKey(double amount) {
   return '$plain.0';
 }
 
+
+class UnaddedSms {
+  const UnaddedSms({
+    required this.id,
+    required this.body,
+    required this.receivedAt,
+  });
+
+  final int id;
+  final String body;
+  final DateTime receivedAt;
+}
 class ExpenseTxn {
   const ExpenseTxn({
     required this.id,

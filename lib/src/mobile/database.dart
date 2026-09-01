@@ -99,6 +99,8 @@ class AppDatabase {
     await db.execute(_createTransactionSplits);
     await db.execute(_createTransactionSplitsIndex);
     await db.execute(_createNameAliases);
+    await db.execute(_createUnaddedSms);
+    await db.execute(_createUnaddedSmsIndex);
 
     final batch = db.batch();
     for (final name in _defaultCategories) {
@@ -205,6 +207,18 @@ class AppDatabase {
   ///
   /// COLLATE NOCASE on `alias` is load-bearing: it is what lets one row cover
   /// both `HDFC Bank A/C *0444` and `HDFC Bank A/c *0444`.
+  static const String _createUnaddedSms = '''
+      CREATE TABLE unadded_sms (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        body TEXT NOT NULL,
+        received_at INTEGER NOT NULL
+      )
+    ''';
+
+  static const String _createUnaddedSmsIndex = '''
+      CREATE UNIQUE INDEX idx_unadded_sms_unique ON unadded_sms (body, received_at)
+    ''';
+
   static const String _createNameAliases = '''
       CREATE TABLE name_aliases (
         kind      TEXT NOT NULL,
@@ -306,6 +320,11 @@ class AppDatabase {
         );
       }
     }
+    if (oldVersion < 10) {
+      await db.execute(_createUnaddedSms);
+      await db.execute(_createUnaddedSmsIndex);
+    }
+
     if (oldVersion < 9) {
       // 1. Clean merchant_mappings
       final mappings = await db.query('merchant_mappings');
@@ -1690,5 +1709,31 @@ class AppDatabase {
     // away. Left stale, every later categorisation would point at whatever row
     // now happens to hold that id.
     _uncategorizedId = null;
+  }
+  Future<List<UnaddedSms>> unaddedSms() async {
+    final List<Map<String, Object?>> rows =
+        await (await database).query('unadded_sms', orderBy: 'received_at DESC');
+    return rows.map((Map<String, Object?> row) {
+      return UnaddedSms(
+        id: row['id']! as int,
+        body: row['body']! as String,
+        receivedAt: DateTime.fromMillisecondsSinceEpoch(row['received_at']! as int),
+      );
+    }).toList();
+  }
+
+  Future<void> addUnaddedSms(String body, DateTime receivedAt) async {
+    await (await database).insert(
+      'unadded_sms',
+      <String, Object?>{
+        'body': body,
+        'received_at': receivedAt.millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+  }
+
+  Future<void> deleteUnaddedSms(int id) async {
+    await (await database).delete('unadded_sms', where: 'id = ?', whereArgs: <Object?>[id]);
   }
 }

@@ -135,6 +135,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   List<ExpenseCategory> _categories = <ExpenseCategory>[];
   bool _loading = true;
   bool _scanning = false;
+  List<UnaddedSms> _unaddedSms = const <UnaddedSms>[];
+
+  Future<void> _fetchUnadded() async {
+    final msgs = await _db.unaddedSms();
+    if (mounted) setState(() => _unaddedSms = msgs);
+  }
   bool _smsListening = false;
   HomeTab _tab = HomeTab.dashboard;
 
@@ -297,7 +303,14 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// Handles incoming SMS in real time while the app is in the foreground.
   Future<void> _handleIncomingSms(InboxSms sms) => _serializeSms(() async {
     final parsed = SmsParser.parse(sms.body, receivedAt: sms.receivedAt);
-    if (parsed == null) return; // not a transaction alert
+    if (parsed == null) {
+      if (SmsParser.looksLikeTransaction(sms.body)) {
+        await _db.addUnaddedSms(sms.body, sms.receivedAt ?? DateTime.now());
+        if (mounted) setState(() {});
+        _fetchUnadded();
+      }
+      return;
+    }
 
     final id = await _db.insertParsed(parsed);
     if (id == 0) return; // already recorded or deleted
@@ -343,6 +356,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     if (result != null && since == null && result.added > 0) {
       _toast('Imported ${result.added} transaction(s) from your inbox.');
     }
+    _fetchUnadded();
   }
 
   /// One pass over the inbox. The caller owns the permission check. Returns
@@ -365,7 +379,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         if (at != null && (newest == null || at.isAfter(newest))) newest = at;
 
         final parsed = SmsParser.parse(sms.body, receivedAt: at);
-        if (parsed == null) continue; // OTP, promo, statement alert
+        if (parsed == null) {
+          if (SmsParser.looksLikeTransaction(sms.body)) {
+            await _db.addUnaddedSms(sms.body, at ?? DateTime.now());
+          }
+          continue;
+        }
         final id = await _db.insertParsed(parsed);
         if (id == 0) {
           skipped++;
@@ -854,6 +873,105 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   /// [visible] is what the filters currently leave on screen. Select all means
   /// all of *those* — marking rows a filter has hidden would hand the delete
   /// button transactions the user cannot see.
+  Widget _inboxAction() {
+    return Stack(
+      alignment: Alignment.center,
+      children: <Widget>[
+        IconButton(
+          icon: const Icon(Icons.inbox),
+          tooltip: 'Unadded SMS',
+          onPressed: _showUnaddedSmsSheet,
+        ),
+        if (_unaddedSms.isNotEmpty)
+          Positioned(
+            right: 8,
+            top: 8,
+            child: Container(
+              padding: const EdgeInsets.all(4),
+              decoration: const BoxDecoration(
+                color: Colors.red,
+                shape: BoxShape.circle,
+              ),
+              child: Text(
+                '${_unaddedSms.length}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  void _showUnaddedSmsSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            if (_unaddedSms.isEmpty) {
+              return const SafeArea(
+                child: Padding(
+                  padding: EdgeInsets.all(32.0),
+                  child: Text('No pending unadded SMS.', textAlign: TextAlign.center),
+                ),
+              );
+            }
+            return DraggableScrollableSheet(
+              expand: false,
+              builder: (context, scrollController) {
+                return ListView.builder(
+                  controller: scrollController,
+                  itemCount: _unaddedSms.length,
+                  itemBuilder: (context, i) {
+                    final msg = _unaddedSms[i];
+                    return ListTile(
+                      title: Text(msg.body, maxLines: 2, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(msg.receivedAt.toString()),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.close),
+                        onPressed: () async {
+                          await _db.deleteUnaddedSms(msg.id);
+                          await _fetchUnadded();
+                          setSheetState(() {});
+                        },
+                      ),
+                      onTap: () {
+                        Navigator.pop(context);
+                        _addFromUnadded(msg);
+                      },
+                    );
+                  },
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _addFromUnadded(UnaddedSms msg) async {
+    final ExpenseCategory? category = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AddTransactionScreen(
+          categories: _categories,
+          merchants: _derive().merchants,
+          initialSmsBody: msg.body,
+        ),
+      ),
+    );
+    if (category != null) {
+      await _db.deleteUnaddedSms(msg.id);
+      await _fetchUnadded();
+    }
+  }
+
   AppBar _selectionAppBar(List<LedgerEntry> visible) {
     return AppBar(
       leading: IconButton(
@@ -883,6 +1001,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
     return AppBar(
       title: const Text('Transactions'),
       actions: <Widget>[
+        _inboxAction(),
         if (_scanning)
           const Center(
             child: Padding(
@@ -964,7 +1083,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             : switch (_tab) {
                 HomeTab.dashboard => AppBar(
                     title: const Text('Dashboard'),
-                    actions: <Widget>[_connectionDot()],
+                    actions: <Widget>[_inboxAction(), _connectionDot()],
                   ),
                 // The scan and Deleted actions live here and only here. Two
                 // entry points to a mutating action on two screens is a footgun.

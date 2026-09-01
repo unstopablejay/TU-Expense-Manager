@@ -96,7 +96,6 @@ const String _date = r'(?<date>'
     r'|\d{1,2}-[A-Za-z]{3}-\d{2,4}' //                          11-Aug-26
     r'|\d{1,2}[A-Za-z]{3}\d{2,4}' //                            11Aug26
     r'|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}' //                        10/08/26
-    r'|\d{1,2}[-/]\d{1,2}' //                                   01-09
     r')';
 
 /// Optional "Ref 213313774670" / "Refno 123456789" / "UTR: 123456789" directly
@@ -110,22 +109,6 @@ class SmsParser {
   static final List<SmsTemplate> templates = <SmsTemplate>[
     // -- Verified against real messages -----------------------------------
 
-    /// `Amt Deducted! Rs.11500 from your HDFC Bank A/c XX0444 for NEFT txn via HDFC Bank Online Banking Not you?...`
-    SmsTemplate(
-      id: 'hdfc_amt_deducted',
-      direction: TxnDirection.debit,
-      pattern: _re('Amt Deducted!\\s+$_cur$_amt\\s+from your\\s+'
-          r'(?<instrument>[^\n]*?)\s+for\s+(?<merchant>.*?)(?:\s+Not you\?.*)?$'),
-    ),
-
-    /// `Txn Rs.755.00\nOn HDFC Bank Card 8174\nAt hathwaymobileapp.76062993\nby UPI 250214536533\nOn 01-09...`
-    SmsTemplate(
-      id: 'hdfc_card_txn',
-      direction: TxnDirection.debit,
-      pattern: _re('Txn\\s+$_cur$_amt\\s+On\\s+'
-          r'(?<instrument>[^\n]*?)\s+At\s+(?<merchant>[^\n]*?)\s+(?:by|Ref)\s*(?:UPI)?\s*(?<ref>\w+)\s+On\s+'
-          '$_date'),
-    ),
     /// `INR 204.00 spent on YES BANK Card X2858 @UPI_GEORGE EGG CENTRE
     ///  13-08-2026 09:21:35 am. Avl Lmt INR 281,496.08.`
     /// `INR 750.00 spent on YES BANK Card X2858 @UPI_VALLI A 23-08-2026 10:29:37 am.`
@@ -249,6 +232,11 @@ class SmsParser {
 
   static RegExp _re(String source) => RegExp(source, caseSensitive: false);
 
+  /// Fallback check for messages that failed strict parsing but still look like transactions.
+  static bool looksLikeTransaction(String body) {
+    return RegExp(r'\b(rs\.?|inr|spent|debited|credited|txn|deducted)\b', caseSensitive: false).hasMatch(body);
+  }
+
   /// Returns `null` when no template matches, which is how OTPs, promos and
   /// statement alerts get filtered out.
   ///
@@ -266,15 +254,8 @@ class SmsParser {
           double.tryParse((_group(match, 'amount') ?? '').replaceAll(',', ''));
       if (amount == null || amount <= 0) continue;
 
-      _Stamp? stamp;
-      if (match.groupNames.contains('date')) {
-        stamp = _parseDate(_group(match, 'date') ?? '');
-        if (stamp == null) continue;
-      } else if (receivedAt != null) {
-        stamp = _Stamp(receivedAt, hasTime: true);
-      } else {
-        stamp = _Stamp(DateTime.now(), hasTime: true);
-      }
+      final stamp = _parseDate(_group(match, 'date') ?? '');
+      if (stamp == null) continue;
 
       final merchant = cleanMerchantName(_group(match, 'merchant') ?? '');
       if (merchant.isEmpty) continue;
@@ -335,7 +316,6 @@ class SmsParser {
       RegExp(r'^(\d{4})-(\d{2})-(\d{2}):(\d{2}):(\d{2}):(\d{2})$');
 
   /// `dd-MM-yyyy`, `dd/MM/yy`, each with an optional `HH:mm[:ss]` and `am`/`pm`.
-  static final RegExp _numericShort = RegExp(r'^(\d{1,2})[-/](\d{1,2})$');
   static final RegExp _numeric = RegExp(
     r'^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})'
     r'(?:\s+(?:at\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(am|pm)?)?$',
@@ -366,19 +346,6 @@ class SmsParser {
         minute: int.parse(iso.group(5)!),
         second: int.parse(iso.group(6)!),
         hasTime: true,
-      );
-    }
-
-    final numericShort = _numericShort.firstMatch(value);
-    if (numericShort != null) {
-      return _build(
-        year: DateTime.now().year,
-        month: int.parse(numericShort.group(2)!),
-        day: int.parse(numericShort.group(1)!),
-        hour: 0,
-        minute: 0,
-        second: 0,
-        hasTime: false,
       );
     }
 
