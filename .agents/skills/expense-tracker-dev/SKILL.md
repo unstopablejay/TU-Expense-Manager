@@ -138,6 +138,10 @@ When filters change:
   - **`CoinProgressBar`**: Pill-shaped capsule progress track with animated multi-stop gradient shimmer sweep.
   - **`LoadingModal` & `withLoadingModal<T>()`**: Reusable non-dismissible modal dialog and async wrapper that provides clear visual feedback during blocking operations (initial SMS parsing, manual inbox rescans, database export/restore, server sync, authentication, and batch tombstone restores), ensuring clean dismissal in `finally` blocks upon completion or error.
   - **`LoadingOverlay`**: Scoped container-level loading overlay.
+- **`UndoToast` Floating Custom Notification (`lib/src/mobile/widgets/undo_toast.dart`)**:
+  - **Overlay Queue**: Replaces native `SnackBar` for destructive actions (deletions, merges). Floats above the bottom navigation bar with a dark card UI.
+  - **Animation & Dismiss**: Pops in via scale/fade. Auto-dismisses after 10 seconds via a visible shrinking `LinearProgressIndicator` timer bar at the bottom of the card, or manually via an `X` icon.
+  - **Context Requirement**: Every screen utilizing the toast (e.g., `HomeShell`, `MergeNamesScreen`, `CategoriesScreen`) must wrap its root `Scaffold` in an `UndoToast()` widget to provide local scoped state. Call via `UndoToast.controllerOf(context).show(message: ..., onUndo: () async { ... });`.
 
 ---
 
