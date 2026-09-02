@@ -974,10 +974,10 @@ void main() {
     group('spendByCategory', () {
       test('attributes a split across all of its lines', () {
         final breakdown = spendByCategory(applyFilters(<ExpenseTxn>[amazon]));
-        expect(breakdown, <String, double>{
-          'Grocery': 1200,
-          'Snacks': 500,
-          'Shopping': 300,
+        expect(breakdown, <CategoryIdentity, double>{
+          const CategoryIdentity('Grocery', null): 1200,
+          const CategoryIdentity('Snacks', null): 500,
+          const CategoryIdentity('Shopping', null): 300,
         });
       });
 
@@ -989,12 +989,12 @@ void main() {
 
       test('credits are left out of the breakdown', () {
         // id 4 is the only credit, and the only thing under Salary.
-        expect(spendByCategory(applyFilters(ledger)).containsKey('Salary'),
+        expect(spendByCategory(applyFilters(ledger)).containsKey(const CategoryIdentity('Salary', null)),
             isFalse);
       });
 
       test('adds up rows sharing a category', () {
-        expect(spendByCategory(applyFilters(ledger))['Food'], 200);
+        expect(spendByCategory(applyFilters(ledger))[const CategoryIdentity('Food', null)], 200);
       });
     });
 
@@ -1063,8 +1063,8 @@ void main() {
         ];
         final byMonth = spendByCategoryPerMonth(applyFilters(spread));
         expect(byMonth[const YearMonth(2026, 8)],
-            <String, double>{'Food': 200, 'Fuel': 100});
-        expect(byMonth[const YearMonth(2026, 7)], <String, double>{'Food': 250});
+            <CategoryIdentity, double>{const CategoryIdentity('Food', null): 200, const CategoryIdentity('Fuel', null): 100});
+        expect(byMonth[const YearMonth(2026, 7)], <CategoryIdentity, double>{const CategoryIdentity('Food', null): 250});
       });
 
       test('credits are left out, so a month of refunds is absent', () {
@@ -1073,17 +1073,17 @@ void main() {
               direction: TxnDirection.credit, date: DateTime(2026, 7, 1)),
         ];
         expect(spendByCategoryPerMonth(applyFilters(credits)),
-            <YearMonth, Map<String, double>>{const YearMonth(2026, 7): <String, double>{}});
+            <YearMonth, Map<CategoryIdentity, double>>{const YearMonth(2026, 7): <CategoryIdentity, double>{}});
       });
 
       test('a split is attributed across its lines in its own month', () {
         expect(
           spendByCategoryPerMonth(applyFilters(<ExpenseTxn>[amazon])),
-          <YearMonth, Map<String, double>>{
-            const YearMonth(2026, 8): <String, double>{
-              'Grocery': 1200,
-              'Snacks': 500,
-              'Shopping': 300,
+          <YearMonth, Map<CategoryIdentity, double>>{
+            const YearMonth(2026, 8): <CategoryIdentity, double>{
+              const CategoryIdentity('Grocery', null): 1200,
+              const CategoryIdentity('Snacks', null): 500,
+              const CategoryIdentity('Shopping', null): 300,
             },
           },
         );
@@ -1768,10 +1768,10 @@ void main() {
 
   group('topCategories', () {
     test('ranks descending with shares that sum to one', () {
-      final slices = topCategories(<String, double>{
-        'Food': 300,
-        'Fuel': 100,
-        'Grocery': 600,
+      final slices = topCategories(<CategoryIdentity, double>{
+        const CategoryIdentity('Food', null): 300,
+        const CategoryIdentity('Fuel', null): 100,
+        const CategoryIdentity('Grocery', null): 600,
       });
       expect(slices.map((CategorySlice s) => s.name), <String>['Grocery', 'Food', 'Fuel']);
       expect(slices.first.share, closeTo(0.6, 0.0001));
@@ -1782,14 +1782,14 @@ void main() {
     });
 
     test('a breakdown within the cap invents no Other', () {
-      final slices = topCategories(<String, double>{'Food': 300, 'Fuel': 100});
+      final slices = topCategories(<CategoryIdentity, double>{const CategoryIdentity('Food', null): 300, const CategoryIdentity('Fuel', null): 100});
       expect(slices, hasLength(2));
       expect(slices.map((CategorySlice s) => s.name), isNot(contains('Other')));
     });
 
     test('the tail folds into one Other, and the total stays honest', () {
-      final slices = topCategories(<String, double>{
-        'A': 100, 'B': 90, 'C': 80, 'D': 70, 'E': 60, 'F': 50, 'G': 40, 'H': 30,
+      final slices = topCategories(<CategoryIdentity, double>{
+        const CategoryIdentity('A', null): 100, const CategoryIdentity('B', null): 90, const CategoryIdentity('C', null): 80, const CategoryIdentity('D', null): 70, const CategoryIdentity('E', null): 60, const CategoryIdentity('F', null): 50, const CategoryIdentity('G', null): 40, const CategoryIdentity('H', null): 30,
       });
       expect(slices, hasLength(6));
       expect(slices.last.name, 'Other');
@@ -1802,7 +1802,7 @@ void main() {
 
     test('respects a different limit', () {
       final slices = topCategories(
-        <String, double>{'A': 100, 'B': 90, 'C': 80, 'D': 70},
+        <CategoryIdentity, double>{const CategoryIdentity('A', null): 100, const CategoryIdentity('B', null): 90, const CategoryIdentity('C', null): 80, const CategoryIdentity('D', null): 70},
         limit: 3,
       );
       expect(slices, hasLength(3));
@@ -1811,8 +1811,8 @@ void main() {
     });
 
     test('nothing spent is no slices, not a division by zero', () {
-      expect(topCategories(const <String, double>{}), isEmpty);
-      expect(topCategories(<String, double>{'Food': 0}), isEmpty);
+      expect(topCategories(const <CategoryIdentity, double>{}), isEmpty);
+      expect(topCategories(<CategoryIdentity, double>{const CategoryIdentity('Food', null): 0}), isEmpty);
     });
   });
 
