@@ -1111,9 +1111,9 @@ class _SummaryStrip extends StatelessWidget {
         entries.where((LedgerEntry e) => e.txn.isUncategorized).length;
 
     // Only debits are broken down: a refund is not spending.
-    final List<MapEntry<String, double>> breakdown =
+    final List<MapEntry<CategoryIdentity, double>> breakdown =
         spendByCategory(entries).entries.toList()
-          ..sort((MapEntry<String, double> a, MapEntry<String, double> b) =>
+          ..sort((MapEntry<CategoryIdentity, double> a, MapEntry<CategoryIdentity, double> b) =>
               b.value.compareTo(a.value));
 
     final Map<String, String> categoryIcons = <String, String>{
@@ -1159,11 +1159,12 @@ class _SummaryStrip extends StatelessWidget {
           if (uncategorized > 0)
             _figure(theme, 'Need a category', '$uncategorized',
                 theme.colorScheme.error),
-          for (final MapEntry<String, double> item in breakdown.take(3))
+          for (final MapEntry<CategoryIdentity, double> item in breakdown.take(3))
             Chip(
               avatar: CategoryAvatar(
-                category: item.key,
-                explicitIcon: categoryIcons[item.key],
+                category: item.key.name,
+                explicitIcon: categoryIcons[item.key.name],
+                explicitColor: item.key.color,
                 size: 18,
                 fontSize: 13,
                 iconSize: 13,
@@ -1171,7 +1172,7 @@ class _SummaryStrip extends StatelessWidget {
                 backgroundColor: Colors.transparent,
                 borderColor: Colors.transparent,
               ),
-              label: Text('${item.key} · ${money.format(item.value)}'),
+              label: Text('${item.key.name} · ${money.format(item.value)}'),
               visualDensity: VisualDensity.compact,
               side: BorderSide(color: theme.colorScheme.outlineVariant),
             ),

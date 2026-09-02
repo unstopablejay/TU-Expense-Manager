@@ -684,8 +684,9 @@ class _SummaryHeader extends StatelessWidget {
                 for (final entry in breakdown.take(6))
                   Chip(
                     avatar: CategoryAvatar(
-                      category: entry.key,
-                      explicitIcon: categoryIcons[entry.key],
+                      category: entry.key.name,
+                      explicitIcon: categoryIcons[entry.key.name],
+                      explicitColor: entry.key.color,
                       size: 20,
                       fontSize: 14,
                       iconSize: 14,

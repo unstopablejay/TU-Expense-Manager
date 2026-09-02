@@ -95,7 +95,7 @@ class _DashboardTabState extends State<DashboardTab> {
     final List<LedgerEntry> entries =
         applyFilters(widget.transactions, months: widget.months);
     final totals = periodTotals(entries);
-    final Map<String, double> byCategory = spendByCategory(entries);
+    final Map<CategoryIdentity, double> byCategory = spendByCategory(entries);
     final List<DashboardView> views = availableViews(widget.months);
     // The remembered choice can fall out of the offered list — "Compare
     // months" survives a narrow back to one month — so it is only ever
@@ -254,7 +254,7 @@ class _DashboardChartCard extends StatelessWidget {
   final DashboardView view;
   final List<DashboardView> views;
   final ValueChanged<DashboardView> onViewChanged;
-  final Map<String, double> byCategory;
+  final Map<CategoryIdentity, double> byCategory;
   final Map<String, String> categoryIcons;
   final List<LedgerEntry> entries;
   final Set<YearMonth> months;
@@ -410,7 +410,7 @@ class _PieBody extends StatelessWidget {
     this.categoryIcons = const <String, String>{},
   });
 
-  final Map<String, double> byCategory;
+  final Map<CategoryIdentity, double> byCategory;
   final NumberFormat money;
   final Map<String, String> categoryIcons;
 
@@ -433,7 +433,7 @@ class _PieBody extends StatelessWidget {
                 for (final CategorySlice slice in slices)
                   PieChartSectionData(
                     value: slice.amount,
-                    color: categoryColor(slice.name, brightness),
+                    color: categoryColor(slice.name, brightness, explicitColor: slice.color),
                     radius: 34,
                     showTitle: false,
                   ),
@@ -462,7 +462,7 @@ class _BarsBody extends StatelessWidget {
     this.categoryIcons = const <String, String>{},
   });
 
-  final Map<String, double> byCategory;
+  final Map<CategoryIdentity, double> byCategory;
   final NumberFormat money;
   final Map<String, String> categoryIcons;
 
@@ -535,7 +535,7 @@ class _BarsBody extends StatelessWidget {
                           height: 8,
                           width: c.maxWidth *
                               (maxAmount == 0 ? 0 : slice.amount / maxAmount),
-                          color: categoryColor(slice.name, brightness),
+                          color: categoryColor(slice.name, brightness, explicitColor: slice.color),
                         ),
                       ],
                     ),
@@ -558,7 +558,7 @@ class _TableBody extends StatelessWidget {
     this.categoryIcons = const <String, String>{},
   });
 
-  final Map<String, double> byCategory;
+  final Map<CategoryIdentity, double> byCategory;
   final NumberFormat money;
   final Map<String, String> categoryIcons;
 
@@ -611,7 +611,7 @@ class _CategoryRow extends StatelessWidget {
             width: 12,
             height: 12,
             decoration: BoxDecoration(
-              color: categoryColor(slice.name, brightness),
+              color: categoryColor(slice.name, brightness, explicitColor: slice.color),
               borderRadius: BorderRadius.circular(3),
             ),
           ),
@@ -814,7 +814,7 @@ class _CompareMonthsBody extends StatelessWidget {
     final theme = Theme.of(context);
     final Brightness brightness = theme.brightness;
 
-    final Map<YearMonth, Map<String, double>> perMonth =
+    final Map<YearMonth, Map<CategoryIdentity, double>> perMonth =
         spendByCategoryPerMonth(entries);
     final List<YearMonth> axis = comparedMonths(months);
     // The categories worth drawing, ranked over the whole period so the groups
@@ -825,8 +825,8 @@ class _CompareMonthsBody extends StatelessWidget {
     );
     final List<Color> monthColors = chartHues(brightness);
 
-    double amountFor(YearMonth m, String category) =>
-        perMonth[m]?[category] ?? 0;
+    double amountFor(YearMonth m, CategorySlice s) =>
+        perMonth[m]?[CategoryIdentity(s.name, s.color)] ?? 0;
 
     // "Other" is a bucket, not a category, so it cannot be looked up per month.
     final List<CategorySlice> groups = ranked
@@ -835,7 +835,7 @@ class _CompareMonthsBody extends StatelessWidget {
 
     final double maxY = <double>[
       for (final CategorySlice s in groups)
-        for (final YearMonth m in axis) amountFor(m, s.name),
+        for (final YearMonth m in axis) amountFor(m, s),
       1,
     ].reduce((double a, double b) => a > b ? a : b);
 
@@ -939,7 +939,7 @@ class _CompareMonthsBody extends StatelessWidget {
                     barRods: <BarChartRodData>[
                       for (int i = 0; i < axis.length; i++)
                         BarChartRodData(
-                          toY: amountFor(axis[i], groups[g].name),
+                          toY: amountFor(axis[i], groups[g]),
                           width: 10,
                           color: monthColors[i % monthColors.length],
                           borderRadius: const BorderRadius.vertical(

@@ -62,9 +62,10 @@ class AppDatabase {
   Future<void> _onCreate(Database db, int version) async {
     await db.execute('''
       CREATE TABLE categories (
-        id   INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-        icon TEXT NOT NULL DEFAULT ''
+        id    INTEGER PRIMARY KEY AUTOINCREMENT,
+        name  TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        icon  TEXT NOT NULL DEFAULT '',
+        color INTEGER
       )
     ''');
 
@@ -340,6 +341,10 @@ class AppDatabase {
       }
     }
 
+    if (oldVersion < 12) {
+      await db.execute('ALTER TABLE categories ADD COLUMN color INTEGER');
+    }
+
     if (oldVersion < 9) {
       // 1. Clean merchant_mappings
       final mappings = await db.query('merchant_mappings');
@@ -497,17 +502,17 @@ class AppDatabase {
     return rows.map(ExpenseCategory.fromMap).toList();
   }
 
-  Future<ExpenseCategory> addCategory(String name, {String icon = ''}) async {
+  Future<ExpenseCategory> addCategory(String name, {String icon = '', int? color}) async {
     final db = await database;
     final clean = name.trim();
     final cleanIcon =
         icon.trim().isNotEmpty ? icon.trim() : categoryEmoji(clean);
     final id = await db.insert(
       'categories',
-      <String, Object?>{'name': clean, 'icon': cleanIcon},
+      <String, Object?>{'name': clean, 'icon': cleanIcon, 'color': color},
       conflictAlgorithm: ConflictAlgorithm.ignore,
     );
-    if (id != 0) return ExpenseCategory(id: id, name: clean, icon: cleanIcon);
+    if (id != 0) return ExpenseCategory(id: id, name: clean, icon: cleanIcon, color: color);
 
     // Name already exists (UNIQUE NOCASE) — update icon if non-empty and reuse existing row.
     if (icon.trim().isNotEmpty) {
@@ -531,6 +536,7 @@ class AppDatabase {
     int id, {
     required String name,
     required String icon,
+    int? color,
   }) async {
     final db = await database;
     final cleanName = name.trim();
@@ -541,6 +547,7 @@ class AppDatabase {
       <String, Object?>{
         'name': cleanName,
         'icon': cleanIcon,
+        'color': color,
       },
       where: 'id = ?',
       whereArgs: <Object?>[id],
@@ -559,7 +566,7 @@ class AppDatabase {
     final rows = await db.rawQuery('''
       SELECT t.id, t.amount, t.payment_type, t.merchant, t.date, t.category_id,
              t.direction, t.reference, t.note, c.name AS category_name,
-             c.icon AS category_icon
+             c.icon AS category_icon, c.color AS category_color
       FROM transactions t
       JOIN categories c ON c.id = t.category_id
       ORDER BY t.date DESC, t.id DESC
@@ -569,7 +576,7 @@ class AppDatabase {
     // were actually split, so it stays a great deal smaller than the ledger.
     final splitRows = await db.rawQuery('''
       SELECT s.transaction_id, s.category_id, s.amount, c.name AS category_name,
-             c.icon AS category_icon
+             c.icon AS category_icon, c.color AS category_color
       FROM transaction_splits s
       JOIN categories c ON c.id = s.category_id
       ORDER BY s.transaction_id, s.position, s.id
@@ -661,7 +668,7 @@ class AppDatabase {
     final db = await database;
     final rows = await db.rawQuery('''
       SELECT s.category_id, s.amount, c.name AS category_name,
-             c.icon AS category_icon
+             c.icon AS category_icon, c.color AS category_color
       FROM transaction_splits s
       JOIN categories c ON c.id = s.category_id
       WHERE s.transaction_id = ?
@@ -878,6 +885,7 @@ class AppDatabase {
         categoryId: category.id,
         categoryName: category.name,
         categoryIcon: category.icon,
+        categoryColor: category.color,
         transactionIds: transactionIds,
         splitIds: splitIds,
         merchantNames: merchantNames,
@@ -902,6 +910,7 @@ class AppDatabase {
           'id': deletion.categoryId,
           'name': deletion.categoryName,
           'icon': deletion.categoryIcon,
+          'color': deletion.categoryColor,
         },
         conflictAlgorithm: ConflictAlgorithm.ignore,
       );
@@ -1483,7 +1492,8 @@ class AppDatabase {
       SELECT d.amount, d.merchant, d.date, d.direction, d.reference,
              d.payment_type, d.category_id, d.original_id, d.deleted_at,
              d.splits_json, d.note,
-             c.name AS category_name, c.icon AS category_icon
+             c.name AS category_name, c.icon AS category_icon,
+             c.color AS category_color
       FROM deleted_transactions d
       LEFT JOIN categories c ON c.id = d.category_id
       ORDER BY d.deleted_at DESC, d.date DESC
