@@ -19,6 +19,7 @@ class TxnSplit {
     required this.categoryId,
     required this.categoryName,
     this.categoryIcon = '',
+    this.categoryColor,
     required this.amount,
   });
 
@@ -28,18 +29,22 @@ class TxnSplit {
         categoryIcon: (map['category_icon'] as String?) ??
             (map['icon'] as String?) ??
             '',
+        categoryColor: (map['category_color'] as int?) ??
+            (map['color'] as int?),
         amount: (map['amount'] as num).toDouble(),
       );
 
   final int categoryId;
   final String categoryName;
   final String categoryIcon;
+  final int? categoryColor;
   final double amount;
 
   Map<String, Object?> toJson() => <String, Object?>{
         'category_id': categoryId,
         'name': categoryName,
         'icon': categoryIcon,
+        'color': categoryColor,
         'amount': amount,
       };
 }

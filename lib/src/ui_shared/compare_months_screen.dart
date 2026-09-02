@@ -113,9 +113,9 @@ class _CompareMonthsScreenState extends State<CompareMonthsScreen> {
     }
     pureIncome.addAll(allIncome.difference(allExpense));
 
-    final categoryNames = <String>{
+    final categoryNames = <CategoryIdentity>{
       for (final m in axis) ...?(perMonth[m]?.keys),
-    }.where((c) => c != kOtherCategory).toList()
+    }.where((c) => c.name != kOtherCategory).toList()
       ..sort((a, b) {
         final ta = axis.fold<double>(0, (s, m) => s + (perMonth[m]?[a] ?? 0));
         final tb = axis.fold<double>(0, (s, m) => s + (perMonth[m]?[b] ?? 0));
@@ -279,8 +279,8 @@ class _CategoryCompareTable extends StatelessWidget {
   });
 
   final List<YearMonth> axis;
-  final List<String> categories;
-  final Map<YearMonth, Map<String, double>> perMonth;
+  final List<CategoryIdentity> categories;
+  final Map<YearMonth, Map<CategoryIdentity, double>> perMonth;
   final Map<YearMonth, double> totals;
   final NumberFormat money;
   final Map<String, String> categoryIcons;
@@ -351,8 +351,9 @@ class _CategoryCompareTable extends StatelessWidget {
                   child: Row(
                     children: [
                       CategoryAvatar(
-                        category: cat,
-                        explicitIcon: categoryIcons[cat],
+                        category: cat.name,
+                        explicitIcon: categoryIcons[cat.name],
+                        explicitColor: cat.color,
                         size: 20,
                         fontSize: 14,
                         iconSize: 14,
@@ -363,7 +364,7 @@ class _CategoryCompareTable extends StatelessWidget {
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
-                          cat,
+                          cat.name,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: theme.textTheme.bodyMedium,
@@ -394,7 +395,7 @@ class _CategoryCompareTable extends StatelessWidget {
                             a: perMonth[axis[0]]?[cat] ?? 0,
                             b: perMonth[axis[1]]?[cat] ?? 0,
                             money: money,
-                            isIncome: pureIncome.contains(cat),
+                            isIncome: pureIncome.contains(cat.name),
                             amtWidth: deltaAmtWidth,
                             pctWidth: deltaPctWidth,
                           ),

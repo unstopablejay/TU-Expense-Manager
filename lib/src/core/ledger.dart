@@ -250,19 +250,41 @@ double amountIn(ExpenseTxn t, Set<int>? categoryIds) {
       .fold<double>(0, (double sum, TxnSplit l) => sum + l.amount);
 }
 
-/// Spend by category name over an already-filtered view. Debits only — a refund
-/// is not spending.
+class CategoryIdentity {
+  const CategoryIdentity(this.name, this.color);
+  final String name;
+  final int? color;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CategoryIdentity &&
+          runtimeType == other.runtimeType &&
+          name == other.name;
+
+  @override
+  int get hashCode => name.hashCode;
+}
+
+/// Spend by category over the whole period — what the doughnut chart plots.
+///
+/// Credits (income) are left out entirely. A chart of outgoings loses all shape
+/// if it has to plot a huge money-in wedge beside them, and the question it
+/// answers is what *was* spent, not whether it exceeds what was brought in: it
+/// is a breakdown, not a budget. If nothing was spent, the map is empty, which
+/// is not the same as a map summing to zero because there was as much income
+/// as there was spending.
 ///
 /// Iterates split lines, so a transaction split across three categories is
 /// attributed to all three rather than landing wholly under whichever one
 /// happens to be its dominant line.
-Map<String, double> spendByCategory(List<LedgerEntry> entries) {
-  final Map<String, double> byCategory = <String, double>{};
+Map<CategoryIdentity, double> spendByCategory(List<LedgerEntry> entries) {
+  final Map<CategoryIdentity, double> byCategory = <CategoryIdentity, double>{};
   for (final LedgerEntry entry in entries) {
     if (entry.txn.isCredit) continue;
     for (final TxnSplit line in entry.lines) {
-      byCategory[line.categoryName] =
-          (byCategory[line.categoryName] ?? 0) + line.amount;
+      final key = CategoryIdentity(line.categoryName, line.categoryColor);
+      byCategory[key] = (byCategory[key] ?? 0) + line.amount;
     }
   }
   return byCategory;
@@ -273,7 +295,7 @@ Map<String, double> spendByCategory(List<LedgerEntry> entries) {
 /// Same two rules as [spendByCategory], which it defers to per bucket: credits
 /// are left out, and a split is attributed to every category it touches, in the
 /// month it happened.
-Map<YearMonth, Map<String, double>> spendByCategoryPerMonth(
+Map<YearMonth, Map<CategoryIdentity, double>> spendByCategoryPerMonth(
   List<LedgerEntry> entries,
 ) {
   final Map<YearMonth, List<LedgerEntry>> byMonth =
@@ -283,7 +305,7 @@ Map<YearMonth, Map<String, double>> spendByCategoryPerMonth(
         .add(entry);
   }
   return byMonth.map((YearMonth m, List<LedgerEntry> rows) =>
-      MapEntry<YearMonth, Map<String, double>>(m, spendByCategory(rows)));
+      MapEntry<YearMonth, Map<CategoryIdentity, double>>(m, spendByCategory(rows)));
 }
 
 /// Spend by day-of-month, per month — what the trend chart plots.
@@ -349,11 +371,13 @@ double? deltaPercent(double a, double b) =>
 class CategorySlice {
   const CategorySlice({
     required this.name,
+    this.color,
     required this.amount,
     required this.share,
   });
 
   final String name;
+  final int? color;
   final double amount;
 
   /// 0–1 of the period's spend. Zero when nothing was spent at all, rather
@@ -375,34 +399,34 @@ const String kOtherCategory = 'Other';
 /// Nothing is invented: a breakdown already within the cap comes back as it is,
 /// with no empty "Other" appended.
 List<CategorySlice> topCategories(
-  Map<String, double> byCategory, {
+  Map<CategoryIdentity, double> byCategory, {
   int limit = 6,
 }) {
-  final List<MapEntry<String, double>> ranked = byCategory.entries
-      .where((MapEntry<String, double> e) => e.value > 0)
+  final List<MapEntry<CategoryIdentity, double>> ranked = byCategory.entries
+      .where((MapEntry<CategoryIdentity, double> e) => e.value > 0)
       .toList()
-    ..sort((MapEntry<String, double> a, MapEntry<String, double> b) =>
+    ..sort((MapEntry<CategoryIdentity, double> a, MapEntry<CategoryIdentity, double> b) =>
         b.value.compareTo(a.value));
   if (ranked.isEmpty) return const <CategorySlice>[];
 
   final double total =
-      ranked.fold<double>(0, (double sum, MapEntry<String, double> e) => sum + e.value);
+      ranked.fold<double>(0, (double sum, MapEntry<CategoryIdentity, double> e) => sum + e.value);
   double shareOf(double amount) => total == 0 ? 0 : amount / total;
 
   if (ranked.length <= limit) {
     return <CategorySlice>[
-      for (final MapEntry<String, double> e in ranked)
-        CategorySlice(name: e.key, amount: e.value, share: shareOf(e.value)),
+      for (final MapEntry<CategoryIdentity, double> e in ranked)
+        CategorySlice(name: e.key.name, color: e.key.color, amount: e.value, share: shareOf(e.value)),
     ];
   }
 
-  final List<MapEntry<String, double>> head = ranked.take(limit - 1).toList();
+  final List<MapEntry<CategoryIdentity, double>> head = ranked.take(limit - 1).toList();
   final double tail = ranked
       .skip(limit - 1)
-      .fold<double>(0, (double sum, MapEntry<String, double> e) => sum + e.value);
+      .fold<double>(0, (double sum, MapEntry<CategoryIdentity, double> e) => sum + e.value);
   return <CategorySlice>[
-    for (final MapEntry<String, double> e in head)
-      CategorySlice(name: e.key, amount: e.value, share: shareOf(e.value)),
+    for (final MapEntry<CategoryIdentity, double> e in head)
+      CategorySlice(name: e.key.name, color: e.key.color, amount: e.value, share: shareOf(e.value)),
     CategorySlice(
       name: kOtherCategory,
       amount: tail,

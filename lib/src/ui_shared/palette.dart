@@ -724,10 +724,11 @@ class CategoryAvatar extends StatelessWidget {
   const CategoryAvatar({
     super.key,
     required this.category,
-    this.explicitIcon,
     this.isCredit = false,
-    this.size = 44,
+    this.explicitIcon,
+    this.explicitColor,
     this.fontSize = 22,
+    this.size = 44,
     this.iconSize = 22,
     this.borderRadius = 12,
     this.iconPack,
@@ -736,10 +737,11 @@ class CategoryAvatar extends StatelessWidget {
   });
 
   final String category;
-  final String? explicitIcon;
   final bool isCredit;
-  final double size;
+  final String? explicitIcon;
+  final int? explicitColor;
   final double fontSize;
+  final double size;
   final double iconSize;
   final double borderRadius;
   final AppIconPack? iconPack;
@@ -750,7 +752,7 @@ class CategoryAvatar extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final pack = iconPack ?? ThemeController.instance.appIconPack;
-    final catColor = categoryColor(category, theme.brightness);
+    final catColor = categoryColor(category, theme.brightness, explicitColor: explicitColor);
     final bg = backgroundColor ?? catColor.withValues(alpha: 0.16);
     final border = borderColor ?? catColor.withValues(alpha: 0.35);
 
@@ -797,14 +799,22 @@ class CategoryAvatar extends StatelessWidget {
 /// dark surface — not the light row lightened programmatically, which is how
 /// palettes lose their separation.
 const List<Color> _chartHuesLight = <Color>[
-  Color(0xFF2A78D6), // blue
-  Color(0xFFEB6834), // orange
-  Color(0xFF1BAF7A), // aqua
-  Color(0xFFEDA100), // yellow
-  Color(0xFFE87BA4), // magenta
-  Color(0xFF008300), // green
-  Color(0xFF4A3AA7), // violet
-  Color(0xFFE34948), // red
+  Color(0xFF2A78D6), // 0: blue
+  Color(0xFFEB6834), // 1: orange
+  Color(0xFF1BAF7A), // 2: aqua/teal
+  Color(0xFFEDA100), // 3: yellow
+  Color(0xFFE87BA4), // 4: magenta/pink
+  Color(0xFF008300), // 5: green
+  Color(0xFF4A3AA7), // 6: violet/indigo
+  Color(0xFFE34948), // 7: red
+  Color(0xFF1E88E5), // 8: light blue
+  Color(0xFFD84315), // 9: deep orange
+  Color(0xFF00ACC1), // 10: cyan
+  Color(0xFF8D6E63), // 11: brown
+  Color(0xFF8E24AA), // 12: purple
+  Color(0xFFC0CA33), // 13: lime
+  Color(0xFF546E7A), // 14: blue grey
+  Color(0xFFE53935), // 15: bright red
 ];
 
 const List<Color> _chartHuesDark = <Color>[
@@ -816,6 +826,14 @@ const List<Color> _chartHuesDark = <Color>[
   Color(0xFF008300),
   Color(0xFF9085E9),
   Color(0xFFE66767),
+  Color(0xFF42A5F5),
+  Color(0xFFFF7043),
+  Color(0xFF26C6DA),
+  Color(0xFFA1887F),
+  Color(0xFFAB47BC),
+  Color(0xFFD4E157),
+  Color(0xFF78909C),
+  Color(0xFFEF5350),
 ];
 
 /// The hues for [brightness]. The two lists are separate palettes rather than
@@ -847,8 +865,13 @@ const Map<String, int> _seededCategorySlots = <String, int>{
 /// [kOtherCategory] and Uncategorized are deliberately grey — they are not a
 /// category anyone spent money "on", and giving them a hue would let the tail
 /// of the breakdown compete with the real answers.
-Color categoryColor(String category, Brightness brightness) {
+Color categoryColor(String category, Brightness brightness, {int? explicitColor}) {
   final List<Color> hues = chartHues(brightness);
+  
+  if (explicitColor != null && explicitColor >= 0 && explicitColor < hues.length) {
+    return hues[explicitColor];
+  }
+
   final String key = category.toLowerCase();
   if (key == kOtherCategory.toLowerCase() ||
       key == kUncategorized.toLowerCase()) {
@@ -858,14 +881,15 @@ Color categoryColor(String category, Brightness brightness) {
   }
   final int? seeded = _seededCategorySlots[key];
   if (seeded != null) return hues[seeded];
-  // `hashCode` on a String is stable within a run but not guaranteed across
-  // them, so spell the hash out — a category must not change colour when the
-  // app restarts.
-  var hash = 0;
-  for (final int unit in key.codeUnits) {
-    hash = (hash * 31 + unit) & 0x7fffffff;
+
+  // For unseeded categories, hash the name to pick a stable slot. We only have
+  // 16 slots total. The first 8 were the original ones. We can hash across all 16.
+  // The DJB2 hash gives a nice distribution.
+  int hash = 5381;
+  for (var i = 0; i < key.length; i++) {
+    hash = ((hash << 5) + hash) + key.codeUnitAt(i);
   }
-  return hues[hash % hues.length];
+  return hues[hash.abs() % hues.length];
 }
 
 /// `ColorScheme` has no dependable green role, so money-in gets an explicit

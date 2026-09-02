@@ -15,23 +15,40 @@ class ExpenseCategory {
     required this.id,
     required this.name,
     this.icon = '',
+    this.color,
   });
 
   factory ExpenseCategory.fromMap(Map<String, Object?> map) => ExpenseCategory(
         id: map['id'] as int,
         name: map['name'] as String,
         icon: (map['icon'] as String?) ?? '',
+        color: map['color'] as int?,
       );
 
   final int id;
   final String name;
   final String icon;
+  final int? color;
 
   Map<String, Object?> toMap() => <String, Object?>{
         'id': id,
         'name': name,
         'icon': icon,
+        'color': color,
       };
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ExpenseCategory &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          icon == other.icon &&
+          color == other.color;
+
+  @override
+  int get hashCode => Object.hash(id, name, icon, color);
 }
 
 /// A category together with everything filed under it — what the cleanup screen
@@ -83,6 +100,7 @@ class CategoryDeletion {
     required this.categoryId,
     required this.categoryName,
     this.categoryIcon = '',
+    this.categoryColor,
     required this.transactionIds,
     required this.splitIds,
     required this.merchantNames,
@@ -92,6 +110,7 @@ class CategoryDeletion {
   final int categoryId;
   final String categoryName;
   final String categoryIcon;
+  final int? categoryColor;
   final List<int> transactionIds;
   final List<int> splitIds;
   final List<String> merchantNames;
@@ -228,6 +247,7 @@ class ExpenseTxn {
     required this.categoryId,
     required this.categoryName,
     this.categoryIcon = '',
+    this.categoryColor,
     required this.direction,
     required this.reference,
     this.note = '',
@@ -253,6 +273,8 @@ class ExpenseTxn {
         categoryIcon: (map['category_icon'] as String?) ??
             (map['icon'] as String?) ??
             '',
+        categoryColor: (map['category_color'] as int?) ??
+            (map['color'] as int?),
         direction: (map['direction'] as String?) == 'credit'
             ? TxnDirection.credit
             : TxnDirection.debit,
@@ -271,6 +293,7 @@ class ExpenseTxn {
   final int categoryId;
   final String categoryName;
   final String categoryIcon;
+  final int? categoryColor;
   final TxnDirection direction;
   final String reference;
 
@@ -303,6 +326,7 @@ class ExpenseTxn {
         categoryId: categoryId,
         categoryName: categoryName,
         categoryIcon: categoryIcon,
+        categoryColor: categoryColor,
         direction: direction,
         reference: reference,
         note: note,
@@ -345,6 +369,7 @@ class ExpenseTxn {
             categoryId: categoryId,
             categoryName: categoryName,
             categoryIcon: categoryIcon,
+            categoryColor: categoryColor,
             amount: amount,
           ),
         ]

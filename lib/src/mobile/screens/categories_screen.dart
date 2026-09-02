@@ -70,7 +70,11 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     if (result == null || !mounted) return;
 
     final ExpenseCategory added =
-        await _db.addCategory(result.name, icon: result.icon);
+        await AppDatabase.instance.addCategory(
+      result.name,
+      icon: result.icon,
+      color: result.color,
+    );
     await _load();
     if (!mounted) return;
 
@@ -92,6 +96,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
         initialIcon: usage.category.icon.isNotEmpty
             ? usage.category.icon
             : categoryEmoji(usage.category.name),
+        initialColor: usage.category.color,
         taken: <String>[
           for (final CategoryUsage other in _usage)
             if (other.category.id != usage.category.id) other.category.name,
@@ -104,6 +109,7 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
       usage.category.id,
       name: result.name,
       icon: result.icon,
+      color: result.color,
     );
     await _load();
     if (!mounted) return;
@@ -231,10 +237,11 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
 }
 
 class _CategoryFormResult {
-  const _CategoryFormResult({required this.name, required this.icon});
+  const _CategoryFormResult({required this.name, required this.icon, this.color});
 
   final String name;
   final String icon;
+  final int? color;
 }
 
 /// Names and styles a category with an emoji.
@@ -245,6 +252,7 @@ class _CategoryEditorSheet extends StatefulWidget {
     required this.taken,
     this.initialName = '',
     this.initialIcon = '',
+    this.initialColor,
   });
 
   final String title;
@@ -252,6 +260,7 @@ class _CategoryEditorSheet extends StatefulWidget {
   final List<String> taken;
   final String initialName;
   final String initialIcon;
+  final int? initialColor;
 
   @override
   State<_CategoryEditorSheet> createState() => _CategoryEditorSheetState();
@@ -263,6 +272,7 @@ class _CategoryEditorSheetState extends State<_CategoryEditorSheet> {
   late final TextEditingController _customEmoji =
       TextEditingController(text: widget.initialIcon);
   late String _selectedEmoji;
+  late int? _selectedColor;
   late bool _userPickedEmojiManually;
 
   late final Map<String, String> _taken = <String, String>{
@@ -277,6 +287,7 @@ class _CategoryEditorSheetState extends State<_CategoryEditorSheet> {
         : (widget.initialName.trim().isNotEmpty
             ? categoryEmoji(widget.initialName)
             : '🏷️');
+    _selectedColor = widget.initialColor;
     _userPickedEmojiManually = widget.initialIcon.trim().isNotEmpty;
   }
 
@@ -295,7 +306,7 @@ class _CategoryEditorSheetState extends State<_CategoryEditorSheet> {
         : suggestCategoryEmoji(name);
     Navigator.pop(
       context,
-      _CategoryFormResult(name: name, icon: icon),
+      _CategoryFormResult(name: name, icon: icon, color: _selectedColor),
     );
   }
 
@@ -457,7 +468,73 @@ class _CategoryEditorSheetState extends State<_CategoryEditorSheet> {
                 },
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 16),
+            Text(
+              'Chart color',
+              style: theme.textTheme.labelMedium?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              height: 44,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: 17, // 1 for auto, 16 for hues
+                separatorBuilder: (_, _) => const SizedBox(width: 8),
+                itemBuilder: (BuildContext ctx, int i) {
+                  final bool isAuto = i == 0;
+                  final int? colorIndex = isAuto ? null : i - 1;
+                  final bool isSelected = _selectedColor == colorIndex;
+                  final Color circleColor = isAuto
+                      ? theme.colorScheme.surfaceContainerHighest
+                      : chartHues(theme.brightness)[colorIndex!];
+
+                  return InkWell(
+                    onTap: () {
+                      setState(() {
+                        _selectedColor = colorIndex;
+                      });
+                    },
+                    borderRadius: BorderRadius.circular(22),
+                    child: Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: circleColor,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: isSelected
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
+                          width: isSelected ? 3 : 1,
+                        ),
+                      ),
+                      alignment: Alignment.center,
+                      child: isAuto
+                          ? Text(
+                              'Auto',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: isSelected
+                                    ? theme.colorScheme.primary
+                                    : theme.colorScheme.onSurfaceVariant,
+                              ),
+                            )
+                          : (isSelected
+                              ? Icon(
+                                  Icons.check,
+                                  color: circleColor.computeLuminance() > 0.5 ? Colors.black : Colors.white,
+                                  size: 20,
+                                )
+                              : null),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 16),
             Row(
               children: <Widget>[
                 SizedBox(
