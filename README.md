@@ -711,7 +711,7 @@ The list is the working surface — there is nowhere else to go to change someth
 - **Add a note** to record why a charge happened. It appears on the row just right of the
   category pill, and is matched by the search box. Clearing the field and saving removes
   it — there is no separate delete.
-- **Swipe a row left to delete it**, with an **Undo** action on the snackbar. Delete is
+- **Swipe a row left to delete it**, with an **Undo** action on the floating UndoToast notification. Delete is
   permanent by design: a tombstone is recorded so the transaction is not re-imported by
   a later scan, and Undo lifts that tombstone and restores the row under its original
   id. Credits are listed here too, so a mis-parsed one can be removed.
@@ -736,8 +736,8 @@ The list is the working surface — there is nowhere else to go to change someth
   Bulk delete confirms first. That dialog is not ceremony: the selection bar's delete
   icon occupies exactly the screen position the overflow menu does otherwise, so a reach
   for the menu can land on it, and unlike a swipe nothing about tapping an app bar icon
-  reads as destructive. A single swipe-delete still goes straight through, since the
-  gesture is deliberate and the Undo snackbar catches it.
+  reads as  destructive, but cannot happen by accidental tap (unlike a dialog) because a swipe
+  gesture is deliberate and the Undo notification catches it.
 - **Paste an SMS** (FAB) feeds a message straight into the parser, prefilled with a
   sample, so the pipeline can be exercised without SMS permission.
 - **Merge merchant** and **Merge card / account** open the merge screen with that row's
@@ -764,7 +764,7 @@ each screen has three parts:
 - **All** — every current name, tick two or more and Merge.
 
 Merging asks what to call the result, offering the most-used spelling. That sheet is the
-confirmation; the snackbar behind it carries **Undo**.
+confirmation; the floating UndoToast behind it carries **Undo**.
 
 **Merging a merge works and does not resurrect anything.** Fold A and B into "Rapido", then
 fold "Rapido" and C into "Rapido Rides", and A and B are re-pointed at the new name rather
