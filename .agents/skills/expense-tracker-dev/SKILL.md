@@ -32,6 +32,25 @@ This skill covers the project structure, design invariants, database schema, SMS
 > 4. **Mandatory Git Workflow Protocol**:
 >    - **NEVER merge or push code directly to the `main` branch under any circumstances.**
 >    - All changes must be made on a feature or bugfix branch and merged exclusively via Pull Requests.
+>    - **Branch naming**: Use descriptive prefixes — `feature/`, `bugfix/`, `chore/`, etc. (e.g. `feature/undo-toast`).
+>    - **Full procedure when currently on `main`**:
+>      1. Create and switch to a new branch: `git checkout -b feature/<name>`
+>      2. Implement the changes, commit with a clear message.
+>      3. Push the branch: `git push -u origin feature/<name>`
+>      4. Open a Pull Request against `main` using the GitHub CLI: `gh pr create --base main --fill`
+>      5. Merge the PR: `gh pr merge --squash --delete-branch`
+>      6. Pull the merged main locally: `git checkout main && git pull`
+>      7. **Tag the release** (unless the user explicitly says no tag): `git tag vX.Y.Z && git push origin vX.Y.Z`
+>         - Follow semantic versioning: patch bump (`vX.Y.Z+1`) for bug fixes/minor UI, minor bump (`vX.Y+1.0`) for new features.
+>         - Check the latest tag with `git tag --sort=-version:refname | head -5` before deciding the next version.
+>    - **Full procedure when already on a feature/bugfix branch** (not `main`):
+>      1. Continue making changes and committing on the current branch.
+>      2. Push the branch: `git push -u origin <current-branch>`
+>      3. Open a PR against `main`: `gh pr create --base main --fill`
+>      4. Merge the PR: `gh pr merge --squash --delete-branch`
+>      5. Pull the merged main locally: `git checkout main && git pull`
+>      6. **Tag the release** (unless the user explicitly says no tag) — same semver rules as above.
+>    - **Tagging is optional**: The user will explicitly say "no tag" or "skip tag" if they don't want one. Otherwise, always tag after merging.
 
 ---
 

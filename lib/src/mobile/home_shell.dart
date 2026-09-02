@@ -40,6 +40,7 @@ import 'sms_source.dart';
 import 'sync_client.dart';
 import 'sync_prefs.dart';
 import 'update_service.dart';
+import 'widgets/undo_toast.dart';
 
 
 class TuExpenseTrackerApp extends StatelessWidget {
@@ -684,20 +685,16 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         .toList();
     if (!mounted) return;
 
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(gone.length == 1
-            ? 'Deleted ${gone.single.merchant}'
-            : 'Deleted ${gone.length} transactions'),
-        action: SnackBarAction(
-          label: 'Undo',
-          onPressed: () async {
-            await _db.restoreTransactions(tombstones);
-            await _load();
-          },
-        ),
-      ));
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    UndoToast.controllerOf(context).show(
+      message: gone.length == 1
+          ? 'Deleted ${gone.single.merchant}'
+          : 'Deleted ${gone.length} transactions',
+      onUndo: () async {
+        await _db.restoreTransactions(tombstones);
+        await _load();
+      },
+    );
   }
 
   // ---- Selection ----------------------------------------------------------
@@ -1031,7 +1028,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       onPopInvokedWithResult: (bool didPop, Object? result) {
         if (!didPop) _clearSelection();
       },
-      child: Scaffold(
+      child: UndoToast(
+        child: Scaffold(
         // Selection only ever happens on the ledger, so it outranks the tab.
         appBar: selecting
             ? _selectionAppBar(view.visible)
@@ -1123,6 +1121,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           ],
         ),
       ),
+    ),   // UndoToast
     );
   }
 }
