@@ -112,10 +112,15 @@ Banks often send inconsistent names for the exact same account or shop (e.g., `H
       </td>
     </tr>
     <tr>
-      <td align="center" colspan="2">
-        <img src="docs/screenshots/themes.png" alt="Themes & Appearance Settings" width="50%" />
+      <td align="center" width="50%">
+        <img src="docs/screenshots/themes.png" alt="Themes & Appearance Settings" width="100%" />
         <br />
-        <strong>🎨 Appearance, OLED Pitch Black & Icon Packs</strong>
+        <strong>🎨 Appearance & OLED Mode</strong>
+      </td>
+      <td align="center" width="50%">
+        <img src="docs/screenshots/undo_toast.png" alt="Floating UndoToast Notification" width="100%" />
+        <br />
+        <strong>⏱️ UndoToast & Timed Dismiss</strong>
       </td>
     </tr>
   </table>
