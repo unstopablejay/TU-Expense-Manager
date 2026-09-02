@@ -11,6 +11,7 @@ import '../../core/models.dart';
 import '../../ui_shared/loading_dialog.dart';
 import '../database.dart';
 import '../widgets/settings_header.dart';
+import '../widgets/undo_toast.dart';
 
 /// Folds several labels for one real card, account or merchant into one name.
 ///
@@ -126,21 +127,17 @@ class _MergeNamesScreenState extends State<MergeNamesScreen> {
     );
     if (!mounted) return;
 
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(message),
-        action: SnackBarAction(
-          label: 'Undo',
-          onPressed: () async {
-            await _db.setAliases(widget.kind, before);
-            await Future.wait(<Future<void>>[
-              _load(),
-              if (widget.onChanged != null) widget.onChanged!(),
-            ]);
-          },
-        ),
-      ));
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    UndoToast.controllerOf(context).show(
+      message: message,
+      onUndo: () async {
+        await _db.setAliases(widget.kind, before);
+        await Future.wait(<Future<void>>[
+          _load(),
+          if (widget.onChanged != null) widget.onChanged!(),
+        ]);
+      },
+    );
   }
 
   Future<void> _mergeSelected() async {
@@ -232,56 +229,58 @@ class _MergeNamesScreenState extends State<MergeNamesScreen> {
       onPopInvokedWithResult: (bool didPop, Object? result) {
         if (!didPop) _clearSelection();
       },
-      child: Scaffold(
-        appBar: _appBar(),
-        body: _loading
-            ? const Center(child: CircularProgressIndicator())
-            : names.isEmpty
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(32),
-                      child: Text(
-                        'Nothing to merge yet — no transactions have been '
-                        'recorded.',
-                        textAlign: TextAlign.center,
-                        style: theme.textTheme.bodyMedium,
-                      ),
-                    ),
-                  )
-                : ListView(
-                    padding: const EdgeInsets.only(bottom: 24),
-                    children: <Widget>[
-                      if (merged.isNotEmpty) ...<Widget>[
-                        SettingsHeader('Merged'),
-                        for (final String canonical in merged)
-                          _MergedTile(
-                            canonical: canonical,
-                            labels: _labels[canonical] ?? <String>{},
-                            onSeparate: () => _separate(canonical),
-                          ),
-                        const Divider(height: 32),
-                      ],
-                      if (suggestions.isNotEmpty) ...<Widget>[
-                        SettingsHeader('Looks like duplicates'),
-                        for (final List<String> group in suggestions)
-                          _SuggestionCard(
-                            group: group,
-                            counts: _counts,
-                            onMerge: () => _mergeSuggested(group),
-                          ),
-                        const Divider(height: 32),
-                      ],
-                      SettingsHeader('All ${widget.kind.plural}'),
-                      for (final String name in names)
-                        _NameTile(
-                          name: name,
-                          count: _counts[name] ?? 0,
-                          selected: _selected.contains(name),
-                          selecting: _selected.isNotEmpty,
-                          onTap: () => _toggle(name),
+      child: UndoToast(
+        child: Scaffold(
+          appBar: _appBar(),
+          body: _loading
+              ? const Center(child: CircularProgressIndicator())
+              : names.isEmpty
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(32),
+                        child: Text(
+                          'Nothing to merge yet — no transactions have been '
+                          'recorded.',
+                          textAlign: TextAlign.center,
+                          style: theme.textTheme.bodyMedium,
                         ),
-                    ],
-                  ),
+                      ),
+                    )
+                  : ListView(
+                      padding: const EdgeInsets.only(bottom: 24),
+                      children: <Widget>[
+                        if (merged.isNotEmpty) ...<Widget>[
+                          SettingsHeader('Merged'),
+                          for (final String canonical in merged)
+                            _MergedTile(
+                              canonical: canonical,
+                              labels: _labels[canonical] ?? <String>{},
+                              onSeparate: () => _separate(canonical),
+                            ),
+                          const Divider(height: 32),
+                        ],
+                        if (suggestions.isNotEmpty) ...<Widget>[
+                          SettingsHeader('Looks like duplicates'),
+                          for (final List<String> group in suggestions)
+                            _SuggestionCard(
+                              group: group,
+                              counts: _counts,
+                              onMerge: () => _mergeSuggested(group),
+                            ),
+                          const Divider(height: 32),
+                        ],
+                        SettingsHeader('All ${widget.kind.plural}'),
+                        for (final String name in names)
+                          _NameTile(
+                            name: name,
+                            count: _counts[name] ?? 0,
+                            selected: _selected.contains(name),
+                            selecting: _selected.isNotEmpty,
+                            onTap: () => _toggle(name),
+                          ),
+                      ],
+                    ),
+        ),
       ),
     );
   }

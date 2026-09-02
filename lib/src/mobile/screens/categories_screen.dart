@@ -7,6 +7,7 @@ import '../../core/models.dart';
 import '../../ui_shared/emoji_picker_sheet.dart';
 import '../../ui_shared/palette.dart';
 import '../database.dart';
+import '../widgets/undo_toast.dart';
 
 /// Every category, what is filed under it, and the two ways to change the list:
 /// add one, or be rid of one.
@@ -138,23 +139,17 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
     if (!mounted) return;
 
     final int moved = usage.txnCount;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(
-        content: Text(
-          moved == 0
-              ? 'Deleted ${usage.category.name}'
-              : 'Deleted ${usage.category.name} · $moved '
-                  'transaction${moved == 1 ? '' : 's'} now under ${into.name}',
-        ),
-        action: SnackBarAction(
-          label: 'Undo',
-          onPressed: () async {
-            await _db.restoreCategory(deletion);
-            await _load();
-          },
-        ),
-      ));
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    UndoToast.controllerOf(context).show(
+      message: moved == 0
+          ? 'Deleted ${usage.category.name}'
+          : 'Deleted ${usage.category.name} · $moved '
+              'transaction${moved == 1 ? '' : 's'} now under ${into.name}',
+      onUndo: () async {
+        await _db.restoreCategory(deletion);
+        await _load();
+      },
+    );
   }
 
   String _subtitle(CategoryUsage usage) {
@@ -173,62 +168,64 @@ class _CategoriesScreenState extends State<CategoriesScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    return Scaffold(
-      appBar: AppBar(title: const Text('Categories')),
-      floatingActionButton: _loading
-          ? null
-          : FloatingActionButton.extended(
-              onPressed: _add,
-              icon: const Icon(Icons.add),
-              label: const Text('New category'),
-            ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : ListView.builder(
-              // Clear of the button, which floats over the last row otherwise.
-              padding: const EdgeInsets.only(bottom: 88),
-              itemCount: _usage.length,
-              itemBuilder: (BuildContext context, int index) {
-                final CategoryUsage usage = _usage[index];
-                final String name = usage.category.name;
+    return UndoToast(
+      child: Scaffold(
+        appBar: AppBar(title: const Text('Categories')),
+        floatingActionButton: _loading
+            ? null
+            : FloatingActionButton.extended(
+                onPressed: _add,
+                icon: const Icon(Icons.add),
+                label: const Text('New category'),
+              ),
+        body: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : ListView.builder(
+                // Clear of the button, which floats over the last row otherwise.
+                padding: const EdgeInsets.only(bottom: 88),
+                itemCount: _usage.length,
+                itemBuilder: (BuildContext context, int index) {
+                  final CategoryUsage usage = _usage[index];
+                  final String name = usage.category.name;
 
-                return ListTile(
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  leading: CategoryAvatar(
-                    category: name,
-                    explicitIcon: usage.category.icon,
-                    size: 44,
-                  ),
-                  title: Text(
-                    name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  subtitle: Text(_subtitle(usage)),
-                  onTap: _isFallback(usage) ? null : () => _edit(usage),
-                  trailing: _isFallback(usage)
-                      ? null
-                      : Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: <Widget>[
-                            IconButton(
-                              tooltip: 'Edit $name',
-                              icon: const Icon(Icons.edit_outlined),
-                              onPressed: () => _edit(usage),
-                            ),
-                            IconButton(
-                              tooltip: 'Delete $name',
-                              icon: const Icon(Icons.delete_outline),
-                              color: theme.colorScheme.error,
-                              onPressed: () => _delete(usage),
-                            ),
-                          ],
-                        ),
-                );
-              },
-            ),
+                  return ListTile(
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    leading: CategoryAvatar(
+                      category: name,
+                      explicitIcon: usage.category.icon,
+                      size: 44,
+                    ),
+                    title: Text(
+                      name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: Text(_subtitle(usage)),
+                    onTap: _isFallback(usage) ? null : () => _edit(usage),
+                    trailing: _isFallback(usage)
+                        ? null
+                        : Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: <Widget>[
+                              IconButton(
+                                tooltip: 'Edit $name',
+                                icon: const Icon(Icons.edit_outlined),
+                                onPressed: () => _edit(usage),
+                              ),
+                              IconButton(
+                                tooltip: 'Delete $name',
+                                icon: const Icon(Icons.delete_outline),
+                                color: theme.colorScheme.error,
+                                onPressed: () => _delete(usage),
+                              ),
+                            ],
+                          ),
+                  );
+                },
+              ),
+      ),
     );
   }
 }
